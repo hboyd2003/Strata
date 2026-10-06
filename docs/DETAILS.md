@@ -752,6 +752,11 @@ curl -X POST "http://127.0.0.1:8080/slots/0?action=restore" -H "Content-Type: ap
   rope configuration, a loaded control vector and the arithmetic switches). Sampling, seeds, draft tuning and the expert
   tier are not in it. Do not change model files while their sessions are kept. The hash detects accidental corruption and does
   not authenticate a file: restore only files this engine wrote.
+- A restore does not hold the K/V in RAM: a read pass validates the whole file (running state, K/V headers, every count,
+  the payload hash), then an apply pass reads it again and copies the K/V into the pools 16 MiB at a time, so a session
+  larger than RAM restores (peak: two 16 MiB buffers and the running-state metadata). The apply pass is bound to the read
+  pass; a mismatch before the first applied block is a clean refusal, after it the engine ends rather than decode from
+  bytes it cannot vouch for.
 - Errors: `501` without `--slot-save-path` or with parallel requests; `400` for a slot other than 0, an unknown action, a refused
   file name or an invalid file; `404` for a missing file; `503` when the model is not loaded or RAM is short; `507` when the disk has
   no room; `500` for other I/O failures or an engine that ended. `error.published: true` means a save failed after its new
