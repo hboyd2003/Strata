@@ -7,6 +7,11 @@
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
+> **gfx906 fork:** This repository is a fork of [Niko1221/Strata](https://github.com/Niko1221/Strata).
+> The [gfx906 start page](docs/gfx906/START-HERE.md) explains its experimental scope, exact artifact
+> provenance, CPU checks, and open GPU validation. The published container is a historical binary
+> artifact; this source HEAD has not been shown to reproduce it.
+
 <h3 align="center">Run a state-of-the-art model on your own gaming PC</h3>
 
 <p align="center">Support for NVIDIA, AMD, Intel · Windows, Linux, Mac · free and open source</p>
