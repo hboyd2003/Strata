@@ -12,6 +12,30 @@
 > provenance, CPU checks, and open GPU validation. The published container is a historical binary
 > artifact; this source HEAD has not been shown to reproduce it.
 
+## Dual AMD MI50 (2x32 GB) — measured cached multi-agent inference
+
+Archived measurements from the published [gfx906 Docker image](https://hub.docker.com/r/cassettesgoboom/strata-gfx906),
+using cached multi-agent histories:
+
+| Mode | Actual context/agent | Strict overlap tok/s | Whole wave tok/s |
+| --- | ---: | ---: | ---: |
+| P2 serial | ~96K | 38.43 | 33.35 |
+| P2 serial | ~152K | 45.19 | 36.19 |
+| P3 serial | ~99K | 52.46 | 41.67 |
+| P3 serial | ~152K | 47.37 | 35.93 |
+| P4 AB/CD opt-in | ~33K | 67.10 | 55.73 |
+| P4 AB/CD opt-in | 102K | 71.17 | 53.94 |
+
+**Evidence limits:** these are measurements from the **ARCHIVED published binary**, not the latest source. Strict
+overlap is estimated from client SSE timing over the common-overlap interval. The rows come from different runs
+and schedulers, so they do not establish a causal speedup. In the P4 102K run, the agents emitted 512/512/512/473
+tokens; the fourth agent stopped naturally, and the strict overlap estimate remains 71.17 tok/s. Exact token and
+recurrent-state parity for four 102K AB/CD agents remains **open**. P2 at ~192K demonstrates capacity and cache
+reuse only, with 65-token continuations; it is not a sustained-rate result.
+
+Read the [evidence](docs/gfx906/EVIDENCE.md), [provenance](docs/gfx906/PROVENANCE.md), and [gfx906 start page](docs/gfx906/START-HERE.md)
+for scope, artifact identity, and current validation status.
+
 <h3 align="center">Run a state-of-the-art model on your own gaming PC</h3>
 
 <p align="center">Support for NVIDIA, AMD, Intel · Windows, Linux, Mac · free and open source</p>
