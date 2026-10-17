@@ -175,6 +175,7 @@ bool window_slot_copy_main(bool into_slot, int slot, int64_t upto, bool kv_only,
 #include <vector>
 
 #include "strata/program/native_trace_id.hpp"
+#include "strata/program/native_window_trace.hpp"
 
 // logprobs=K / allowed=...: one `LP` line for the token just emitted, from `ver`'s head
 // logits for the window row it came from (before sampling, penalties and temperature).
@@ -12578,6 +12579,11 @@ int main(int argc, char** argv) {
         std::vector<CoReq> co_pending, co_set;
         const char* correctness_trace_env = std::getenv("STRATA_CORRECTNESS_TRACE");
         const bool correctness_trace = correctness_trace_env != nullptr && std::strcmp(correctness_trace_env, "1") == 0;
+        if (correctness_trace && (o.batch > 0 || o.pipeline_windows > 0)) {
+            std::fprintf(stderr, "strata serve: STRATA_CORRECTNESS_TRACE currently supports serial windows only; "
+                                 "disable --batch and --pipeline-windows\n");
+            return 2;
+        }
         auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
         auto try_next_line = [&](std::string& out) -> bool {
             std::lock_guard<std::mutex> lk(in_mu);
@@ -16072,6 +16078,7 @@ int main(int argc, char** argv) {
             strata::core::gated::Packet proposal; // immutable through the synchronous verifier call
             bool first_window = true;
             int64_t produced_n = 0, sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
+            int64_t trace_window_index = 0;
             int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts
             int64_t t2_rej[8] = {}, t2_hit[8] = {};   // STRATA_MTP_TOP2: rejections inside the MTP drafts by depth, runner-up hits
             int64_t dp_tested[8] = {}, dp_ok[8] = {};   // STRATA_SPEC_DEPTH=1: MTP drafts tested / accepted by depth
@@ -17077,7 +17084,10 @@ int main(int argc, char** argv) {
                 const bool initial_round = first_window;   // a single-row window: no proposal to learn from
                 first_window = false;
                 bool eos = false;
+                std::vector<int32_t> trace_token_ids;
+                if (correctness_trace) trace_token_ids.reserve((size_t) (a + 1));
                 for (int i = merged ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {   // (merged: row T-1 only)
+                    if (correctness_trace) trace_token_ids.push_back(outv[(size_t) i]);
                     std::printf("T %d\n", (int) outv[(size_t) i]);
                     if (req_logprobs >= 0) emit_lp_line(ver, i, outv[(size_t) i], req_logprobs, req_allowed);
                     strata::core::progress_beat();
@@ -17087,6 +17097,20 @@ int main(int argc, char** argv) {
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
                 std::fflush(stdout);
+                if (correctness_trace) {
+                    // Suffix lookup replaces MTP; chained tokens beyond T_mtp are not MTP decisions.
+                    const int64_t mtp_offered = use_mtp && !from_sfx ? T_mtp - 1 : 0;
+                    const int64_t mtp_accepted = std::min<int64_t>(a, mtp_offered);
+                    const std::string record = strata::program::serial_window_record(
+                        req_trace_id.value(), trace_window_index++, trace_token_ids,
+                        mtp_accepted, mtp_offered);
+                    if (record.empty()) {
+                        std::fprintf(stderr, "strata serve: invalid serial correctness trace window\n");
+                        return 1;
+                    }
+                    std::fprintf(stderr, "%s\n", record.c_str());
+                    std::fflush(stderr);
+                }
                 ++rounds;
                 if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
                 const Clock::time_point tw2 = Clock::now();
