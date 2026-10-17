@@ -1773,6 +1773,8 @@ class StrataEngine:
         with a much shorter prompt (#656: `BYIELD <slot>`; the part read waits in a slot and the read goes on after).
         A consumer that stops early leaves the engine in step: the solo request is STOPped and read to its DONE, an
         admission to its BADM, a slot is BSTOPped and freed at its BDONE."""
+        if native_trace.enabled():
+            native_trace.field(request_id)    # fail before _take_control can acquire the engine's control lock
         if not self.alive():
             raise EngineDied("the engine is unavailable; this request was not sent")
         self.progress, self.progress_ms, self.reused = None, 0, 0
@@ -1787,7 +1789,6 @@ class StrataEngine:
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
-        trace_key = f" {native_trace.field(request_id)}" if native_trace.enabled() else ""
         btrace("ctl acquired")
         slot, gen0, reserved = None, None, None
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
@@ -1804,7 +1805,8 @@ class StrataEngine:
                 with self.slot_cv:
                     alone = not any(self.slot_busy) and self.waiting == 0
                 if alone and left > 1:
-                    head = f"GENI {left}{keys}{trace_key} {embeddings}" if embeddings else f"GEN {left}{keys}{trace_key}"
+                    head = native_trace.command("GENI" if embeddings else "GEN", left, keys, request_id,
+                                                embeddings=embeddings)
                     self._last_done = None                  # (#879: this request's DONE decides below)
                     deadline = getattr(cancel, "_strata_queue_deadline", None)
                     if deadline is not None and time.monotonic() >= deadline:
@@ -1928,7 +1930,8 @@ class StrataEngine:
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
-                    head = f"BGENI {slot} {left}{keys}{trace_key} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}{trace_key}"
+                    head = native_trace.command("BGENI" if embeddings else "BGEN", left, keys, request_id,
+                                                slot=slot, embeddings=embeddings)
                     live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
                             "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
                             "started": time.time(), "first_token": None}
@@ -2196,9 +2199,8 @@ class StrataEngine:
         self.progress, self.progress_ms, self.reused = None, 0, 0
         self.prefill_tok_s_mean = None
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
-        trace_key = f" {native_trace.field(request_id)}" if native_trace.enabled() else ""
-        head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})}{trace_key} {embeddings}" if embeddings else \
-            f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}{trace_key}"
+        head = native_trace.command("GENI" if embeddings else "GEN", int(max_new),
+                                    self.sampling_keys(sampling or {}), request_id, embeddings=embeddings)
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
