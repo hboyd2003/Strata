@@ -11635,7 +11635,7 @@ int main(int argc, char** argv) {
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                     std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms);
                     if (correctness_trace && !sl.trace_id.empty())
-                        std::fprintf(stderr, "strata correctness: request=%s slot=%d state=complete finish=nonfinite produced=%lld\n",
+                        std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=nonfinite produced=%lld\n",
                                      sl.trace_id.c_str(), b, (long long) sl.produced);
                     sl.active = false;
                     sl.cached = false;
@@ -11655,7 +11655,7 @@ int main(int argc, char** argv) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms);
                         if (correctness_trace && !sl.trace_id.empty())
-                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=complete finish=%s produced=%lld\n",
+                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=%s produced=%lld\n",
                                          sl.trace_id.c_str(), b, fin, (long long) sl.produced);
                         sl.active = false;
                         sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
@@ -11823,7 +11823,7 @@ int main(int argc, char** argv) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld nonfinite %.1f\n", gi * GS + t, (long long) sl.produced, ms);
                         if (correctness_trace && !sl.trace_id.empty())
-                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=complete finish=nonfinite produced=%lld\n",
+                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=nonfinite produced=%lld\n",
                                          sl.trace_id.c_str(), gi * GS + t, (long long) sl.produced);
                         sl.active = false;
                         sl.cached = false;
@@ -11844,7 +11844,7 @@ int main(int argc, char** argv) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld %s %.1f\n", gi * GS + t, (long long) sl.produced, fin, ms);
                         if (correctness_trace && !sl.trace_id.empty())
-                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=complete finish=%s produced=%lld\n",
+                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=%s produced=%lld\n",
                                          sl.trace_id.c_str(), gi * GS + t, fin, (long long) sl.produced);
                         sl.active = false;
                         // a pipelined slot is a cache again (#857: a request left alone in its slot goes back to the solo path with its
@@ -15422,7 +15422,7 @@ int main(int argc, char** argv) {
                         (long long) req_offload, chain_txt, (long long) req_chunk,
                         (long long) (sp.chain_experts_streamed() - streamed0));
             if (correctness_trace && admit_slot < 0)
-                std::fprintf(stderr, "strata correctness: request=%s slot=-1 state=complete finish=%s produced=%lld\n",
+                std::fprintf(stderr, "strata correctness: request=%s slot=-1 state=native_leg_complete finish=%s produced=%lld\n",
                              req_trace_id.c_str(), finish, (long long) produced_n);
             std::fflush(stdout);
             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
@@ -15518,7 +15518,7 @@ int main(int argc, char** argv) {
                 }
                 std::printf("BADM %d %d\n", admit_slot, cont ? 1 : 0);
                 if (correctness_trace && !cont)
-                    std::fprintf(stderr, "strata correctness: request=%s slot=%d state=complete finish=%s produced=%lld\n",
+                    std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=%s produced=%lld\n",
                                  req_trace_id.c_str(), admit_slot, finish, (long long) produced_n);
                 if (trace && piped && cont) {
                     rows_wait = "the admission";
