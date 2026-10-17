@@ -31,7 +31,7 @@ macro(strata_gfx906_mmq)
     set(_strata_tq_overlay_dir ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gfx906-mmq/ggml-cuda-tq)   # patched mmq.cuh etc., first on the path
     set(_strata_mmq_types q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q8_0
                           q4_k q5_k q5_1 q6_k)   # + the K-quants: the dense GGUF projections (STRATA_DENSE_MMQ) and K-quant experts
-    set(_strata_mmq_sources src/prefill/moe_mmq.cu src/prefill/moe_iq4_w4a8.cu src/prefill/mmq_nvfp4_w4a8.cu
+    set(_strata_mmq_sources src/prefill/moe_mmq.cu src/prefill/moe_iq4_w4a8.cu src/prefill/rp_moe.cu src/prefill/mmq_nvfp4_w4a8.cu
                             src/prefill/ggml_cuda_host.cu ${_strata_tq_overlay_dir}/quantize.cu)
     foreach(_t IN LISTS _strata_mmq_types)
       list(APPEND _strata_mmq_sources ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
@@ -66,4 +66,7 @@ macro(strata_gfx906_mmq)
       target_compile_definitions(${_strata_t} PRIVATE GGML_USE_HIP)
     endforeach()
     message(STATUS "Strata (gfx906 fork): llama.cpp's MMQ prompt kernels from third_party/gfx906-mmq")
+    # gfx906: mx-llama.cpp's repacked IQ4_NL expert GEMM (rp_moe) against MMQ, correctness and time
+    add_executable(rp_expert_bench src/prefill/rp_expert_bench.cpp)
+    target_link_libraries(rp_expert_bench PRIVATE strata_mmq ggml-base CUDA::cudart)
 endmacro()
