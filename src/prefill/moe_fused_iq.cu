@@ -1460,7 +1460,11 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
     if (f16_wide) native_f16_kernel<T, GU, 2 * kTileRows><<<grid_f, f16::THREADS, 0, s>>>(b, g, tb, ACT, src, OUT, DM); \
     else native_f16_kernel<T, GU, kTileRows><<<grid_f, f16::THREADS, 0, s>>>(b, g, tb, ACT, src, OUT, DM); \
 } while (0)
+#if defined(STRATA_HIP_GFX906)   // gfx11-only moe_f16_kq.cu is not part of the gfx906 build (this path never runs there)
+        if (false) {}
+#else
         if (f16 && f16kq::covers(g.gu_type)) f16kq::gate_up(b, g, tb.ts, tb.tiles, tb.off, n, n_expert, tiles, xa8, src, ha8, s);
+#endif
         else if (f16 && f16_gu(g.gu_type)) {
 #define STRATA_F16_GU(T) STRATA_F16_LAUNCH(T, true, f16::GU_NFB, xa8, ha8, nullptr)
             switch (g.gu_type) {
@@ -1485,7 +1489,11 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
         }
 #undef STRATA_NW_GU
 #define STRATA_NW_D(T) do { if (occ_d) native_w11_kernel<T, false, true, NW_LB><<<g_d, NW_THREADS, 0, s>>>(b, g, tb, ha8, src, nullptr, dm); else native_w11_kernel<T, false><<<g_d, NW_THREADS, 0, s>>>(b, g, tb, ha8, src, nullptr, dm); } while (0)
+#if defined(STRATA_HIP_GFX906)   // gfx11-only moe_f16_kq.cu is not part of the gfx906 build (this path never runs there)
+        if (false) {}
+#else
         if (f16 && f16kq::covers_down(g.d_type)) f16kq::down(b, g, tb.ts, tb.tiles, tb.off, n, n_expert, tiles, ha8, dm, s);
+#endif
         else if (f16 && f16_d(g.d_type)) {
             if (g.d_type == T_Q2_0) STRATA_F16_LAUNCH(T_Q2_0, false, f16::D_NFB, ha8, nullptr, dm);
             else if (g.d_type == T_Q8_0) STRATA_F16_LAUNCH(T_Q8_0, false, f16::D_NFB, ha8, nullptr, dm);
