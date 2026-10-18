@@ -437,6 +437,141 @@ def _env_to_user(messages: list[dict]) -> list[dict]:
     return messages
 
 
+# Config "system_to_user" (opt-in): lines of the system message that change from request to request - a client's date
+# and time (LibreChat's web_search context writes "Conversation Date & Time: <ISO time>" right after the tools, before
+# ~5K tokens of instructions) - leave it for the front of a user message, so every new chat shares the system turn.
+# The lines are learned: a line that differs from the same line of a recent system message only in its numbers and its
+# day or month names is a changing line, and from then on every line of that shape moves (the log says so, once per
+# shape).  "patterns": regular expressions for lines that always move; "ignore": lines that never move nor are learned;
+# "learn": false keeps only the patterns; "state": a file that keeps the learned shapes across restarts; "place":
+# "latest" (default) or "first" user message.  "latest" suits a client that stamps every turn: only the latest user
+# message changes, so a turn reads the previous turn again (its tool results included).  "first" costs nothing while a
+# conversation keeps its stamp (LibreChat 0.8.6 - 0.8.8-rc1) and reads the whole conversation again when it does not.
+_MASK_NUMBER = re.compile(r"\d+")
+_MASK_NAME = re.compile(r"\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|mon|tue|wed|thu|fri|sat|sun|january|february|"
+                        r"march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|"
+                        r"jul|aug|sept?|oct|nov|dec)\b", re.I)
+
+
+def _line_shape(line: str) -> str:
+    return _MASK_NAME.sub("@", _MASK_NUMBER.sub("#", line))
+
+
+class SystemToUser:
+    RECENT = 8          # system messages each new one is compared with
+    MIN_LETTERS = 4     # a shape needs this many letters left: a bare "12:30" line is not learned
+
+    def __init__(self, learn: bool = True, patterns=(), ignore=(), state: str | None = None, place: str = "latest"):
+        if not isinstance(learn, bool):
+            raise ValueError(f'"learn" must be true or false, not {learn!r}')
+        if place not in ("latest", "first"):
+            raise ValueError(f'"place" must be "latest" or "first", not {place!r}')
+        for name, v in (("patterns", patterns), ("ignore", ignore)):
+            if not isinstance(v, (list, tuple)) or not all(isinstance(x, str) and x for x in v):
+                raise ValueError(f'"{name}" must be a list of regular expressions, not {v!r}')
+        if state is not None and (not isinstance(state, str) or not state):
+            raise ValueError(f'"state" must be a file path, not {state!r}')
+        try:
+            self.patterns = [re.compile(x) for x in patterns]
+            self.ignore = [re.compile(x) for x in ignore]
+        except re.error as e:
+            raise ValueError(f"bad regular expression: {e}") from None
+        self.learn, self.place = learn, place
+        self.state = Path(state) if state else None
+        self.learned: set[str] = set()
+        self.recent: OrderedDict[str, list[str]] = OrderedDict()
+        self.lock = threading.Lock()
+        if self.state is not None and self.state.exists():
+            try:
+                shapes = json.loads(self.state.read_text(encoding="utf-8")).get("learned", [])
+                self.learned = {s for s in shapes if isinstance(s, str) and not self.ignored(s)}
+                print(f"[strata] system_to_user: {len(self.learned)} learned line shape(s) from {self.state}", flush=True)
+            except (OSError, ValueError, AttributeError) as e:
+                print(f"[strata] system_to_user: {self.state} not read ({e}); learning from the start", flush=True)
+
+    def ignored(self, line: str) -> bool:
+        return any(rx.search(line) for rx in self.ignore)
+
+    def moves(self, line: str) -> bool:
+        if not line.strip() or self.ignored(line):
+            return False
+        return any(rx.search(line) for rx in self.patterns) or (self.learn and _line_shape(line) in self.learned)
+
+    def observe(self, text: str) -> None:
+        """Compare a system message with the recent ones and learn the shapes of the lines that changed."""
+        import difflib
+        lines = text.split("\n")
+        with self.lock:
+            if text in self.recent:
+                self.recent.move_to_end(text)
+                return
+            found = []
+            for old in self.recent.values():
+                sm = difflib.SequenceMatcher(None, old, lines, autojunk=False)
+                for op, a0, a1, b0, b1 in sm.get_opcodes():
+                    if op != "replace" or a1 - a0 != b1 - b0:
+                        continue
+                    for a, b in zip(old[a0:a1], lines[b0:b1]):
+                        shape = _line_shape(b)
+                        if (shape in self.learned or shape in found or _line_shape(a) != shape
+                                or sum(ch.isalpha() for ch in shape) < self.MIN_LETTERS or self.ignored(b)):
+                            continue
+                        found.append(shape)
+                        print(f"[strata] system_to_user: learned a changing line {shape[:160]!r} "
+                              f"({a[:120]!r} -> {b[:120]!r})", flush=True)
+            self.recent[text] = lines
+            while len(self.recent) > self.RECENT:
+                self.recent.popitem(last=False)
+            if found:
+                self.learned.update(found)
+                self._save()
+
+    def _save(self) -> None:
+        if self.state is None:
+            return
+        try:
+            tmp = self.state.with_name(self.state.name + ".tmp")
+            tmp.write_text(json.dumps({"learned": sorted(self.learned)}, indent=1, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.state)
+        except OSError as e:
+            print(f"[strata] system_to_user: {self.state} not written ({e})", flush=True)
+
+
+SYSTEM_TO_USER: SystemToUser | None = None
+
+
+def _system_to_user(messages: list[dict]) -> list[dict]:
+    stu = SYSTEM_TO_USER
+    if stu is None or not messages or messages[0].get("role") != "system":
+        return messages
+    sys_text = messages[0].get("content")
+    if not isinstance(sys_text, str):
+        return messages
+    if stu.learn:
+        stu.observe(sys_text)
+    users = [i for i in range(1, len(messages)) if messages[i].get("role") == "user"]
+    if not users:
+        return messages
+    keep, moved = [], []
+    for line in sys_text.split("\n"):
+        (moved if stu.moves(line) else keep).append(line)
+    if not moved:
+        return messages
+    i = users[-1] if stu.place == "latest" else users[0]
+    block = "\n".join(moved)
+    c = messages[i].get("content")
+    if isinstance(c, str):
+        nc = block + "\n\n" + c
+    elif isinstance(c, list):
+        nc = [{"type": "text", "text": block + "\n\n"}] + c
+    else:
+        return messages
+    out = list(messages)
+    out[0] = dict(messages[0], content="\n".join(keep))
+    out[i] = dict(messages[i], content=nc)
+    return out
+
+
 def _late_system_to_user(messages: list[dict]) -> list[dict]:
     """The chat template takes a system message only at the start ("System message must be at the beginning").
     Clients also send them mid-conversation - Claude Code's hook context as {"role": "system"} after the first user
@@ -615,7 +750,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
-    return _env_to_user(_late_system_to_user(messages)), tools, kwargs
+    return _system_to_user(_env_to_user(_late_system_to_user(messages))), tools, kwargs
 
 
 BILLING_HEADER = "x-anthropic-billing-header:"
@@ -716,7 +851,7 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
         # A config's reasoning_effort still applies: Service.with_shared sets output_config before this runs.  A
         # request that gives its own reasoning_budget_tokens (#123) asks for thinking, so it thinks as before.
         kwargs["enable_thinking"] = False
-    return _env_to_user(_late_system_to_user(messages)), tools, kwargs
+    return _system_to_user(_env_to_user(_late_system_to_user(messages))), tools, kwargs
 
 
 # ------------------------------------------------------------------------------------------------ output parser
