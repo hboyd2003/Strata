@@ -33,29 +33,17 @@ change does not resolve the separate raw diagnostic callback lifetime or
 general graph/session teardown contract, and it does not port AB/CD. Issue #24
 remains open.
 
-**Current fork main (checked 2026-10-18):**
-[`3f076fea5a98f69d2fec1d364b21380eb1a67e95`](https://github.com/cassettesgoboom/strata-gfx906/commit/3f076fea5a98f69d2fec1d364b21380eb1a67e95).
-Since the reviewed engine-source snapshot below, PR [#37](https://github.com/cassettesgoboom/strata-gfx906/pull/37)
-refreshed public state and provenance, PR [#38](https://github.com/cassettesgoboom/strata-gfx906/pull/38)
-clarified the synthetic v3 command-identity contract, and PR
-[#39](https://github.com/cassettesgoboom/strata-gfx906/pull/39) redacted local roots from three benchmark
-configuration snapshots. PR [#40](https://github.com/cassettesgoboom/strata-gfx906/pull/40) then refreshed this
-state and provenance record. These commits change documentation, parity-contract/tests, or benchmark configuration
-records; they do not add a native AB/CD runtime port or new GPU/parity evidence. Fork main remains based on
+**Reviewed current-source snapshot (checked 2026-10-18):** fork `main` at the engine-source review resolved to
+[`3f076fea5a98f69d2fec1d364b21380eb1a67e95`](https://github.com/cassettesgoboom/strata-gfx906/commit/3f076fea5a98f69d2fec1d364b21380eb1a67e95),
+merged by PR [#40](https://github.com/cassettesgoboom/strata-gfx906/pull/40). Earlier PRs
+[#37](https://github.com/cassettesgoboom/strata-gfx906/pull/37), [#38](https://github.com/cassettesgoboom/strata-gfx906/pull/38),
+and [#39](https://github.com/cassettesgoboom/strata-gfx906/pull/39) updated public state, parity-contract/tests,
+and sanitized benchmark configuration snapshots. Later PR [#42](https://github.com/cassettesgoboom/strata-gfx906/pull/42)
+refreshed documentation, and PR [#43](https://github.com/cassettesgoboom/strata-gfx906/pull/43) registered existing
+native trace helper tests with CMake/CTest. Those follow-up changes do not modify inference runtime behavior, add
+a native AB/CD runtime port, or provide new GPU/parity evidence. Fork main retains ancestry from
 [upstream `Niko1221/Strata`](https://github.com/Niko1221/Strata), and the latest upstream release checked here is
 [v0.1.45](https://github.com/Niko1221/Strata/releases/tag/v0.1.45).
-
-**Open source-review candidate (2026-10-18):** [PR #41](https://github.com/cassettesgoboom/strata-gfx906/pull/41)
-scopes MTP idle synchronization and resource cleanup to the drafter's captured CUDA/HIP device. Its isolated gfx906
-HIP compile and CPU checks are recorded in
-[`2026-10-17-mtp-device-scope-hip-build.json`](../../benchmarks/gfx906/receipts/2026-10-17-mtp-device-scope-hip-build.json).
-A short model-backed serial smoke then exercised the PR-source native binary on dual MI50 gfx906; the separate
-[`2026-10-18 MTP device-scope smoke receipt`](../../benchmarks/gfx906/receipts/2026-10-18-mtp-device-scope-smoke.json)
-records its exact source/binary identity and limits. The archived runtime image was used as a base with the new
-binary and Python source bind-mounted; no new image was built or published. Serial MTP was configured, but no
-offered/accepted counters were captured, so draft activity is not claimed. The smoke does not establish that the
-PR change fixes a reproduced runtime defect. No token/state parity or AB/CD runtime validation was performed;
-issue #24 remains open.
 
 **Reviewed engine-source snapshot (checked 2026-10-17 UTC):** the reviewed fork `main` at that source review was
 [`af45b70bf5cb7e61a0e0825c632397190a97e18b`](https://github.com/cassettesgoboom/strata-gfx906/commit/af45b70bf5cb7e61a0e0825c632397190a97e18b),
@@ -164,3 +152,24 @@ including slice-local resource ownership, device drain, and recovery of affected
 abort; then build from a pinned current-main revision and run an isolated GPU comparison against serial for ordered
 native token IDs and recurrent-state hashes at matching window ends. Keep AB/CD opt-in until those runtime checks
 pass. Archived source-to-image proof remains open.
+
+**PR #41 merged in current main (2026-10-18):** [PR #41](https://github.com/cassettesgoboom/strata-gfx906/pull/41)
+merged at [`9efd4da532b041be4cdef273e8da6cbd946a49d2`](https://github.com/cassettesgoboom/strata-gfx906/commit/9efd4da532b041be4cdef273e8da6cbd946a49d2).
+Its narrow change uses the existing `OnDevice` scope around `MtpDrafter::idle()` stream synchronization and
+destructor cleanup, selecting the CUDA/HIP device captured by that drafter and restoring the caller's device.
+It does not change scheduling, MTP acceptance, model arithmetic, or AB/CD behavior.
+
+PR validation recorded 77 passing tests from `python tools/gfx906.py test-cpu`, a passing workflow-equivalent C++20
+fake-runtime compile/run, and a passing CPU CMake target `on_device_scope_test` with CTest 1/1 using the pinned
+local llama.cpp dependency. The isolated Release/Ninja gfx906 HIP `strata` target completed 147/147 steps;
+`ldd` resolved all dependencies and `strata --help` passed with no GPU devices or model assets. The
+[compile receipt](../../benchmarks/gfx906/receipts/2026-10-17-mtp-device-scope-hip-build.json) records the
+toolchain, dependency and binary identity. The CPU helper test covers `OnDevice`; it would not fail if either
+MTP call-site guard were removed.
+
+The separate [2026-10-18 smoke receipt](../../benchmarks/gfx906/receipts/2026-10-18-mtp-device-scope-smoke.json)
+preserves the source and binary provenance for a short model-backed serial inference and conversation-reuse
+smoke. It used the archived runtime image as a base with the PR-source binary and Python server source mounted;
+no image was built or published. It had no MTP accepted/offered counters. No defect or call-site runtime failure
+was reproduced, and the smoke did not exercise the changed device-scoping path. This change does not port AB/CD,
+establish token or recurrent-state parity, or qualify a production image.
