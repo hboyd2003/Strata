@@ -198,3 +198,31 @@ git merge-tree --write-tree --name-only main xolotl/main | head -40
 
 Expected (from this assessment's same measurement): conflicts confined to `CMakeLists.txt`,
 `README.md`, `serve/server.py`, `src/core/verify.cpp`, `src/program/generate.cpp`.
+
+## Port log - 2026-10-18 (evening, while model downloads ran)
+
+- `xolotl-ggml.patch` **applies cleanly** to the pinned llama.cpp clone at
+  `/ai/engines/gfx906/llama.cpp-xolotl` (19 files, +720/-65); the **CPU** build of the patched
+  ggml is green (exit 0, `-j2`, 6m16s, log `/tmp/ggmlcpu.log`). The **HIP/gfx906** `ggml-cuda`
+  build is the one open decisive gate - held back by RAM only (needs `available >= ~10 GiB`;
+  downloads + the incumbent workload leave 4.8 GiB right now).
+- CUDA residue re-triage (line-level, added lines only): ggml patch has no hard CUDA blockers for
+  HIP - masked shuffles exist in HIP, the NVIDIA-cc probes in `lightning-indexer.cu` evaluate
+  false on gfx906 and take the existing fallback path. Engine side: `ds41_moe.cpp` is the only
+  file with graph calls (12) and they are **already mapped** by `hip_compat/strata_hip.h`
+  (`cudaGraph*` -> `hipGraph*`, both `cudaGraphInstantiate` overloads; ROCm 7.2's
+  `hipGraphInstantiate` keeps the legacy 5-arg form the CUDA-12 `(NULL,NULL,0)` calls use).
+  Syntax gates: `ds41_moe.cpp` (host, HIP defines) **exit 0**; `ds41_transcode.cu`
+  (`hipcc -x hip --offload-arch=gfx906 -fsyntax-only`) **exit 0**.
+- No engine `.cu/.cuh` under `tools/v41|glm|ds4` contains `wmma` or raw `cudaGraph` - the earlier
+  CUDA-feature tally maps to: ds41_moe.cpp (shimmed), the ggml patch's NVIDIA-guarded wmma
+  section (falls back on gfx906), and `dense_kernels.cu` (STRATA_DENSE, now OFF).
+- **Maya-L kernel verdict for gfx906**: gate/up IQ3_S(=21) and down IQ4_XS(=23) are both in the
+  AMD instantiation lists of `src/kernels/cuda/iq_kernels.cu` (gate/up {16,17,18,21,22,23,29,42,
+  143,11}; down {20,23,42,143,11}); `is_iq` admits both; gate==up so the fork's mixed-pair
+  {Q2_K,Q3_K} restriction does not apply; the AVX2 CPU fallback (this box is Zen2, no AVX-512)
+  covers both types. Maya-S-v2's down types (IQ2_S=22, IQ3_XXS=18) are **not** in the gfx906
+  down list - on this box the already-downloaded Maya-L is the better-supported file.
+- New files: `docs/gfx906/GLM-FIRST-BOOT.md` (T0-T5 + six named first-boot unknowns),
+  `tools/glm/serve/strata-glm-mayal-gfx906.json` (draft box config),
+  `tools/glm/serve/glm-engine-906.sh` (`STRATA_BUILD_DIR -> build-906`).
