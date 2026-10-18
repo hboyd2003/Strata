@@ -21,22 +21,36 @@ parallel - the disk math below assumes one at a time.
 | kernels it needs | standard IQ2/IQ3/Q6_K types - the kernel families this fork already compiles for gfx906 | GSQ/PTQ expert types + the q4k-attn path (PTQ1_0 CPU rows arrived with the merge) |
 | MTP draft file | n/a (project-maya refuses MTP on one GPU; Xolotl did not port MTP to GLM either) | `neuralll/GLM-5.3-Flash-MTP-GGUF` exists (depth-1 acceptance 70-75%) but only splices onto the RCO file |
 
-**Choice for this box: Maya-S-v2 as primary** - it is the file Xolotl's production bench and
-configs were measured with, it is 15 % smaller, its quant types are ones this fork already
-builds for gfx906, and its chat perplexity is better. **Keep RCO as the optional second
-download** if code quality matters (better code ppl, no LoRA dependency) or as the fallback for
+**Choice for this box: the Maya family** - it is what Xolotl's production bench and configs were
+measured with, its quant types are ones this fork already builds for gfx906, and its chat
+perplexity is better than RCO's. Maya-L is already downloaded here (see step 1); if the engine
+loads its 4-shard split, serve that - the gated fallback is Maya-S-v2, the only Maya the
+authors benchmarked. **RCO stays the optional second download** if code quality matters (better
+code ppl, no LoRA dependency) or as the fallback for
 `neuralll/llama.cpp`. `Maya-M` (116 GB IQ2_S, KL ~23 % better than S in the PEERS survey) is the
-quality upgrade, but Xolotl gated only S-v2 - untested territory. The same survey's Maya-L
-(156 GB, 99.2 % of FP8) exceeds what this box's 125 GB RAM tier wants.
+quality upgrade, but Xolotl gated only S-v2 - untested territory. `Maya-L` (156 GB, 99.2 % of
+FP8) is already on this box - it runs off the file tier + VRAM cache with a smaller RAM arena,
+at lower expert residency than the S files on the authors' 90 GB box.
 
-## 1. GLM-5.3-Flash (Maya-S-v2 route) - ~97.5 GB
+## 1. GLM-5.3-Flash - ALREADY ON DISK (Maya-L), only 2 small downloads left
+
+`Maya-L IQ3_S` (156.3 GB, all 4 shards byte-verified against the HF manifest on 2026-10-18) is
+already at `/ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF/Maya-L/`:
+
+```
+GLM-5.3-Flash-Maya-L-IQ3_S-0000{1,2,3,4}-of-00004.gguf   47.7 + 48.0 + 47.3 + 13.3 GB
+```
+
+Maya-L is the *best* variant in the family (IQ3_S gate/up + IQ4_XS down + Q5_K sensitive; 99.2 %
+of FP8, KL 0.188 per the PEERS survey) - it beats the Maya-S-v2 that Xolotl's own bench runs.
+One caveat: Xolotl only gated **S-v2** through their serve harness (their split-aware tier note
+says "shard 1 = blk.0-23 only" for the 3-shard layout); whether the engine's split-aware tier
+handles L's 4-shard layout is untested here. If L refuses to load, fall back to S-v2 (command
+kept below).
+
+What still needs downloading:
 
 ```bash
-# the model (3-shard split GGUF; download the whole Maya-S-v2-IQ2_XXS/ subdir)
-hf download peasantsmith/GLM-5.3-Flash-Maya-GGUF \
-  --include "Maya-S-v2-IQ2_XXS/*" \
-  --local-dir /ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF
-
 # abliteration LoRA (the engine applies it with --lora + --lora-exps)
 hf download GCSA-AiLab/GLM-5.3-Flash-Abliterated-LoRA-GGUF \
   --local-dir /ai/models/hf.co/GCSA-AiLab/GLM-5.3-Flash-Abliterated-LoRA-GGUF
@@ -50,7 +64,15 @@ hf download zai-org/GLM-5.3-Flash \
 hf download peasantsmith/GLM-5.3-Flash-Maya-GGUF --include "vision/*" \
   --local-dir /ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF
 
-df -h /ai   # checkpoint: ~598 GB free
+df -h /ai   # checkpoint: ~695 GB free
+```
+
+Fallback only (if Maya-L does not load): the gated S-v2 set (~96.5 GB):
+
+```bash
+hf download peasantsmith/GLM-5.3-Flash-Maya-GGUF \
+  --include "Maya-S-v2-IQ2_XXS/*" \
+  --local-dir /ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF
 ```
 
 The soft-prune list is already in the branch: `tools/glm/serve/prune-ezct-0.25.txt`.
@@ -84,7 +106,7 @@ hf download dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8 \
   model.safetensors.index.json config.json \
   --local-dir /ai/models/hf.co/dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8
 
-df -h /ai   # checkpoint: ~210 GB free
+df -h /ai   # checkpoint: ~350 GiB free
 ```
 
 The same GSQ download also brings `V41-MTP-Vision.Q2_K.gguf` (5.7 GB, the DSpark draft - the
@@ -95,7 +117,7 @@ offsets), `SHA256SUMS`, and `tokenizer/` (chat template + vocab). The `V41-MTP-V
 **Not a download, but the follow-up:** turning the two FP8 shards into run-time Engram tables
 is `python3 tools/v41/extract_engram.py <FP8 dir> --to layers.1=<dir-a> --to layers.14=<dir-b>`
 (one target per fast drive is ideal; decode reads ~48 random 256-byte rows per token) and it
-transiently wants shards + tables ~= +406 GB. At the 210 GB checkpoint above that does not fit -
+transiently wants shards + tables ~= +406 GB. At the ~350 GiB checkpoint above that does not fit -
 prune from the pre-existing 1.4 TiB on `/ai` first (candidates: `cyankiwi` 176 G, `peasantsmith`
 146 G (keep what steps 1 downloaded - the Maya-S-v2 subdir!), `QuantTrio` 77 G, or finished
 `vllm`-era leftovers), or extract per shard and delete each 101.5 GB shard right after its rows
@@ -105,8 +127,8 @@ are out. The engine then runs with `--engram <dir-a>:<dir-b>`.
 
 | model | GB |
 | --- | ---: |
-| GLM Maya-S-v2 + LoRA + tokenizer + mmproj | ~97.5 |
+| GLM Maya-L (already on disk) + LoRA + tokenizer | 156.3 + ~0.3 |
 | DeepSeek GSQ (joined) + DSpark | ~169 |
 | Engram FP8 shards (until extracted) | 203 |
 | Engram tables after extraction (shards deleted) | ~203 |
-| **after everything, both models servable** | **~470** |
+| **to download for both models servable** | **~372** (Maya-L was already there) |
