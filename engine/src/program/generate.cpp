@@ -3767,6 +3767,14 @@ int main(int argc, char** argv) {
         if (!kp.empty() && std::getenv("STRATA_TRACE") != nullptr) std::fprintf(stderr, "strata trace: ROCM_KPACK_PATH=%s\n", kp.c_str());
     }
 #endif
+#if defined(STRATA_HIP_GFX906) && !defined(_WIN32)
+    // gfx906: the prompt path measured on MI50 (GFX906.md) is on by default; =0 turns each part off
+    setenv("STRATA_PF_RP", "1", 0);            // MoE expert products through the repacked GEMM
+    setenv("STRATA_DENSE_MMQ", "1", 0);        // dense projections through int8 MMQ (K/V stay FP16)
+    setenv("STRATA_MMQ_KQ", "1", 0);           // the K-quant MMQ kernels for the dense Q5_K / Q6_K weights
+    setenv("STRATA_DENSE_RP", "1", 0);         // dense products through the repacked GEMM where it has the type
+    setenv("STRATA_HIP_PROMPT_F16", "1", 0);   // the prompt's 16-bit GEMMs in FP16
+#endif
     // Load every CUDA kernel when the context is created, before the expert cache takes the free VRAM — EXCEPT when
     // running on sm_70 (V100 / Titan V) through the volta-forever libcuda shim, where EAGER forces multi-minute JIT
     // translation of unused sm_80+/sm_90+/sm_120 kernels (volta_forever.hpp switches the default to LAZY).
