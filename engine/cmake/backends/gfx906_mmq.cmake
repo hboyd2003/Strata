@@ -69,4 +69,7 @@ macro(strata_gfx906_mmq)
     # gfx906: mx-llama.cpp's repacked IQ4_NL expert GEMM (rp_moe) against MMQ, correctness and time
     add_executable(rp_expert_bench src/prefill/rp_expert_bench.cpp)
     target_link_libraries(rp_expert_bench PRIVATE strata_mmq ggml-base CUDA::cudart)
+    # gfx906: the dense projections as today (dequant + hipBLAS FP16) against int8 MMQ and the repacked GEMM
+    add_executable(dense_mmq_bench src/prefill/dense_mmq_bench.cu)
+    target_link_libraries(dense_mmq_bench PRIVATE strata_prefill strata_mmq ggml-base ggml-cpu CUDA::cudart CUDA::cublas)
 endmacro()
