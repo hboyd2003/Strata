@@ -5,9 +5,11 @@
 if(NOT TARGET ggml-cpu)
   return()
 endif()
-if(STRATA_HIP_GFX906)
-  # gfx906 fork: this engine needs the xolotl-patched ggml (DSV41 ops, fp4 KV), which is CUDA-only so far.
-  # HIP port tracked in docs/gfx906/XOLOTL-PORT.md. Default path untouched (docs/AMD_HIP.md gfx906).
+if(STRATA_HIP_GFX906 AND NOT TARGET ggml-cuda)
+  # gfx906 fork: the dense half needs the xolotl-patched ggml compiled as the HIP ggml-cuda backend
+  # (tools/gfx906/ggml/hip-cmake.patch + -DSTRATA_GGML_CUDA=ON -DSTRATA_GGML_DIR=<patched clone>).  With that
+  # target absent the engine stays out of the build, exactly as on a ggml-less machine.  Port log:
+  # docs/gfx906/XOLOTL-PORT.md (ggml-CUDA-as-HIP built 2026-10-18).
   return()
 endif()
 add_library(glm_dense STATIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm/glm_dense.cpp)

@@ -68,12 +68,15 @@ if(TARGET strata_kernels_cpu AND TARGET ggml-cpu)
     add_library(ds41_moe_cpu STATIC ${_v41_dir}/ds41_moe.cpp)
     target_include_directories(ds41_moe_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${_v41_dir})
     target_link_libraries(ds41_moe_cpu PUBLIC strata_kernels_cpu strata_artifact ggml ggml-base)
-    if(TARGET CUDA::cudart AND TARGET strata_kernels AND NOT STRATA_HIP_GFX906)
-        # gfx906 fork: CUDA::cudart is an alias of hip::host here (CMakeLists.txt:141), so this guard alone
-        # would admit the HIP build; ds41_transcode.cu is not in root's LANGUAGE-HIP mapping and the kernel
-        # is CUDA-only. HIP port tracked in docs/gfx906/XOLOTL-PORT.md.
+    if(TARGET CUDA::cudart AND TARGET strata_kernels AND (NOT STRATA_HIP_GFX906 OR TARGET ggml-cuda))
+        # gfx906 fork: admitted for HIP once the ggml-cuda HIP backend exists (tools/gfx906/ggml/hip-cmake.patch;
+        # port log docs/gfx906/XOLOTL-PORT.md).  CUDA::cudart is the hip::host alias (CMakeLists.txt:141) and
+        # ds41_transcode.cu is assigned LANGUAGE HIP below - it syntax-checks clean under hipcc --offload-arch=gfx906.
         # PTQ1_0 -> Q2_0 on the device (lossless): the prompt path's MMQ runs the ternary experts as Q2_0
         add_library(ds41_transcode STATIC ${_v41_dir}/ds41_transcode.cu)
+        if(STRATA_HIP_GFX906)
+            set_source_files_properties(${_v41_dir}/ds41_transcode.cu PROPERTIES LANGUAGE HIP)
+        endif()
         target_include_directories(ds41_transcode PUBLIC ${_v41_dir})
         target_link_libraries(ds41_transcode PUBLIC CUDA::cudart)
         add_library(ds41_moe_cuda STATIC ${_v41_dir}/ds41_moe.cpp)
