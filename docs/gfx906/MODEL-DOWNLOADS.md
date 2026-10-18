@@ -60,11 +60,14 @@ hf download zai-org/GLM-5.3-Flash \
   --include "tokenizer*" "chat_template*" "special_tokens*" "generation_config.json" \
   --local-dir /ai/models/hf.co/zai-org/GLM-5.3-Flash
 
-# optional: vision mmproj for the strata-vision path (1.1 GB)
+# vision mmproj for the strata-vision path (1.1 GB) - YES, wanted (operator 2026-10-18):
+# vision/mmproj-GLM-5.3-Flash-F16.gguf; model-independent, serves whichever Maya quant boots.
+# Caveat: GLM's --vision wiring in the Xolotl engine is unverified during the port; DeepSeek-V4.1
+# vision is explicitly NOT wired in their engine yet (the tower ships unwired in V41-MTP-Vision).
 hf download peasantsmith/GLM-5.3-Flash-Maya-GGUF --include "vision/*" \
   --local-dir /ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF
 
-df -h /ai   # checkpoint: ~695 GB free
+df -h /ai   # checkpoint: ~696 GiB free (these three downloads total ~0.5 GB + 1.1 GB vision)
 ```
 
 Fallback only (if Maya-L does not load): the gated S-v2 set (~96.5 GB):
@@ -111,8 +114,9 @@ df -h /ai   # checkpoint: ~350 GiB free
 
 The same GSQ download also brings `V41-MTP-Vision.Q2_K.gguf` (5.7 GB, the DSpark draft - the
 card's recommended variant), `rank.bin` (expert hotness), `V41-GSQ.gguf.experts.json` (expert
-offsets), `SHA256SUMS`, and `tokenizer/` (chat template + vocab). The `V41-MTP-Vision.gguf`
-8.4 GB twin is not needed (vision engine support is in progress upstream anyway).
+offsets), `SHA256SUMS`, and `tokenizer/` (chat template + vocab). The whole-repo download also
+brings the 8.4 GB `V41-MTP-Vision.gguf`; use the Q2_K file for DSpark. DeepSeek vision is not
+wired in their engine, so nothing extra is downloaded for it.
 
 **Not a download, but the follow-up:** turning the two FP8 shards into run-time Engram tables
 is `python3 tools/v41/extract_engram.py <FP8 dir> --to layers.1=<dir-a> --to layers.14=<dir-b>`
