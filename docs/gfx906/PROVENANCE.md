@@ -24,7 +24,7 @@ archived binary or a reproduction from the fork source snapshot reviewed at `af4
 upstream main `477ac13cbe8e582c20484871ce459d20d82df09d`. Do not claim that the current public source fork
 reproduces the image.
 
-The current fork main checked on 2026-10-18 is [`3f076fea5a98f69d2fec1d364b21380eb1a67e95`](https://github.com/cassettesgoboom/strata-gfx906/commit/3f076fea5a98f69d2fec1d364b21380eb1a67e95), merged by [PR #40](https://github.com/cassettesgoboom/strata-gfx906/pull/40). Its changes after the reviewed engine-source snapshot are documentation, parity-contract/tests, and benchmark-config redaction; they do not change the native runtime. The public fork's [PR #11](https://github.com/cassettesgoboom/strata-gfx906/pull/11) adds an archived MI50 measurements table to the README; [PR #12](https://github.com/cassettesgoboom/strata-gfx906/pull/12) adds CPU-only synthetic trace comparison tooling. Neither PR changes the engine, container, tag, or image digest above. The comparator's successful comparison is not runtime parity evidence and does not update the archived image's provenance.
+The fork source snapshot reviewed after PR [#40](https://github.com/cassettesgoboom/strata-gfx906/pull/40) is [`3f076fea5a98f69d2fec1d364b21380eb1a67e95`](https://github.com/cassettesgoboom/strata-gfx906/commit/3f076fea5a98f69d2fec1d364b21380eb1a67e95). Later PR [#42](https://github.com/cassettesgoboom/strata-gfx906/pull/42) refreshed documentation, and PR [#43](https://github.com/cassettesgoboom/strata-gfx906/pull/43) registered existing native trace helper tests with CMake/CTest; neither changes the inference runtime. Earlier PR [#11](https://github.com/cassettesgoboom/strata-gfx906/pull/11) adds archived MI50 measurements to the README, and PR [#12](https://github.com/cassettesgoboom/strata-gfx906/pull/12) adds CPU-only synthetic trace comparison tooling. These records do not change the engine, container, tag, or image digest above. The comparator's successful comparison is not runtime parity evidence and does not update the archived image's provenance.
 
 An archived network-isolated pullback of the OCI index digest above recorded these in-container executable hashes:
 
@@ -36,16 +36,9 @@ An archived network-isolated pullback of the OCI index digest above recorded the
 
 The same archived receipt reported ROCm runtime `7.14.0-gfx906+20260802001858` and HIP configuration `7.14.60850-0000000`. These are archived pullback observations, not a fresh live inspection. They identify executable contents in that pulled artifact but do not make the source build reproducible from the current fork.
 
-## Quiet-build source fingerprints
+## Quiet-build source limitations
 
-The main-verified preserved quiet binary SHA matches the published pullback engine SHA above. Its quiet source snapshot fingerprints were:
-
-| File | SHA-256 |
-| --- | --- |
-| `generate.cpp` | `f5d25aacb04fafde201632fa3fd2729431a8a425a36ff8f79938bcbfae0b4b54` |
-| `verify.cpp` | `51bd2a6457e0c344d929faef08956823eeedde7f5f95493f45827fadaa120956` |
-
-The archived quiet delta patch SHA-256 is `4abf258a82d27d195184f73f53700f9dc68736727e61a388bcce528f7497c083`; the patch remains private and unpublished pending review. The recorded build cache configuration was Release, gfx906, ROCm clang++. The source snapshot has no `.git` metadata, so its exact coherent commit and a reproducible rebuild are unknown. These fingerprints are evidence identifiers, not a claim that the source snapshot or patch is publicly available.
+The archived quiet-build record associates the preserved executable with the published pullback engine SHA above and records a Release, gfx906 build using ROCm clang++. The source snapshot has no `.git` metadata. No publicly reviewable coherent source and patch set establishes its exact commit, full build inputs, or a reproducible build of the published executable. Private source and patch artifacts are not included or fingerprinted here; their existence does not establish source-to-binary provenance.
 
 The source delta and review status are in [UPSTREAM-DELTA.md](UPSTREAM-DELTA.md). No private host, network, storage, container, or telemetry paths are part of this record.
 
