@@ -628,6 +628,10 @@ struct Options {
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
+    /// local (Indra's Mirror): the audio path.  --audio-pad N is the model's <|audio_pad|> token id; a GENI
+    /// request may then carry strata-audio records ('SVA1'), whose rows go at those tokens with linear (1-D)
+    /// positions.  -1 = audio off (the vision path only).
+    int64_t audio_pad = -1;
     int adapt_swaps = 96;
     /// --serve: how many conversation checkpoints to keep between requests (0 = every request reads its whole
     /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and
@@ -2105,6 +2109,7 @@ int main(int argc, char** argv) {
         else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
         else if (a == "--serve") o.serve = true;
         else if (a == "--vision") o.vision = true;
+        else if (a == "--audio-pad") o.audio_pad = std::atoll(next("--audio-pad"));
         else if (a == "--session-save-reclaim") o.session_save_reclaim = true;
         else if (a == "--prompt-cache") o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
         else if (a == "--conversation-cache-mib" || a == "--conversation-cache-slots" ||
@@ -3201,7 +3206,7 @@ int main(int argc, char** argv) {
     // the identity until an image request, and it is set here, before any CUDA graph captures a rope kernel.
     int32_t* d_mrope = nullptr;
     std::vector<int32_t> mrope_host;
-    if (o.vision) {
+    if (o.vision || o.audio_pad >= 0) {   // local: the audio path needs the same table
         const int64_t cells = o.max_context + 64;
         mrope_host.resize((size_t) cells * 3);
         for (int64_t c = 0; c < cells; ++c)
@@ -3617,7 +3622,7 @@ int main(int argc, char** argv) {
         }
         // --vision: this device's image-position table (the identity until a picture request), read by every rope
         // kernel its stage runs - set before any of its graphs is captured
-        if (o.vision) {
+        if (o.vision || o.audio_pad >= 0) {   // local: the audio path needs the same table
             if (cudaMalloc(&st.mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
                 cudaMemcpy(st.mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
@@ -10680,6 +10685,10 @@ int main(int argc, char** argv) {
             int req_penalty_last_n = 0;
             std::string req_bias_text;
             bool req_bias_present = false;
+            // local (Indra's Mirror, /v1/decide): score=ID,ID,... prints `SCORE <id>:<logprob> ... top=<id>:<logprob>`
+            // before the first token goes out: the log-softmax of the raw logits (no bias, no temperature) that pick the
+            // request's first generated token, so a client can compare options (listen / speak) by their probability
+            std::string req_score_text;
             int req_cvec = 1;   // cvec=0|1: a loaded control vector for this request (on when absent)
             // ckpt=0: a one-shot call whose turn no later request extends.  No checkpoint at its last turn boundary
             // (so no split there) nor every --prompt-cache-every tokens, and its session is neither continued nor
@@ -10713,6 +10722,7 @@ int main(int argc, char** argv) {
                     const std::string key = tok.substr(0, eq);
                     const float fv = std::strtof(tok.c_str() + eq + 1, nullptr);
                     if (key == "logit_bias") { req_bias_text = tok.substr(eq + 1); req_bias_present = true; }
+                    else if (key == "score") req_score_text = tok.substr(eq + 1);
                     else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
                     else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
                     else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
@@ -10765,6 +10775,21 @@ int main(int argc, char** argv) {
                 std::printf("ERR logit_bias: %s\n", o.batch > 0 ? "continuous batching is not supported" : bias_error.c_str());
                 continue;
             }
+            std::vector<int64_t> req_score;
+            if (!req_score_text.empty()) {
+                std::string score_error;
+                if (o.batch > 0 || !parse_i64_list(req_score_text.c_str(), req_score, score_error) || req_score.size() > 64) {
+                    std::printf("ERR score: %s\n", o.batch > 0 ? "continuous batching is not supported"
+                                : req_score.size() > 64 ? "at most 64 token ids" : score_error.c_str());
+                    continue;
+                }
+                bool in_vocab = true;
+                for (const int64_t id : req_score) in_vocab = in_vocab && id < (int64_t) n_vocab;
+                if (!in_vocab) {
+                    std::printf("ERR score: a token id outside the vocabulary\n");
+                    continue;
+                }
+            }
             std::string emb_path;
             if (geni && endp != nullptr) {
                 while (*endp == ' ') ++endp;
@@ -10779,7 +10804,7 @@ int main(int argc, char** argv) {
             }
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
-            if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
+            if (geni && !o.vision && o.audio_pad < 0) { std::printf("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {
                 // positions for every cell this request can reach; the identity again for a text request
                 std::string ve;
@@ -10793,7 +10818,7 @@ int main(int argc, char** argv) {
                 if (!geni) {
                     for (int64_t c = 0; c < cells; ++c) put(c, c, c, c);
                 } else {
-                    struct Img { int64_t n, nx, ny; size_t off; };
+                    struct Img { int64_t n, nx, ny; size_t off; bool audio; };
                     std::vector<Img> imgs;
                     img_rows.clear();
                     std::FILE* f = std::fopen(emb_path.c_str(), "rb");
@@ -10802,24 +10827,29 @@ int main(int argc, char** argv) {
                         int32_t hdr[5];
                         const size_t got = std::fread(hdr, sizeof(int32_t), 5, f);
                         if (got == 0) break;
-                        if (got != 5 || hdr[0] != 0x31455653 || hdr[1] < 1 || hdr[2] < 1 || hdr[3] < 1 ||
-                            (int64_t) hdr[2] * hdr[3] != hdr[1] || hdr[4] != (int32_t) g.n_embd) {
-                            ve = "bad embeddings file (expected strata-vision records of width " +
+                        // 'SVE1' = a strata-vision image record; 'SVA1' = a strata-audio record (local, Indra's Mirror)
+                        const bool rec_audio = hdr[0] == 0x31415653;
+                        if (got != 5 || (hdr[0] != 0x31455653 && !rec_audio) || hdr[1] < 1 || hdr[2] < 1 ||
+                            hdr[3] < 1 || (int64_t) hdr[2] * hdr[3] != hdr[1] || hdr[4] != (int32_t) g.n_embd) {
+                            ve = "bad embeddings file (expected strata-vision/-audio records of width " +
                                  std::to_string((long long) g.n_embd) + ")";
                             break;
                         }
                         const size_t off = img_rows.size(), cnt = (size_t) hdr[1] * (size_t) hdr[4];
                         img_rows.resize(off + cnt);
                         if (std::fread(img_rows.data() + off, sizeof(float), cnt, f) != cnt) { ve = "short embeddings file"; break; }
-                        imgs.push_back({hdr[1], hdr[2], hdr[3], off});
+                        imgs.push_back({hdr[1], hdr[2], hdr[3], off, rec_audio});
                     }
                     if (f) std::fclose(f);
+                    const int64_t kAudioPad = o.audio_pad;   // local: the model's <|audio_pad|>; -1 when audio is off
                     int64_t p = 0, i = 0;
                     size_t k = 0;
                     while (ve.empty() && i < n) {
-                        if (ids[(size_t) i] != kImagePad) { put(i, p, p, p); ++p; ++i; continue; }
-                        if (k >= imgs.size()) { ve = "the prompt has more images than the embeddings file"; break; }
+                        if (ids[(size_t) i] != kImagePad && ids[(size_t) i] != kAudioPad) { put(i, p, p, p); ++p; ++i; continue; }
+                        const bool want_audio = ids[(size_t) i] == kAudioPad;   // local: an audio record, linear positions
+                        if (k >= imgs.size()) { ve = "the prompt has more media than the embeddings file"; break; }
                         const Img& im = imgs[k++];
+                        if (im.audio != want_audio) { ve = "an audio/image pad meets the wrong embeddings record"; break; }
                         {   // what the conversation cache compares: a picture is its grid and its embeddings
                             const int64_t grid[3] = {im.n, im.nx, im.ny};
                             uint64_t h = fnv1a(grid, sizeof grid);
@@ -10830,19 +10860,20 @@ int main(int argc, char** argv) {
                             req_imgs.push_back({i, h});
                         }
                         for (int64_t j = 0; j < im.n && ve.empty(); ++j)
-                            if (i + j >= n || ids[(size_t) (i + j)] != kImagePad)
-                                ve = "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
-                                     " rows but fewer <|image_pad|> tokens";
+                            if (i + j >= n || ids[(size_t) (i + j)] != (want_audio ? kAudioPad : kImagePad))
+                                ve = std::string(want_audio ? "an audio clip" : "image ") + std::to_string(k) + " has " +
+                                     std::to_string((long long) im.n) + " rows but fewer media-pad tokens";
                         for (int64_t j = 0; j < im.n && ve.empty(); ++j) {
-                            const int64_t y = j / im.nx, x = j % im.nx;
-                            put(i + j, p, p + y, p + x);
+                            if (want_audio) put(i + j, p + j, p + j, p + j);   // local: audio rows are linear (1-D)
+                            else { const int64_t y = j / im.nx, x = j % im.nx; put(i + j, p, p + y, p + x); }
                             row_ptr[(size_t) (i + j)] = img_rows.data() + im.off + (size_t) j * (size_t) g.n_embd;
                         }
                         i += im.n;
-                        p += std::max(im.nx, im.ny);
+                        p += want_audio ? im.n : std::max(im.nx, im.ny);
                     }
-                    if (ve.empty() && k != imgs.size()) ve = "the embeddings file has more images than the prompt";
-                    if (ve.empty() && n > 0 && ids[(size_t) (n - 1)] == kImagePad) ve = "the prompt cannot end in an image";
+                    if (ve.empty() && k != imgs.size()) ve = "the embeddings file has more media than the prompt";
+                    if (ve.empty() && n > 0 && (ids[(size_t) (n - 1)] == kImagePad || ids[(size_t) (n - 1)] == kAudioPad))
+                        ve = "the prompt cannot end in an image";
                     for (int64_t c = n; ve.empty() && c < cells; ++c) put(c, p + (c - n), p + (c - n), p + (c - n));
                 }
                 tr("positions built", (long long) img_rows.size());
@@ -11963,6 +11994,7 @@ int main(int argc, char** argv) {
             bool pl_ran = false;
             const bool pl_want = pipe && pl_pw >= 2 && pl_snap_ok;
             const char* pl_serial = !pl_want ? nullptr
+                                  : !req_score.empty() ? "score= (local /v1/decide)"
                                   : hist_n > 0 ? "repetition penalties (penalty_last_n)"
                                   : mtp.coupled() ? "coupled draft sampling" : nullptr;
             if (pl_serial != nullptr) {   // said once per reason
@@ -12709,6 +12741,29 @@ int main(int argc, char** argv) {
                 if (aflipped) apply_pending(true);   // 0.1.43: every layer's copies were waited for in the window; the bookkeeping now
                 // Diagnostics (as in generate): STRATA_DUMP_FIRST_LOGITS=<path> writes the logits of each request's first
                 // window to <path>.<n>, so the prompt paths (a peer card's share, a split) can be compared by KL
+                if (first_window && !req_score.empty()) {   // local: score= (row 0 = the first generated token's logits)
+                    std::vector<float> row((size_t) ver.vocab());
+                    if (!ver.copy_logits(0, row.data())) {
+                        std::printf("ERR score: the logits copy failed\n");
+                        return 1;
+                    }
+                    int64_t top = 0;
+                    for (int64_t v = 1; v < (int64_t) row.size(); ++v)
+                        if (row[(size_t) v] > row[(size_t) top]) top = v;
+                    double sum = 0.0;
+                    for (const float l : row) sum += std::exp((double) l - (double) row[(size_t) top]);
+                    const double lse = (double) row[(size_t) top] + std::log(sum);
+                    std::string line = "SCORE";
+                    char b[64];
+                    for (const int64_t id : req_score) {
+                        std::snprintf(b, sizeof b, " %lld:%.6f", (long long) id, (double) row[(size_t) id] - lse);
+                        line += b;
+                    }
+                    std::snprintf(b, sizeof b, " top=%lld:%.6f", (long long) top, (double) row[(size_t) top] - lse);
+                    line += b;
+                    std::printf("%s\n", line.c_str());
+                    std::fflush(stdout);
+                }
                 if (first_window) {
                     static const char* fl = std::getenv("STRATA_DUMP_FIRST_LOGITS");
                     static int fl_n = 0;

@@ -101,6 +101,12 @@ inline const char* ggml_type_name(uint32_t t) {
         return "IQ4_XS";
     case 24:
         return "I8";
+    case 25:
+        return "I16";
+    case 26:
+        return "I32";
+    case 27:
+        return "I64";
     case 30:
         return "BF16";
     case 34:
@@ -115,6 +121,8 @@ inline const char* ggml_type_name(uint32_t t) {
         return "Q1_0";
     case 42:
         return "Q2_0";
+    case 143:   // Strata-DS4 fork: llama-tq / ik_llama PTQ1_0 ternary (V4.1 routed experts; never reaches ggml)
+        return "PTQ1_0";
     default:
         return "?";
     }
@@ -213,17 +221,33 @@ inline bool block_geometry(uint32_t t, int& elems, int& bytes) {
         elems = 1;
         bytes = 1;
         return true;
+    case 25:   // I16: one element per 2 bytes
+        elems = 1;
+        bytes = 2;
+        return true;
+    case 26:   // I32: the DSV4 hash router table (ffn_gate_tid2eid.weight)
+        elems = 1;
+        bytes = 4;
+        return true;
+    case 27:   // I64
+        elems = 1;
+        bytes = 8;
+        return true;
     case 40:   // NVFP4: 64 values = 4 UE4M3 sub-block scales + 32 bytes of E2M1 codes
         elems = 64;
         bytes = 36;
         return true;
-    case 39:   // MXFP4: one E8M0 scale + 16 bytes of 4-bit values (Qwen3.6's MXFP4_MOE experts)
+    case 39:   // MXFP4: one E8M0 scale + 16 bytes of e2m1 nibbles (the DeepSeek-V4 MTP head's experts, Qwen3.6's MXFP4_MOE)
         elems = 32;
         bytes = 17;
         return true;
     case 42:
         elems = 64;
         bytes = 18;
+        return true;
+    case 143:   // Strata-DS4 fork: PTQ1_0 (128 trits in 28 B: 26 B of base-3 digits + fp16 d)
+        elems = 128;
+        bytes = 28;
         return true;
     default:
         return false;

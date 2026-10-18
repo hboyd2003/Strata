@@ -1019,6 +1019,8 @@ const MmqPlan& mmq_plan() {
         p.layer.assign((size_t) std::max<int64_t>(layers, 0), 0);
         p.fo.assign(p.layer.size(), 0);
         p.fallback = !on || layers <= 0;
+        int64_t blocked = 0;
+        int blocked_gt = -1, blocked_dt = -1;
         for (int64_t l = 0; on && l < layers; ++l) {
             const int gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42, dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
             // #420: a tile on every GPU for these shapes (gate+up: 1280 rows, down: N rows), else the FP16 path
@@ -1028,11 +1030,27 @@ const MmqPlan& mmq_plan() {
                 if (on && lay.native && fused::native_supported(gt, dt)) { p.fo[(size_t) l] = 1; p.any = true; }
                 continue;
             }
+            if (!mmq::supported(gt) || !mmq::supported(dt)) {
+                p.fallback = true;
+                if (!blocked++) { blocked_gt = gt; blocked_dt = dt; }
+
+                continue;
+            }
             p.layer[(size_t) l] = 1;
             p.any = true;
             p.gu_max = std::max(p.gu_max, mmq::matrix_bytes(gt, 1280, N));
             p.d_max = std::max(p.d_max, mmq::matrix_bytes(dt, N, 640));
         }
+        // A type this build has no MMQ instance for drops the experts of every layer back on the FP16 path, which
+        // costs ~100x on the prompt (docs/UNSLOTH_Q4.md).  STRATA_MMQ_KQUANTS/STRATA_DENSE_PREFILL decide which types
+        // are compiled, so say out loud when one of them is what turned the path off - otherwise the only symptom is a
+        // prefill that is mysteriously slow.
+        if (blocked)
+            std::fprintf(stderr,
+                         "strata prefill: MMQ off for %lld of %lld expert layers - this build has no MMQ instance for "
+                         "GGML type %d/%d (gate/up, down); rebuild with STRATA_MMQ_KQUANTS=ON or STRATA_DENSE_PREFILL=ON "
+                         "for these weights\n",
+                         (long long) blocked, (long long) layers, blocked_gt, blocked_dt);
         return p;
     }();
     return plan;
@@ -1307,7 +1325,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     for (int i = 0; i < DQ; ++i) { m.dq_gu[i] = o.take<uint16_t>(1280 * 2560, ok); m.dq_d[i] = o.take<uint16_t>(2560 * 640, ok); }
     if (mmq_plan().any) {
         const MmqPlan& mp = mmq_plan();
-        m.ids_identity = o.take<int32_t>(T * K, ok);
+        m.ids_identity = o.take<int32_t>(T * K + 128, ok);   // +128: MMQ reads up to J_best - 1 ids past the end (ggml #29953)
         m.bounds_dev = o.take<int32_t>((size_t) (2 * (m.g->n_expert + m.g->n_expert / MMQ_GROUP + 2)), ok);
         m.grp_gu = o.take<uint8_t>(MMQ_GROUP * mp.gu_max + MMQ_TAIL, ok);
         m.grp_d = o.take<uint8_t>(MMQ_GROUP * mp.d_max + MMQ_TAIL, ok);
@@ -1457,7 +1475,7 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
     float* Vc = (float*) carve((size_t) B * KV * 4);
     int32_t* tok = (int32_t*) carve((size_t) B * 4);
     void* xq = q8 ? carve(mmq::q8_bytes(B * g.hc, Nn)) : nullptr;
-    int32_t* ident = q8 ? (int32_t*) carve((size_t) B * g.hc * 4) : nullptr;
+    int32_t* ident = q8 ? (int32_t*) carve((size_t) (B * g.hc + 128) * 4) : nullptr;   // +128: MMQ id over-read (ggml #29953)
     int32_t* bnd = q8 ? (int32_t*) carve(16) : nullptr;
     if ((uint64_t) (q - m.region) > m.region_bytes) return decline("the batch buffers do not fit the scratch region");
     static const bool timing = std::getenv("STRATA_DRAFT_TIMING") != nullptr;   // debug: where this pass's time goes
@@ -1797,7 +1815,7 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
         pp->pair = (int32_t*) take((size_t) Rt * 4);
     }
     pp->src = (int32_t*) take((size_t) Rt * 4);
-    pp->ident = (int32_t*) take((size_t) Rt * 4);
+    pp->ident = (int32_t*) take((size_t) (Rt + 128) * 4);   // +128: MMQ id over-read (ggml #29953)
     pp->bounds = (int32_t*) take((size_t) (2 * (NE + NE / MMQ_GROUP + 2)) * 4);
     pp->grp_gu = (uint8_t*) take(MMQ_GROUP * mp.gu_max + MMQ_TAIL);
     pp->grp_d = (uint8_t*) take(MMQ_GROUP * mp.d_max + MMQ_TAIL);

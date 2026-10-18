@@ -105,6 +105,10 @@ option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
 # #2027: defined here, before the GPU section reads it to register the native-expert tests (it was defined at the
 # native-experts section far below, so a first configure registered four tests fewer than the second)
 option(STRATA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
+# xolotl: the Qwen3.8-27B dense engine `strata-dense` (src/program/dense_main.cpp).  The dense lineage committed its
+# sources but never its CMake target - the production binary was built from an uncommitted CMakeLists in
+# /tmp/strata-dense-eval (gone).  Reconstructed from that build dir's link line and flags (~/AI/strata-dense-build).
+option(STRATA_DENSE "Build strata-dense, the Qwen3.8-27B dense GGUF engine (CUDA)" ON)
 
 if(STRATA_BUILD_CONVERSATION_TESTS)
   enable_testing()
@@ -184,6 +188,11 @@ elseif(STRATA_ENABLE_CUDA)
     if(_base LESS 60)
       message(FATAL_ERROR "CMAKE_CUDA_ARCHITECTURES '${CMAKE_CUDA_ARCHITECTURES}': even the experimental build "
                           "needs compute capability 6.0 (sm_60) or newer")
+    endif()
+    # #220 / #224: RTX 50 engines built with CUDA 12.8 crashed in the prompt path on Linux (13.0 and newer did not)
+    if(_base GREATER_EQUAL 120 AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0)
+      message(WARNING "Building for sm_${_base} (RTX 50) with CUDA ${CMAKE_CUDA_COMPILER_VERSION}: engines built with "
+                      "CUDA 12.8 crashed on long prompts on these cards (issues #220, #224). Use CUDA 13.0 or newer.")
     endif()
     # #220 / #224: RTX 50 engines built with CUDA 12.8 crashed in the prompt path on Linux (13.0 and newer did not)
     if(_base GREATER_EQUAL 120 AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0)
@@ -275,6 +284,11 @@ if(STRATA_BUILD_TESTS)
   add_executable(native_window_trace_test tests/program/native_window_trace_test.cpp)
   target_include_directories(native_window_trace_test PRIVATE include)
   add_test(NAME native_window_trace_test COMMAND native_window_trace_test)
+  # UNION (xolotl): upstream's batch_read_test (above) and GLM's ds4 geometry test (below) are independent targets
+  # DSV4 geometry + full tensor map (header mmap only; the real-file part skips without $DS4_GGUF/argv[1])
+  add_executable(ds4_geometry_test tests/core/ds4_geometry_test.cpp)
+  target_link_libraries(ds4_geometry_test PRIVATE strata_artifact)
+  add_test(NAME ds4_geometry_test COMMAND ds4_geometry_test $ENV{DS4_GGUF})
   # the model's geometry from its metadata, and the check against the kernels' compiled shape (synthetic)
   add_executable(gguf_geometry_test tests/core/gguf_geometry_test.cpp)
   target_link_libraries(gguf_geometry_test PRIVATE strata_artifact)
@@ -383,6 +397,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/native_gdn_preprocess.cu
                           src/kernels/cuda/native_qsa.cu
                           src/kernels/cuda/native_rope.cu
+                          src/kernels/cuda/qwen35_attention.cu
                           src/kernels/cuda/native_ple_postops.cu
                           src/kernels/cuda/native_flash_attn.cu
                           src/kernels/cuda/native_qsa_indexer.cu
@@ -494,8 +509,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # already links `strata_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
-  add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
-    src/core/remote_expert_opt.cu
+  add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/qwen35.cpp src/core/expert_source.cpp src/core/remote_experts.cpp src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
     src/core/arch_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
@@ -634,6 +648,17 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(strata PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
 
+  # xolotl: strata-dense (see option STRATA_DENSE).  Same shape as the production build: dense_model.cpp in
+  # strata_engine with STRATA_DENSE_MMQ=1 (its MMQ prompt path; set on that one file only, it is the only reader),
+  # dense_kernels.cu in strata_kernels, the binary linked against strata_engine + strata_mmq.
+  if(STRATA_DENSE AND STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS)
+    target_sources(strata_engine PRIVATE src/core/dense_model.cpp)
+    set_source_files_properties(src/core/dense_model.cpp PROPERTIES COMPILE_DEFINITIONS STRATA_DENSE_MMQ=1)
+    target_sources(strata_kernels PRIVATE src/kernels/cuda/dense_kernels.cu)
+    add_executable(strata-dense src/program/dense_main.cpp)
+    target_include_directories(strata-dense PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(strata-dense PRIVATE strata_engine strata_mmq ${_strata_gpu_runtime_target})
+  endif()
   # NEW-MODELS-PLAN.md T1: Qwen3.6-35B-A3B's reference path (one GPU, the model resident, plain kernels), checked
   # against llama.cpp by tools/qwen35/; the engine itself does not run the family yet
   add_executable(strata-q36ref src/qwen35/q36ref.cu)
@@ -1294,6 +1319,9 @@ if(STRATA_NATIVE_EXPERTS)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(GGML_STATIC ON CACHE BOOL "" FORCE)
   set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+  # xolotl: tools/ds4/cmake/ggml_cuda.cmake is the fork's canonical form of this block (option STRATA_GGML_CUDA,
+  # GGML_CUDA ON + GGML_CUDA_GRAPHS ON under it).  GLM's inline copy of the same block is a duplicate - dropped.
+  include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ggml_cuda.cmake OPTIONAL)   # fork: STRATA_GGML_CUDA
   set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
   set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -1322,7 +1350,21 @@ if(STRATA_NATIVE_EXPERTS)
   else()
     set(GGML_NATIVE ON CACHE BOOL "" FORCE)
   endif()
+  # xolotl: the engines need ggml at the pinned commit WITH tools/xolotl/ggml/xolotl-ggml.patch (the DeepSeek-V4.1 ops,
+  # the bit-exact fp4 KV packers, deterministic MMQ, the two upstream CUDA fixes, GLM's no-graph batches: 19 files).
+  # Pinned commit + the patch == the tree every published number was measured on (checked with diff -r).
+  set(_xolotl_ggml_patch ${CMAKE_CURRENT_SOURCE_DIR}/tools/xolotl/ggml/xolotl-ggml.patch)
   if(STRATA_GGML_DIR)
+    # GIT_CEILING_DIRECTORIES: a STRATA_GGML_DIR without its own .git (a copied tree under this repo) must not be
+    # resolved against the enclosing repository - git apply then works as a plain patch tool there
+    get_filename_component(_xolotl_ggml_parent ${STRATA_GGML_DIR} DIRECTORY)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${_xolotl_ggml_parent}
+                            git apply --reverse --check ${_xolotl_ggml_patch} WORKING_DIRECTORY ${STRATA_GGML_DIR}
+                    RESULT_VARIABLE _xolotl_patched OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _xolotl_patched EQUAL 0)
+      message(WARNING "STRATA_GGML_DIR=${STRATA_GGML_DIR} does not carry tools/xolotl/ggml/xolotl-ggml.patch - "
+                      "the build may fail or differ (tools/xolotl/fetch-llama.sh makes a patched checkout)")
+    endif()
     add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   else()
     include(FetchContent)
@@ -1333,6 +1375,16 @@ if(STRATA_NATIVE_EXPERTS)
     FetchContent_GetProperties(strata_llamacpp)
     if(NOT strata_llamacpp_POPULATED)
       FetchContent_Populate(strata_llamacpp)
+    endif()
+    execute_process(COMMAND git apply --reverse --check ${_xolotl_ggml_patch} WORKING_DIRECTORY ${strata_llamacpp_SOURCE_DIR}
+                    RESULT_VARIABLE _xolotl_patched OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _xolotl_patched EQUAL 0)
+      execute_process(COMMAND git apply ${_xolotl_ggml_patch} WORKING_DIRECTORY ${strata_llamacpp_SOURCE_DIR}
+                      RESULT_VARIABLE _xolotl_apply)
+      if(NOT _xolotl_apply EQUAL 0)
+        message(FATAL_ERROR "xolotl-ggml.patch does not apply to ${strata_llamacpp_SOURCE_DIR}")
+      endif()
+      message(STATUS "xolotl: applied tools/xolotl/ggml/xolotl-ggml.patch to the fetched llama.cpp")
     endif()
     add_subdirectory(${strata_llamacpp_SOURCE_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   endif()
@@ -1451,13 +1503,46 @@ if(STRATA_NATIVE_EXPERTS)
     # (CUDA_MODULE_LOADING=EAGER), and these four took ~3.8 MB of VRAM (3 expert slots of IQ3_XXS on a P100) from every
     # model.  gfx906 (HIP: code objects load on first use) keeps them in strata_mmq.
     set(_strata_mmq_cuda_types ${_strata_mmq_types})
+    # xolotl: the plain quantizations the dense lineage's moe_mmq.cu advertises (Q4_0 / Q4_1 / IQ1_S - a plain
+    # llama-quantize Q4_0 GGUF, e.g. bartowski's Qwen3.8-Flash-Next-Q4_0).  The dense lineage's file named them in
+    # a hand-written case list written against a build that GLOBbed every template instance, so they linked there;
+    # the fork's CUDA branch instead lists its instances explicitly and its file never mentioned them, so after the
+    # merge they were advertised with no instance and the link failed (undefined mul_mat_q_case<GGML_TYPE_Q4_0>).
+    # Adding them here is what the generator's contract asks for: advertised == instantiated.
+    list(APPEND _strata_mmq_cuda_types q4_0 q4_1 iq1_s)
+    if(STRATA_MMQ_KQUANTS)
+      # xolotl: the fork and GLM both added q2_k/q3_k/mxfp4 here for the SAME reason (MiMo/DS4 GSQ-RCO experts;
+      # without them the dispatch cases in moe_mmq.cu fail to link).  Kept as the fork's two appends.
+      list(APPEND _strata_mmq_cuda_types q4_k q5_k q5_1)
+      list(APPEND _strata_mmq_cuda_types q2_k q3_k mxfp4)   # fork: DS4 Q2_K / MiMo Q3_K, MXFP4 experts
+      if(STRATA_Q6K_EXPERTS OR STRATA_HIP_GFX906)   # UD-Q6_K_XL gate/up (docs/UNSLOTH_Q6.md),
+        list(APPEND _strata_mmq_cuda_types q6_k)    #   and gfx906: moe_mmq.cu calls it under __HIPCC__
+      endif()
+    # xolotl: upstream 0.1.44 builds the K-quant instances into a separate strata_kq DSO loaded at run time
+    # (opt-in STRATA_MMQ_KQ=1).  Not here: they stay static in strata_mmq and always advertised (moe_mmq.cu
+    # explains why - the dense and GLM prompt paths need them on by default).
     set(_strata_kq_types q4_k q5_k q5_1 q6_k)
     set(_strata_kq_dso OFF)
-    if(STRATA_MMQ_KQUANTS AND STRATA_HIP_GFX906)
-      list(APPEND _strata_mmq_cuda_types ${_strata_kq_types})
-    elseif(STRATA_MMQ_KQUANTS)
-      set(_strata_kq_dso ON)
     endif()
+    # xolotl: the dense prompt path multiplies EVERY projection through MMQ or none (dense_model.cpp mat_ok): one
+    # unsupported type sends the whole prompt down the token-at-a-time run().  The dense GGUFs mix Q5_0 / Q6_K
+    # tensors in, and the production strata-dense advertised both; without them it would silently lose MMQ prefill.
+    if(STRATA_DENSE)
+      if(NOT "q5_0" IN_LIST _strata_mmq_cuda_types)
+        list(APPEND _strata_mmq_cuda_types q5_0)
+      endif()
+      if(NOT "q6_k" IN_LIST _strata_mmq_cuda_types)
+        list(APPEND _strata_mmq_cuda_types q6_k)
+      endif()
+    endif()
+    # xolotl: moe_mmq.cu includes the GENERATED strata/prefill/mmq_types.inc, but neither the fork's nor the
+    # dense lineage's CMakeLists included cmake/mmq_types.cmake or called the generator - the wiring was lost in
+    # the merge and the file has never existed in git.  Generate it from the CUDA type list into the build tree.
+    # It goes under generated/ and NOT straight into ${CMAKE_CURRENT_BINARY_DIR}: the latter would create the
+    # directory <build>/strata, which collides with add_executable(strata ...) - the linker then fails with
+    # "cannot open output file strata: Is a directory".
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mmq_types.cmake)
+    strata_gen_mmq_types(${CMAKE_CURRENT_BINARY_DIR}/generated/strata/prefill/mmq_types.inc "${_strata_mmq_cuda_types}")
     foreach(_t IN LISTS _strata_mmq_cuda_types)
       target_sources(strata_mmq PRIVATE ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
@@ -1480,6 +1565,7 @@ if(STRATA_NATIVE_EXPERTS)
       target_link_libraries(strata_mmq PRIVATE strata_mmq_w4a4)
     endif()
     target_include_directories(strata_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+                               ${CMAKE_CURRENT_BINARY_DIR}/generated
                                PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(strata_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
     if(MSVC)
@@ -1647,6 +1733,11 @@ if(STRATA_NATIVE_EXPERTS)
     add_executable(native_expert_bench src/kernels/native_expert_bench.cpp)
     target_include_directories(native_expert_bench PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(native_expert_bench PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})
+    if(NOT STRATA_HIP_GFX906)
+      # xolotl: ds4_expert_parity and ds4_moe_replay are defined in tools/ds4/cmake/fork.cmake (28 and 36) -
+      # the fork moved them there.  GLM's branch still carried these inline copies, so the merge created
+      # DUPLICATE TARGETS and the configure failed.  Removed here; fork.cmake is the single home for both.
+    endif()
     # MODEL-UPDATE: the dense Q8_0 GEMVs at the engine's shapes against the memory bandwidth (a benchmark, no test)
     add_executable(q8_gemv_bench src/kernels/q8_gemv_bench.cpp)
     target_include_directories(q8_gemv_bench PRIVATE ${_strata_gpu_include_directories})
@@ -1815,3 +1906,20 @@ if(STRATA_HIP_GFX906)
   add_executable(gfx906_qsa_query_swizzle_probe bench/gfx906_qsa_query_swizzle_probe.cpp)
   target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()
+
+# ---- engine slices (xolotl) ----------------------------------------------
+# fork.cmake (below) already includes tools/ds4/cmake/{ds4_dense,ds4_moe,ds4_engine}.cmake AND
+# tools/v41/engine/v41_engine.cmake, so GLM's explicit copies of those three were DROPPED for the merge:
+# including them twice created duplicate targets (ds4_generate, ds4_mtp_bench) and failed the configure.
+# glm.cmake is NOT in fork.cmake, so it stays - the GLM engine needs it to build at all.
+#
+# ORDER MATTERS (xolotl): fork.cmake must come FIRST - it is what creates ds4_moe_cuda/ds4_moe_cpu, and
+# glm.cmake's own contract is "include()d (OPTIONAL) at the end of the root CMakeLists.txt, AFTER the tools/ds4
+# slices it builds on".  With glm.cmake first, `if(TARGET ds4_moe_cuda)` was false and neither glm_generate nor
+# glm_generate_cpu was ever created: the merged tree built the DS4 and DSV4.1 engines and silently no GLM engine.
+
+# Strata-DS4 fork targets (docs/UPSTREAM_SYNC.md)
+include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/fork.cmake OPTIONAL)
+
+# the GLM-5.3-Flash engine (GlmDense + the shared Ds4MoeTier) - needs the ds4 slices above
+include(${CMAKE_CURRENT_SOURCE_DIR}/tools/glm/cmake/glm.cmake OPTIONAL)

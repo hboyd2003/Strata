@@ -19,11 +19,23 @@ __pycache__/
 # plan v0.3 P1 (repository hygiene, review E1): profiler captures and large diagnostic dumps stay out of git.
 *.nsys-rep
 
+# ds4 phase 0 tooling: compiled probes (build from the headers in tools/ds4/) and
+# golden dumps (large; regenerate with tools/ds4/make_goldens.sh).
+tools/ds4/route_probe
+tools/ds4/golden_dump
+bench/ds4-2026-10-05/goldens/
+bench/ds4-2026-10-05/profile-decode/
+bench/ds4-2026-10-08/ctx/
+
 # Pi harness metadata (local session state, not project source)
 *.sqlite
 *.npz
 *.occ1
 td.log
+
+# the expert-cache profile: regenerate with tools/make_default_profile.py (or make_profile.py
+# from a --dump-routing trace); setup.py points every model config's --expert-profile at it
+/data/expert-profile.bin
 
 # created by setup.py on the user's machine
 /.venv/
@@ -61,3 +73,7 @@ build-vision-cuda12.bat
 
 /.ccache/
 /.rocm-win/
+out/
+
+# generated task data that must ship with the benchmark (the repo-wide *.log rule would drop it)
+!tools/gauntlet/tasks/*/workspace/*.log

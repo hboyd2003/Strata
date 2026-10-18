@@ -67,6 +67,7 @@ from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
+from serve.voice import VoiceServer, start_lazy_voice  # noqa: E402  local: the voice sidecar (ASR/TTS)
 from serve import images as images_api  # noqa: E402
 from serve import native_trace  # noqa: E402
 
@@ -736,6 +737,67 @@ FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed ou
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
 
 
+def parse_score_line(line: str) -> dict:
+    """local (/v1/decide): the engine's `SCORE <id>:<logprob> ... top=<id>:<logprob>` -> {"ids": {id: lp}, "top": (id, lp)}."""
+    ids, top = {}, None
+    for f in line.split()[1:]:
+        key, _, rest = f.partition("=")
+        tid, _, lp = (rest if key == "top" else f).partition(":")
+        try:
+            if key == "top":
+                top = (int(tid), float(lp))
+            else:
+                ids[int(tid)] = float(lp)
+        except ValueError:
+            continue
+    return {"ids": ids, "top": top}
+
+
+DECIDE_MAX_OPTIONS = 16
+
+
+def decide_option_tokens(tok, options: list) -> list[int]:
+    """local (/v1/decide): each option's first token, as it starts an answer (no leading space: the answer follows the
+    template's newline).  The options must differ in their first token - the decision is that one token."""
+    if not isinstance(options, list) or not 2 <= len(options) <= DECIDE_MAX_OPTIONS or \
+            not all(isinstance(o, str) and o.strip() for o in options):
+        raise ValueError(f"options: a list of 2..{DECIDE_MAX_OPTIONS} non-empty strings")
+    firsts = []
+    for o in options:
+        ids = tok.encode(o, parse_special=False)
+        if not ids:
+            raise ValueError(f"options: {o!r} has no tokens")
+        firsts.append(int(ids[0]))
+    if len(set(firsts)) != len(firsts):
+        clash = [o for o, t in zip(options, firsts) if firsts.count(t) > 1]
+        raise ValueError(f"options: {clash} start with the same token; pick options whose first words differ "
+                         "(e.g. WAIT / RESPOND)")
+    return firsts
+
+
+def decide_result(options: list, firsts: list[int], scored: dict, bias: dict | None) -> dict:
+    """local (/v1/decide): the choice from the options' first-token log-probs.  `bias` {option: log-odds} is added before
+    the pick (a threshold: {"WAIT": 0.85} picks WAIT when p(WAIT) >= ~0.3 against one other option)."""
+    import math
+    lps = [scored["ids"].get(t) for t in firsts]
+    if any(lp is None for lp in lps):
+        raise ValueError("the engine returned no score for the options (an engine without score= support?)")
+    bias = bias or {}
+    for k, v in bias.items():
+        if k not in options or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError("bias: {option: number} for options in the list")
+    adj = [lp + float(bias.get(o, 0.0)) for o, lp in zip(options, lps)]
+    m = max(lps)
+    z = sum(math.exp(lp - m) for lp in lps)
+    best = max(range(len(options)), key=lambda i: adj[i])
+    return {"choice": options[best], "index": best,
+            "probs": {o: round(math.exp(lp - m) / z, 6) for o, lp in zip(options, lps)},
+            "logprobs": {o: round(lp, 6) for o, lp in zip(options, lps)},
+            # the probability mass the model put on any option at all (low: it wanted to say something else)
+            "coverage": round(sum(math.exp(lp) for lp in lps), 6),
+            "top_token": {"id": scored["top"][0], "logprob": round(scored["top"][1], 6)} if scored.get("top") else None}
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -1196,6 +1258,10 @@ class StrataEngine:
             pn = prefix.get("tokens")
             if isinstance(pn, int) and not isinstance(pn, bool) and pn > 0:
                 keys += f" pin={pn}"
+        score = sampling.get("strata_score")             # local (/v1/decide): the first token's log-probs of these ids
+        if isinstance(score, list) and score and all(isinstance(t, int) and not isinstance(t, bool) and t >= 0
+                                                     for t in score):
+            keys += " score=" + ",".join(str(t) for t in score)
         return keys + StrataEngine.projection_key(sampling) + bias_api.engine_key(sampling.get("logit_bias"))
 
     @staticmethod
@@ -1918,6 +1984,11 @@ class StrataEngine:
                 beat = heard
                 if stall_state:
                     stall_state.clear()
+                if line.startswith("SCORE"):              # local (/v1/decide): SCORE id:lp ... top=id:lp
+                    out = (sampling or {}).get("strata_score_out")
+                    if isinstance(out, dict):
+                        out.update(parse_score_line(line))
+                    continue
                 if line.startswith("T "):
                     allow = silence
                     if cancel.is_set():
@@ -2248,13 +2319,21 @@ class Vision:
         self.stopped = True
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[Path, int]] = {}
+        # local (Indra's Mirror): "lazy": true in the vision config - the encoder is not started with the server; the
+        # first image that is not cached starts it (on_start runs first: the service shrinks the elastic expert cache
+        # to make room), and the service's idle watcher stops it again, so text-only use keeps the VRAM for experts
+        self.lazy_vision = bool(cfg.get("lazy"))
+        self.on_start = None
+        self.last_used = 0.0
         # opt-in (the vision section's "elastic": true, with the config's "vram_elastic"): the encoder starts with the
         # first picture and stops after elastic_idle_s without one; while it runs, the engine's expert cache keeps
         # elastic_mib of VRAM free for it (Service._vision_up / _vision_idle_down)
         self.elastic = cfg.get("elastic") is True
         self.elastic_mib = int(cfg.get("elastic_mib") or 2048)
         self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 120)
-        if not lazy and not self.elastic:
+        # xolotl: both on-demand modes - the local "lazy" (Service.start_lazy_vision) and upstream 0.1.44's
+        # "elastic" (Service._vision_up / _vision_idle_down); a config picks one, neither = the resident encoder
+        if not lazy and not self.lazy_vision and not self.elastic:
             self._start()
 
     def _start(self):
@@ -2426,6 +2505,12 @@ class Vision:
                 self.cache[key] = self.cache.pop(key)                  # most recently used last
                 return self.cache[key]
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
+            self.last_used = time.time()
+            if getattr(self, "lazy_vision", False) and not self.alive():  # local: lazy vision (the caller holds the FIFO)
+                if self.on_start is not None:
+                    self.on_start()
+                print("[strata] starting the vision encoder (lazy) ...", flush=True)
+                self._start()
             img.write_bytes(data)
             try:
                 self.proc.stdin.write(f"ENC {img.name} {out.name}\n")      # relative to the encoder's cwd (#480)
@@ -3033,6 +3118,7 @@ class Service:
                  vision: Vision | None = None, sampling_defaults: dict | None = None,
                  fit_max_tokens: bool = False):
         self.engine, self.tok, self.template, self.model, self.vision = engine, tokenizer, template, model_name, vision
+        self.voice_servers: dict = {}                    # local (Indra's Mirror): lazily-started ASR/TTS sidecars
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))   # texts that stay text inside a message
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.aliases: list[str] = []                  # #297: other names of the model (the config's `aliases`)
@@ -3225,10 +3311,10 @@ class Service:
         return value if value > 0 else None
 
     def _vision_down(self) -> bool:
-        """The encoder should run and does not (the engine's load starts it again).  An elastic encoder is down
-        between pictures by design: it starts in the image turn (_vision_up), not with the engine."""
+        """The encoder should run and does not (the engine's load starts it again).  An on-demand encoder - the
+        local "lazy" one or upstream's "elastic" one - is down between pictures by design."""
         return (self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
-                and not getattr(self.vision, "elastic", False))
+                and not getattr(self.vision, "lazy_vision", False) and not getattr(self.vision, "elastic", False))
 
     def _engine_reserve(self) -> int | None:
         """The VRAM the engine keeps free for other programs outside an elastic encoder's turn: the last POST /v1/vram
@@ -3513,6 +3599,49 @@ class Service:
         finally:
             self.fifo.release()
 
+    def start_lazy_vision(self, reserve_mib: int, idle_s: float):
+        """local (Indra's Mirror): a "lazy" image encoder on an elastic expert cache.  Before the encoder starts (its
+        first uncached image; the caller holds the FIFO, so the engine is idle) the cache shrinks until `reserve_mib`
+        is free; after `idle_s` without an encode the encoder stops and the cache grows back to the start's reserve."""
+        v = self.vision
+        if v is None or not getattr(v, "lazy_vision", False):
+            return
+        elastic = hasattr(self.engine, "vram") and bool((getattr(self.engine, "info", {}) or {}).get("vram_elastic", True))
+
+        def make_room():
+            if not elastic or not self.loaded():
+                return
+            try:
+                out = self.engine.vram(reserve_mib)
+                print(f"[strata] lazy vision: expert cache shrunk for the encoder ({out.get('expert_slots')} slots, "
+                      f"{out.get('vram_free_mib')} MiB free)", flush=True)
+            except (ValueError, EngineDied) as e:
+                print(f"[strata] lazy vision: could not shrink the expert cache ({e}); starting the encoder anyway",
+                      flush=True)
+        v.on_start = make_room
+        print(f"[strata] lazy vision: the encoder starts with the first image and stops after {idle_s:.0f} s idle",
+              flush=True)
+
+        def loop():
+            while True:
+                time.sleep(max(1.0, min(15.0, idle_s / 4)))
+                if not v.alive() or time.time() - v.last_used < idle_s:
+                    continue
+                if not self.fifo.acquire(timeout=1.0):  # a request is running: the next turn
+                    continue
+                try:
+                    if not v.alive() or time.time() - v.last_used < idle_s:
+                        continue
+                    v.unload()
+                    out = self.engine.vram(self.vram_reserve) if elastic and self.loaded() else {}
+                    print(f"[strata] lazy vision: encoder stopped after {idle_s:.0f} s idle; expert cache grown back "
+                          f"({out.get('expert_slots')} slots)", flush=True)
+                except Exception as e:                  # the thread keeps running
+                    print(f"[strata] lazy vision: {e}", flush=True)
+                finally:
+                    self.fifo.release()
+        threading.Thread(target=loop, daemon=True, name="strata-lazy-vision").start()
+
     def start_idle_unload(self):
         if not self.idle_unload_s or not hasattr(self.engine, "unload"):
             return
@@ -3677,7 +3806,10 @@ class Service:
                 "tok_s": round(self._tok_s(), 1) if state == "generating" else None,
                 "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
                 "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
-                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
+                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None,
+                # local: what it is thinking and writing right now (the decoded text tails, ~4 KB each)
+                "thinking": (s.get("reasoning_tail") or "") if s.get("busy") else None,
+                "output": (s.get("output_tail") or "") if s.get("busy") else None}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
         par = int(getattr(self.engine, "batch", 0) or 0)
@@ -4047,6 +4179,11 @@ class Service:
                 elif ev.kind == "tool_call":
                     s["phase"] = "tool call complete"
                 s["tail"] = ((s.get("tail") or "") + (ev.text or ""))[-600:]
+                # local: the live thinking and answer text, kept separately, for /metrics and /slots
+                if ev.kind == "reasoning":
+                    s["reasoning_tail"] = ((s.get("reasoning_tail") or "") + (ev.text or ""))[-4000:]
+                elif ev.kind in ("content", "tool_call", "tool_start"):
+                    s["output_tail"] = ((s.get("output_tail") or "") + (ev.text or ""))[-4000:]
 
     def _progress(self, last_print, every=1.0, st=None):
         """A progress line in the server window every `every` seconds while a request runs."""
@@ -4205,7 +4342,7 @@ class Service:
                         if par:
                             self.status["queued"] -= 1
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
-                                  generated=0, started=time.time(), first_token=None, tool=None, tail="",
+                                  generated=0, started=time.time(), first_token=None, tool=None, tail="", reasoning_tail="", output_tail="",
                                   max_tokens=max_new, reasoning_recoveries=0, thinking_budget=budget)
                         if par:
                             self.live_reqs[id(st)] = (st, rate)
@@ -5246,6 +5383,37 @@ def make_handler(svc: Service):
             self.end_headers()
             self.wfile.write(body)
 
+        def _raw(self, code, body: bytes, content_type: str):
+            """local (Indra's Mirror): a passthrough response - the voice sidecar's own bytes (e.g. WAV)."""
+            self.send_response(code)
+            self.send_header("Content-Type", content_type or "application/octet-stream")
+            self._cors()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _audio(self, path):
+            """local (Indra's Mirror): proxy an audio request to the voice sidecar, starting it lazily and
+            touching it so the idle watcher leaves it alone while a clip is transcribed (or spoken)."""
+            kind = "asr" if path == "/v1/audio/transcriptions" else "tts"
+            server = svc.voice_servers.get(kind)
+            if server is None:
+                self._drain_body()
+                self._json(404, {"error": {"message": f"no {kind} server configured (add a \"voice\" block)"}})
+                return
+            body = self._body()
+            try:
+                server.ensure()
+            except RuntimeError as e:
+                self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                return
+            server.touch()
+            try:
+                status, out, ctype = server.forward(path, body, self.headers.get("Content-Type", ""))
+            finally:
+                server.touch()
+            self._raw(status, out, ctype)
+
         def _authorized(self) -> bool:
             if not svc.api_key:
                 return True
@@ -5406,6 +5574,10 @@ def make_handler(svc: Service):
                         # kept after it ends (the conversation cache carries it on).  A front-end's context meter
                         # divides it by n_ctx; without the key it reads 0 % against Strata forever (#562).
                         in_use = int(svc.status.get("prompt_tokens") or 0)
+                        st = dict(svc.status)
+                    # local: the extra slot keys (?verbose=1) - phase/progress/live text; /metrics carries the same,
+                    # /slots keeps llama-server's exact shape by default so upstream's contract tests still hold
+                    verbose = parse_qs(urlsplit(self.path).query).get("verbose", ["0"])[0] not in ("0", "", "false", "no")
                     if getattr(svc.engine, "batch", 0) and hasattr(svc.engine, "slots_view"):
                         # --batch: one entry per slot (the same view /metrics has), not one for the whole engine
                         n_ctx = svc.reported_ctx()
@@ -5413,8 +5585,16 @@ def make_handler(svc: Service):
                                   "n_prompt_tokens": int(s.get("prompt_tokens") or s.get("held_tokens") or 0)}
                                  for s in svc.engine.slots_view()]
                     else:
-                        slots = [{"id": 0, "n_ctx": svc.reported_ctx(), "is_processing": busy,
-                                  "n_prompt_tokens": in_use}]
+                        slot = {"id": 0, "n_ctx": svc.reported_ctx(), "is_processing": busy,
+                                "n_prompt_tokens": in_use}
+                        if verbose:
+                            slot.update({"phase": st.get("phase") if busy else None,
+                                         "generated": st.get("generated") if busy else None,
+                                         "elapsed_s": round(time.time() - st["started"], 1)
+                                         if busy and st.get("started") else None,
+                                         "reasoning": st.get("reasoning_tail") if busy else None,
+                                         "content": st.get("output_tail") if busy else None})
+                        slots = [slot]
                     self._json(200, slots if loaded else [])
             elif path == "/v1/status":
                 if self._authorized():
@@ -5433,6 +5613,9 @@ def make_handler(svc: Service):
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
             if path.startswith("/v1/") and self._foreign_page():
+                return
+            if path in ("/v1/audio/transcriptions", "/v1/audio/speech"):   # local: the voice sidecar
+                self._audio(path)
                 return
             if path == "/settings":
                 self._settings()
@@ -5527,6 +5710,8 @@ def make_handler(svc: Service):
                     self._json(code, body)
                 elif path == "/v1/chat/completions":
                     self._openai(req)
+                elif path == "/v1/decide":                   # local: one-token decisions (voice turn-taking)
+                    self._decide(req)
                 elif path == "/v1/messages":
                     self._anthropic(req)
                 elif path == "/v1/messages/count_tokens":
@@ -5814,6 +5999,45 @@ def make_handler(svc: Service):
                     yield item
             finally:
                 items.close()
+
+        def _decide(self, req):
+            """local (Indra's Mirror) POST /v1/decide {"messages": [...], "options": ["WAIT", "RESPOND"],
+            "bias": {"WAIT": 0.85}, "keep": false}: the chat prompt with thinking off, and the first answer token's
+            log-probs of each option's first token (the engine's score= key) - no text is written.  -> {"choice",
+            "index", "probs" (over the options), "logprobs", "coverage", "top_token", "prompt_tokens", "ms"}.
+            `keep`: checkpoint the decision's session so the next call that extends it (a longer transcript) reuses it;
+            off by default, so a side decision leaves the conversation cache to the conversations."""
+            t0 = time.perf_counter()
+            if getattr(svc.engine, "batch", 0):
+                raise ValueError("/v1/decide: not supported with continuous batching (--batch)")
+            options = req.get("options")
+            firsts = decide_option_tokens(svc.tok, options)
+            scored: dict = {}
+            sub = {"messages": req.get("messages"), "max_tokens": 1, "temperature": 0,
+                   "chat_template_kwargs": {"enable_thinking": False},
+                   "strata_score": firsts, "strata_score_out": scored}
+            if not req.get("keep"):
+                sub["strata_checkpoint"] = False
+            messages, _tools, kw = openai_to_messages(sub)
+            self._no_local_images(messages)
+            svc.load()
+            cancel = threading.Event()
+            self._watch_client(cancel)
+            ids, thinking, _ = svc.prepare(messages, None, kw, 1, req=sub, cancel=cancel)
+            for _item in svc.run(ids, thinking, None, 1, sub, cancel):
+                pass
+            if cancel.is_set():
+                return
+            out = decide_result(options, firsts, scored, req.get("bias"))
+            if out.get("top_token"):
+                try:
+                    out["top_token"]["text"] = svc.tok.decode([out["top_token"]["id"]])
+                except Exception:
+                    pass
+            last = getattr(svc.engine, "last", {}) or {}
+            out.update(prompt_tokens=len(ids), reused_tokens=last.get("reused"),
+                       prompt_ms=last.get("prompt_ms"), ms=round((time.perf_counter() - t0) * 1000.0, 1))
+            self._json(200, out)
 
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
@@ -6928,6 +7152,16 @@ def main() -> int:
         atexit.register(hub.close)                      # the servers Strata started end with it
     httpd = serve(svc, host=a.host, port=a.port)
     svc.start_idle_unload()
+    if cfg.get("vision") and cfg["vision"].get("lazy"):    # local: lazy vision
+        svc.start_lazy_vision(int(cfg["vision"].get("lazy_reserve_mib", 2400)),
+                              float(cfg["vision"].get("lazy_idle_s", 300)))
+    voice_cfg = cfg.get("voice") or {}                     # local: the voice sidecar (ASR/TTS)
+    if voice_cfg:
+        servers = {kind: VoiceServer(kind, voice_cfg[kind]) for kind in ("asr", "tts")
+                   if isinstance(voice_cfg.get(kind), dict) and voice_cfg[kind].get("cmd")}
+        svc.voice_servers = servers
+        if servers:
+            start_lazy_voice(svc, servers, float(voice_cfg.get("lazy_idle_s", 120)))
     svc.start_vision_idle()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
@@ -6968,6 +7202,9 @@ def main() -> int:
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
         closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
                    hub.close if hub is not None else None]
+        # local: the voice sidecar's children too - without this a SIGTERM left the ASR/TTS server running
+        # (and holding ~1.4 GiB of VRAM) after the server that started it was gone
+        closers += [v.stop for v in svc.voice_servers.values()]
         for close in filter(None, closers):
             try:
                 close()

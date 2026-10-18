@@ -1,6 +1,7 @@
 // include/strata/kernels/iq_kernels.hpp - the i-quant formats (IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S,
-// IQ4_NL) and Q2_0 on the GPU for the IQ2_XS / IQ3_XXS model files, and Q4_K / Q5_K / Q5_1 / Q8_0 for Unsloth's
-// UD-Q4_K_XL (gate/up Q4_K or Q5_K, down Q5_1 or Q8_0, a Q8_0 embedding).
+// IQ4_NL) and Q2_0 on the GPU for the IQ2_XS / IQ3_XXS model files, Q4_K / Q5_K / Q5_1 / Q8_0 for Unsloth's
+// UD-Q4_K_XL (gate/up Q4_K or Q5_K, down Q5_1 or Q8_0, a Q8_0 embedding), and Q2_K for DeepSeek-V4-Flash's expert
+// down projections (with Q3_K, the Q2_0 file's embedding).
 //
 // The block layouts, codebook grids and dot products are llama.cpp's (ggml-common.h, ggml-cuda/vecdotq.cuh,
 // ggml-cuda/dequantize.cuh; MIT, see third_party/ggml/LICENSE and VERSION.txt), so a weight means exactly what it
@@ -9,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace strata::kernels {
 
@@ -47,6 +49,13 @@ struct NativeExpertLayout {
     size_t gu_row = 0, d_row = 0;       // bytes per row
     size_t up_off = 0, down_off = 0;    // byte offsets inside the blob
     size_t bytes = 0;                   // the whole blob
+    // MiMo GSQ-RCO: the up projection's own type when it differs from the gate's (-1 = gu_type, every other model);
+    // set only by native_expert_layout3.  Gate and up rows are computed by different warps, so a block never mixes.
+    int up_type = -1;
+    size_t up_row = 0;
+    // DeepSeek-V4's SwiGLU clamp (swiglu_clamp_exp): gate -> min(gate, lim), up -> clamp(up, -lim, lim) before
+    // silu(gate) * up.  +inf (native_expert_layout's default, every other model) = no clamp, the same bits as before.
+    float swiglu_limit = std::numeric_limits<float>::infinity();
     size_t tail_off = 0;                // NVFP4: {s_gate, s_up, s_down, 0} at the blob's end; 0 = none
 };
 NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd, int64_t n_ff);
@@ -54,8 +63,19 @@ NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd,
 /// prompt path's dequantizer takes both (checked for every layer at startup, before anything is allocated).
 bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_ff) noexcept;
 
+/// Gate and up of different types (MiMo GSQ-RCO): equal types give exactly `native_expert_layout`'s layout.
+NativeExpertLayout native_expert_layout3(int gate_type, int up_type, int d_type, int64_t n_embd, int64_t n_ff);
+/// `native_expert_supported` for a gate/up/down triple: equal gate/up = the pair check; otherwise only the mixed
+/// pairs that have a kernel (Q2_K/Q3_K either way round).
+bool native_expert_supported3(int gate_type, int up_type, int d_type, int64_t n_embd, int64_t n_ff) noexcept;
+
 /// Bytes of scratch `native_expert_grouped` needs for `cap_entries` entries.
 size_t native_expert_scratch_bytes(int64_t cap_entries, int64_t n_ff);
+/// out[t] = sum_k w[t*K + k] * parts[t*K + k] over rows of H floats, t < n (device pointers; the prompt chunk's mix).
+void weighted_rows_sum(const float* parts, const float* w, int K, int64_t H, int64_t n, float* out, void* stream);
+/// One decode token's top-k mix on the card: out[i] = sum_k w[k] * parts[k * H + i] in double, k in order (== the
+/// tier's host loop bit for bit); w[k] == 0 skips row k.
+void decode_rows_sum(const float* parts, const float* w, int K, int64_t H, float* out, void* stream);
 
 /// A770 port (STRATA_PF_XMX=2): up to kXmxGroupMax experts' products in one XMX launch, the weights decoded from the
 /// quantized rows into local memory.  Expert i: Y_i[cnt[i]][N] = X_i . W_i^T (X FP16, Y FP32, rows back to back).
@@ -65,16 +85,41 @@ constexpr int kXmxGroupMax = 16;
 void iq_xmx_grouped(int ty, const uint8_t* const* a, const uint8_t* const* b, const int32_t* cnt, int n,
                     const uint16_t* X, float* Y, int N, int K, void* stream);
 
+/// Routed-expert rank-1 LoRA (the GLM abliteration adapter): per-layer deltas the grouped path adds to the experts'
+/// gate/up pre-activations and to their down outputs, WITHOUT touching the quantized blobs.  For expert e, entry
+/// token x: s_g = <a_g[e], x>, gate_r += b_g[e][r] * s_g (and the same for up); then s_d = <a_d[e], h>, and the
+/// down output += b_d[e] * s_d (h = the SwiGLU output already in scratch).  Every pointer is DEVICE memory; all
+/// null (the default) = off, bit-identical to the unmodified path.  The arrays are indexed by expert id.
+/// UNION (xolotl): independent of the fork's decode_rows_sum/iq_xmx_grouped above - both declarations kept.
+struct NativeExpertLora {
+    const float* a_g = nullptr;      ///< [n_experts][n_embd]
+    const float* b_g = nullptr;      ///< [n_experts][n_ff]
+    const float* a_u = nullptr;
+    const float* b_u = nullptr;
+    const float* a_d = nullptr;      ///< [n_experts][n_ff]
+    const float* b_d = nullptr;      ///< [n_experts][n_embd]
+    const int32_t* ent_exp = nullptr;   ///< [cap_entries] expert id of each entry (device, as ent_tok/ent_dst)
+    const float* x = nullptr;        ///< fp32 activations, `x_stride` floats per token (indexed by ent_tok[e])
+    int64_t x_stride = 0;
+    int64_t n_experts = 0;
+    int64_t ent_lo = 0, ent_hi = 0;  ///< correct entries [lo, hi) (the launch's active entry range); lo == hi = none
+};
+
 /// Grouped experts in the native format: group g's blob at device address grp_ptr[g]; its entries
 /// [grp_start[g], grp_start[g+1]) read token ent_tok[e]'s q8_1 activation (n_embd/32 blocks per token in x_q8_1)
 /// and write row ent_dst[e] of `out` (n_embd floats).  Counts are read on the device.
 /// `grid_groups` (1 .. cap_groups; 0 = cap_groups) groups run side by side, a block row each striding over the rest:
 /// a call that usually has few groups or none (the verify window's PCIe share) launches less for the ones it does
 /// not have.  The results do not depend on it.
+/// `lora` (optional): the routed-expert rank-1 deltas above; null = the unmodified path.
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
-                           int64_t grid_groups = 0);
+                           int64_t grid_groups = 0, const NativeExpertLora* lora = nullptr);
+/// The routed-expert LoRA's down correction on its own (for the MMQ chunk path): entries [0, n), expert ent_exp[i],
+/// float SwiGLU row h + i * n_ff, adds b_d[e] * (a_d[e] . h) into row ent_dst[i] of `out` (n_embd floats).
+void native_expert_lora_down(const NativeExpertLora& lora, const int32_t* ent_exp, const int32_t* ent_dst,
+                             const float* h, int64_t n_ff, int64_t n_embd, int32_t n, float* out, void* stream);
 /// true: `native_expert_grouped`'s launches before the group stride (STRATA_GROUPED_V1=1 at startup) - a block row
 /// per possible group, SwiGLU and the q8_1 quantization as two kernels over all cap_entries.  Bitwise the same results
 /// (native_grouped_parity checks it); kept for A/B timing.  Set before graph capture; captured graphs keep theirs.
@@ -88,5 +133,14 @@ void native_expert_set_mode(int mode, int phase);
 /// bitwise the same results.  Set before graph capture; captured graphs keep the kernels they captured.
 void iq_set_old_kernels(bool old);
 bool iq_old_kernels();
+
+/// Strata-DS4 fork: the prompt-batch ("PROM") grouped kernels for the PTQ1_0 (143) / Q2_0 (42) expert tiers - one
+/// weight-tile decode per (row, group) in shared memory, applied to every entry of the group with int8 dp4a
+/// (STRATA_PROM=1 at first use selects it; default off).  Used by `native_expert_grouped` for those formats only.
+void native_expert_prom_set_enabled(bool enabled);
+bool native_expert_prom_enabled();
+/// Test only: ignore the measured type/size gate (PTQ1_0 and >= 64 entries per group), so a unit test can run the
+/// kernels on both tiers at every row count.  Never set by the engine.
+void native_expert_prom_set_force(bool force);
 
 }  // namespace strata::kernels
