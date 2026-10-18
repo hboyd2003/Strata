@@ -375,7 +375,14 @@ void Context::run(const Product& p, void* stream) {
     {
         const int dev = ggml_cuda_get_device(), cc = ggml_cuda_info().devices[dev].cc;
         const size_t smpbo = ggml_cuda_info().devices[dev].smpbo;
+#if defined(GGML_USE_HIP)
+        // xolotl-ggml.patch defines ggml_cuda_mmq_needs_fallback in the CUDA ggml only; the gfx906 build compiles
+        // against unpatched ggml. This is the function's whole body and what this file inlined before the merge
+        // (main:src/prefill/moe_mmq.cu:228). docs/gfx906/XOLOTL-PORT.md.
+        const bool fallback = p.w_rows % 128 != 0;
+#else
         const bool fallback = ggml_cuda_mmq_needs_fallback(p.w_rows);
+#endif
         int64_t ntiles_best = INT64_MAX;
         for (int J = 8; J <= 128 && ntiles_best > 1; J += 8) {
             const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(t, J, fallback, cc);

@@ -108,7 +108,9 @@ option(STRATA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
 # xolotl: the Qwen3.8-27B dense engine `strata-dense` (src/program/dense_main.cpp).  The dense lineage committed its
 # sources but never its CMake target - the production binary was built from an uncommitted CMakeLists in
 # /tmp/strata-dense-eval (gone).  Reconstructed from that build dir's link line and flags (~/AI/strata-dense-build).
-option(STRATA_DENSE "Build strata-dense, the Qwen3.8-27B dense GGUF engine (CUDA)" ON)
+# gfx906 fork: OFF here (Xolotl ships ON). New engines are opt-in and the default build stays
+# byte-identical to the last release; this is Xolotl's CUDA-only Qwen3.8-27B dense engine.
+option(STRATA_DENSE "Build strata-dense, the Qwen3.8-27B dense GGUF engine (CUDA)" OFF)
 
 if(STRATA_BUILD_CONVERSATION_TESTS)
   enable_testing()

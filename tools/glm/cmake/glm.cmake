@@ -5,6 +5,11 @@
 if(NOT TARGET ggml-cpu)
   return()
 endif()
+if(STRATA_HIP_GFX906)
+  # gfx906 fork: this engine needs the xolotl-patched ggml (DSV41 ops, fp4 KV), which is CUDA-only so far.
+  # HIP port tracked in docs/gfx906/XOLOTL-PORT.md. Default path untouched (docs/AMD_HIP.md gfx906).
+  return()
+endif()
 add_library(glm_dense STATIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm/glm_dense.cpp)
 # ggml-impl.h (graph uid): honour STRATA_GGML_DIR so a worktree without third_party/llama.cpp still builds here
 set(_glm_ggml_src "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp/ggml/src")
