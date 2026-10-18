@@ -1,0 +1,112 @@
+# Model downloads: DeepSeek-V4.1-Flash and GLM-5.3-Flash (this box)
+
+Verified against the Hugging Face API on 2026-10-18 (repo IDs, file names, sizes); all repos
+carry an MIT card license. Destination layout follows this box's convention:
+`/ai/models/hf.co/<org>/<repo>`. Free space at write time: **696 GiB** on `/ai` (2.0 TiB volume).
+
+Run every step inside `tmux` (`hf download` resumes interrupted files; `reassemble.sh`
+checksums every part before joining or deleting anything). Do **not** run the downloads in
+parallel - the disk math below assumes one at a time.
+
+## Which GLM quant, and why (peasantsmith/Maya vs neuralll/GSQ-RCO)
+
+| | **Maya-S-v2 IQ2_XXS** (`peasantsmith`) | **GSQ-RCO 3.0bit q4kattn** (`neuralll`) |
+| --- | --- | --- |
+| quantized from | stock `zai-org/GLM-5.3-Flash` | `pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF` (RCO uncensored pipeline); neuralll's variant re-stores the non-expert Q8_0 tensors as Q4_K (~8.3 GB of the file); all 126 routed-expert tensors bit-identical to pfeifferj |
+| recipe | imatrix: IQ2_XXS gate/up + IQ2_S/IQ3_XXS down + Q6_K dense | GPTQ-style 3.0-bit experts, Q4_K attention |
+| size | 96.5 GB, 3 true GGUF shards | 113.6 GB, single file |
+| uncensored? | no - needs the abliteration LoRA (`GCSA-AiLab/GLM-5.3-Flash-Abliterated-LoRA-GGUF`, applied with `--lora ... --lora-exps`) | yes, baked (RCO) |
+| Xolotl's own quality bench (same harness, `docs/glm/FINDINGS.md` s26) | chat ppl **5.337**, code ppl 3.720 | chat ppl 5.547, code ppl **3.668** |
+| Xolotl's headline GLM config (`docs/xolotl/BENCHMARKS.md`) | **yes**: Maya-S-v2 + LoRA + soft prune + route bias, 512K ctx, **25.3 tok/s** decode (RTX 4090 + 90 GB DDR4) | no - the RCO file is the earlier engine-shaping file (`docs/glm/FAST_START.md`: 16-20 t/s, 796 s arena load on their box) |
+| kernels it needs | standard IQ2/IQ3/Q6_K types - the kernel families this fork already compiles for gfx906 | GSQ/PTQ expert types + the q4k-attn path (PTQ1_0 CPU rows arrived with the merge) |
+| MTP draft file | n/a (project-maya refuses MTP on one GPU; Xolotl did not port MTP to GLM either) | `neuralll/GLM-5.3-Flash-MTP-GGUF` exists (depth-1 acceptance 70-75%) but only splices onto the RCO file |
+
+**Choice for this box: Maya-S-v2 as primary** - it is the file Xolotl's production bench and
+configs were measured with, it is 15 % smaller, its quant types are ones this fork already
+builds for gfx906, and its chat perplexity is better. **Keep RCO as the optional second
+download** if code quality matters (better code ppl, no LoRA dependency) or as the fallback for
+`neuralll/llama.cpp`. `Maya-M` (116 GB IQ2_S, KL ~23 % better than S in the PEERS survey) is the
+quality upgrade, but Xolotl gated only S-v2 - untested territory. The same survey's Maya-L
+(156 GB, 99.2 % of FP8) exceeds what this box's 125 GB RAM tier wants.
+
+## 1. GLM-5.3-Flash (Maya-S-v2 route) - ~97.5 GB
+
+```bash
+# the model (3-shard split GGUF; download the whole Maya-S-v2-IQ2_XXS/ subdir)
+hf download peasantsmith/GLM-5.3-Flash-Maya-GGUF \
+  --include "Maya-S-v2-IQ2_XXS/*" \
+  --local-dir /ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF
+
+# abliteration LoRA (the engine applies it with --lora + --lora-exps)
+hf download GCSA-AiLab/GLM-5.3-Flash-Abliterated-LoRA-GGUF \
+  --local-dir /ai/models/hf.co/GCSA-AiLab/GLM-5.3-Flash-Abliterated-LoRA-GGUF
+
+# tokenizer source (small) - tools/glm/serve/export_tokenizer.py <this dir> <out>
+hf download zai-org/GLM-5.3-Flash \
+  --include "tokenizer*" "chat_template*" "special_tokens*" "generation_config.json" \
+  --local-dir /ai/models/hf.co/zai-org/GLM-5.3-Flash
+
+# optional: vision mmproj for the strata-vision path (1.1 GB)
+hf download peasantsmith/GLM-5.3-Flash-Maya-GGUF --include "vision/*" \
+  --local-dir /ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF
+
+df -h /ai   # checkpoint: ~598 GB free
+```
+
+The soft-prune list is already in the branch: `tools/glm/serve/prune-ezct-0.25.txt`.
+
+### Optional instead: the RCO route (single file, uncensored baked)
+
+```bash
+hf download neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF \
+  --local-dir /ai/models/hf.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF
+# MTP draft (4.6 GB) - RCO-file only; Xolotl's GLM engine does not use it yet
+hf download neuralll/GLM-5.3-Flash-MTP-GGUF \
+  --local-dir /ai/models/hf.co/neuralll/GLM-5.3-Flash-MTP-GGUF
+```
+
+## 2. DeepSeek-V4.1-Flash - 163 + 5.7 + 203 GB (start only after step 1)
+
+```bash
+hf download IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored \
+  --local-dir /ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored
+
+# join the 16 parts (plain BYTE ranges, not gguf-split shards - the GSQ expert types
+# PTQ1_0/Q2_0 are unknown to gguf-split, which is why they were split this way).
+# --delete-parts keeps the peak at ~163 GB instead of ~326 GB.
+bash /ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/reassemble.sh \
+  /ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored --delete-parts
+
+# Engram shards (203 GB): NOT in the GSQ repo - the two 101.5 GB shards are FP8 rows
+# byte-identical to the original checkpoint, taken from the quant's source repo.
+hf download dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8 \
+  model-00047-of-00048.safetensors model-00048-of-00048.safetensors \
+  model.safetensors.index.json config.json \
+  --local-dir /ai/models/hf.co/dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8
+
+df -h /ai   # checkpoint: ~210 GB free
+```
+
+The same GSQ download also brings `V41-MTP-Vision.Q2_K.gguf` (5.7 GB, the DSpark draft - the
+card's recommended variant), `rank.bin` (expert hotness), `V41-GSQ.gguf.experts.json` (expert
+offsets), `SHA256SUMS`, and `tokenizer/` (chat template + vocab). The `V41-MTP-Vision.gguf`
+8.4 GB twin is not needed (vision engine support is in progress upstream anyway).
+
+**Not a download, but the follow-up:** turning the two FP8 shards into run-time Engram tables
+is `python3 tools/v41/extract_engram.py <FP8 dir> --to layers.1=<dir-a> --to layers.14=<dir-b>`
+(one target per fast drive is ideal; decode reads ~48 random 256-byte rows per token) and it
+transiently wants shards + tables ~= +406 GB. At the 210 GB checkpoint above that does not fit -
+prune from the pre-existing 1.4 TiB on `/ai` first (candidates: `cyankiwi` 176 G, `peasantsmith`
+146 G (keep what steps 1 downloaded - the Maya-S-v2 subdir!), `QuantTrio` 77 G, or finished
+`vllm`-era leftovers), or extract per shard and delete each 101.5 GB shard right after its rows
+are out. The engine then runs with `--engram <dir-a>:<dir-b>`.
+
+## Steady-state totals
+
+| model | GB |
+| --- | ---: |
+| GLM Maya-S-v2 + LoRA + tokenizer + mmproj | ~97.5 |
+| DeepSeek GSQ (joined) + DSpark | ~169 |
+| Engram FP8 shards (until extracted) | 203 |
+| Engram tables after extraction (shards deleted) | ~203 |
+| **after everything, both models servable** | **~470** |
