@@ -1,0 +1,32 @@
+{
+  "_comment": "Draft for THIS box (4x MI50 32GB gfx906, 125 GiB RAM, ROCm 7.2.0), written 2026-10-18 before any GLM boot - see docs/gfx906/GLM-FIRST-BOOT.md. Paths are the /ai/models/hf.co layout; Maya-L 4-shard first file; sizes are first guesses pending the first boot.",
+  "exe": "/ai/engines/gfx906/worktrees/xolotl-merge/tools/glm/serve/glm-engine-906.sh",
+  "args": [
+    "-m", "/ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF/Maya-L/GLM-5.3-Flash-Maya-L-IQ3_S-00001-of-00004.gguf",
+    "--backend", "cuda",
+    "--experts", "gpu",
+    "--arena-gib", "60",
+    "--arena-skip-resident",
+    "--ctx", "32768",
+    "--prefill-chunk", "4096",
+    "--chunk-mmq",
+    "--vram-margin", "2.0",
+    "--prune", "/ai/engines/gfx906/worktrees/xolotl-merge/tools/glm/serve/prune-ezct-0.25.txt",
+    "--prune-penalty", "0.05",
+    "--route-bias", "0.25",
+    "--arena-adapt",
+    "--pf-b", "1.0",
+    "--pcie", "auto",
+    "--stop", "154820,154827,154829",
+    "--lora", "/ai/models/hf.co/GCSA-AiLab/GLM-5.3-Flash-Abliterated-LoRA-GGUF/GLM-5.3-Flash-Ablitered2-LoRA-v2.gguf",
+    "--lora-exps"
+  ],
+  "cwd": "/ai/engines/gfx906/worktrees/xolotl-merge",
+  "tokenizer": "/ai/models/tok/glm-5.3-flash",
+  "model_name": "glm-5.3-flash-maya-l-ablated",
+  "log": "/tmp/strata-glm-mayal-906.log",
+  "port": 8147,
+  "gpu": 0,
+  "sampling": { "temperature": 1, "top_p": 0.95 },
+  "reasoning_budget_tokens": 16384
+}
