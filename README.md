@@ -1,3 +1,8 @@
+> **Strata for gfx906**: a fork of [Strata](https://github.com/Niko1221/Strata) for AMD Instinct MI50 / MI60 and
+> Radeon VII. About 30% faster prompt processing on gfx906 at the same generation speed, plus IQ4_NL experts.
+> Image: `ghcr.io/janus-reith/strata-gfx906` · What changed and how to run it: **[GFX906.md](GFX906.md)** · Base: upstream v0.1.45
+
+---
 <h1 align="center">Strata</h1>
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
