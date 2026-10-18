@@ -109,7 +109,7 @@ hf download dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8 \
   model.safetensors.index.json config.json \
   --local-dir /ai/models/hf.co/dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8
 
-df -h /ai   # checkpoint: ~350 GiB free
+df -h /ai   # checkpoint: 1.1 TiB free measured 2026-10-18 after GSQ + GLM bits (volume grew to 2.5 TiB)
 ```
 
 The same GSQ download also brings `V41-MTP-Vision.Q2_K.gguf` (5.7 GB, the DSpark draft - the
@@ -121,11 +121,20 @@ wired in their engine, so nothing extra is downloaded for it.
 **Not a download, but the follow-up:** turning the two FP8 shards into run-time Engram tables
 is `python3 tools/v41/extract_engram.py <FP8 dir> --to layers.1=<dir-a> --to layers.14=<dir-b>`
 (one target per fast drive is ideal; decode reads ~48 random 256-byte rows per token) and it
-transiently wants shards + tables ~= +406 GB. At the ~350 GiB checkpoint above that does not fit -
-prune from the pre-existing 1.4 TiB on `/ai` first (candidates: `cyankiwi` 176 G, `peasantsmith`
-146 G (keep what steps 1 downloaded - the Maya-S-v2 subdir!), `QuantTrio` 77 G, or finished
-`vllm`-era leftovers), or extract per shard and delete each 101.5 GB shard right after its rows
-are out. The engine then runs with `--engram <dir-a>:<dir-b>`.
+transiently wants shards + tables ~= +406 GB. On this box both sides of that fit on `/ai` (1.1 TiB
+free at the 2026-10-18 checkpoint), and the tables live with the model that runs them:
+
+```bash
+python3 tools/v41/extract_engram.py \
+  /ai/models/hf.co/dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8 \
+  --to layers.1=/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l1 \
+  --to layers.14=/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l14
+```
+
+After the extraction reports ~203 GB of tables, the FP8 shards can be deleted. The engine then runs
+with `--engram /ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l1:/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l14`.
+Without `--engram` the engine warns `the Engram add is skipped (not the real model)` - Engram is an
+architectural n-gram memory added at layers 1 and 14, so a no-Engram boot tests plumbing only.
 
 ## Steady-state totals
 
