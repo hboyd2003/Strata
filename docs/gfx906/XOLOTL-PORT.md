@@ -226,3 +226,34 @@ Expected (from this assessment's same measurement): conflicts confined to `CMake
 - New files: `docs/gfx906/GLM-FIRST-BOOT.md` (T0-T5 + six named first-boot unknowns),
   `tools/glm/serve/strata-glm-mayal-gfx906.json` (draft box config),
   `tools/glm/serve/glm-engine-906.sh` (`STRATA_BUILD_DIR -> build-906`).
+
+## ggml-CUDA-as-HIP: BUILT 2026-10-18 19:25 - the decisive gate is green
+
+`libggml-cuda.a` = 74 MB / 143 objects, 144/144 TUs, 8m01s at `-j2`, ROCm 7.2.0 clang 22, `--offload-arch=gfx906`.
+Built through Strata's `build-906` with `-DSTRATA_GGML_CUDA=ON -DSTRATA_GGML_DIR=/ai/engines/gfx906/llama.cpp-xolotl`
+(clone `3cf03257f-dirty` with `tools/xolotl/ggml/xolotl-ggml.patch` applied; ggml 0.24.0). The ggml-CPU build of the
+same patched tree was green earlier (exit 0, log `/tmp/ggmlcpu.log`).
+
+Two fork changes, all gated on `STRATA_HIP_GFX906`, captured in `tools/gfx906/ggml/hip-cmake.patch` (apply:
+`git apply -p1 tools/gfx906/ggml/hip-cmake.patch` inside the ggml clone):
+1. **CMakeLists, 4 hunks**: skip `find_package(CUDAToolkit)` and `enable_language(CUDA)`; define `GGML_USE_HIP`
+   (that, not `__HIPCC__`, is what selects `vendors/hip.h` in `common.cuh`) and `GGML_CUDA_NO_VMM` (gfx906 has no
+   VMM; also keeps the `CUDA::cuda_driver` link off); assign every globbed `.cu` `LANGUAGE HIP` - without that
+   CMake silently produced a **0-object archive** and still "succeeded"; link `CUDA::cudart`/`CUDA::cublas`
+   (non-static), which map to hip::host / roc::hipblas via Strata's imported targets.
+2. **vendors/hip.h**: the pinned `__shfl_sync/__shfl_up_sync/__shfl_xor_sync` maps demanded all four arguments
+   while newer llama.cpp code calls the 3-arg form (`width` defaults in CUDA; `argsort.cu:301` failed); the maps
+   are now `##__VA_ARGS__`-tolerant.
+
+No `.cu/.cuh` source edits were needed: `vendors/hip.h` already maps cublas names and float intrinsics, and the
+NVIDIA-cc-gated FP4 code evaluates false on gfx906 and falls back as designed. The fork's `strata_mmq` target had
+already proven ggml `.cu -> HIP` compiles for this arch; the CMake-level traps (0-object archive, header selector,
+variadic warp maps) are recorded in daily memory 2026-10-18.
+
+Every build on this box while the incumbent holds ~120 GiB runs behind a `MemAvailable < 2 GiB -> kill` watchdog;
+there is no swap.
+
+**Still open before any GLM/DS4.1 claim**: un-gate the `v41`/`glm` targets for HIP (currently excluded by
+`NOT STRATA_HIP_GFX906`), link the dense half against `ggml` + `ggml-cuda` + `ggml-base` as one resolution set
+(the fork's existing pattern, root CMakeLists ~line 494), then runtime validation T0-T5 of
+`docs/gfx906/GLM-FIRST-BOOT.md`. Compilation is a build gate, not a correctness or speed result.

@@ -1,0 +1,79 @@
+diff --git a/ggml/src/ggml-cuda/CMakeLists.txt b/ggml/src/ggml-cuda/CMakeLists.txt
+index 2254090cb..5eaff9b28 100644
+--- a/ggml/src/ggml-cuda/CMakeLists.txt
++++ b/ggml/src/ggml-cuda/CMakeLists.txt
+@@ -1,6 +1,19 @@
+ cmake_minimum_required(VERSION 3.18)  # for CMAKE_CUDA_ARCHITECTURES
+ 
+-find_package(CUDAToolkit)
++# gfx906 fork (tools/gfx906/ggml/hip-cmake.patch): under STRATA_HIP_GFX906 these sources are compiled by the
++# HIP language that the Strata top-level CMakeLists enabled - CMake builds .cu files as HIP when the CUDA language
++# is not enabled.  CUDA::cudart/CUDA::cublas below resolve to the hip::host/roc::hipblas imported targets Strata
++# creates; vendors/hip.h maps the cublas names; GGML_CUDA_NO_VMM keeps the CUDA::cuda_driver link off.
++if (STRATA_HIP_GFX906)
++    message(STATUS "ggml-cuda: building as HIP (STRATA_HIP_GFX906)")
++    set(CUDAToolkit_FOUND TRUE)
++    set(CUDAToolkit_VERSION "12.4")
++    set(GGML_CUDA_NO_VMM ON)
++    # common.cuh picks vendors/hip.h (hipBLAS + cuda* name maps) on this define, not on __HIPCC__
++    add_compile_definitions(GGML_USE_HIP)
++else()
++    find_package(CUDAToolkit)
++endif()
+ 
+ if (CUDAToolkit_FOUND)
+     message(STATUS "CUDA Toolkit found")
+@@ -56,7 +69,10 @@ if (CUDAToolkit_FOUND)
+         endif()
+     endif()
+ 
+-    enable_language(CUDA)
++    # gfx906 fork: under HIP the language is already enabled at the Strata top level (the .cu sources build as HIP)
++    if (NOT STRATA_HIP_GFX906)
++        enable_language(CUDA)
++    endif()
+ 
+     # TODO: Remove once CCCL 3.2 has been released and bundled with CUDA Toolkit
+     if (GGML_CUDA_CUB_3DOT2)
+@@ -115,6 +131,12 @@ if (CUDAToolkit_FOUND)
+     ggml_cuda_fattn_vec_instances(${CMAKE_CURRENT_SOURCE_DIR} SRCS)
+     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+ 
++    # gfx906 fork: CMake only compiles .cu sources if a language claims them; with the CUDA language off (the HIP
++    # branch of the Strata top level) the files must be assigned to HIP explicitly, exactly like the Strata
++    # tree's own CUDA sources (root CMakeLists "every CUDA source of the tree ... is compiled as HIP").
++    if (STRATA_HIP_GFX906)
++        set_source_files_properties(${GGML_SOURCES_CUDA} PROPERTIES LANGUAGE HIP)
++    endif()
+     ggml_add_backend_library(ggml-cuda
+                              ${GGML_HEADERS_CUDA}
+                              ${GGML_SOURCES_CUDA}
+@@ -145,7 +167,10 @@ if (CUDAToolkit_FOUND)
+     endif()
+ 
+     if (GGML_STATIC)
+-        if (WIN32)
++      # gfx906 fork: HIP has no static cudart/cublas; Strata's CUDA::cudart/CUDA::cublas carry hip::host/roc::hipblas
++      if (STRATA_HIP_GFX906)
++        target_link_libraries(ggml-cuda PRIVATE CUDA::cudart CUDA::cublas)
++      elseif (WIN32)
+             # As of 12.3.1 CUDA Toolkit for Windows does not offer a static cublas library
+             target_link_libraries(ggml-cuda PRIVATE CUDA::cudart_static CUDA::cublas)
+         else ()
+diff --git a/ggml/src/ggml-cuda/vendors/hip.h b/ggml/src/ggml-cuda/vendors/hip.h
+index 48d4eb2ce..c1d44997f 100644
+--- a/ggml/src/ggml-cuda/vendors/hip.h
++++ b/ggml/src/ggml-cuda/vendors/hip.h
+@@ -29,9 +29,9 @@
+ #define CU_MEM_LOCATION_TYPE_DEVICE hipMemLocationTypeDevice
+ #define CU_MEM_ACCESS_FLAGS_PROT_READWRITE hipMemAccessFlagsProtReadWrite
+ #define CU_CHECK(fn) {hipError_t err = fn; if(err != hipSuccess) { GGML_ABORT("HipVMM Failure: %s\n", hipGetErrorString(err)); }}
+-#define __shfl_sync(mask, var, laneMask, width) __shfl(var, laneMask, width)
+-#define __shfl_up_sync(mask, var, laneMask, width) __shfl_up(var, laneMask, width)
+-#define __shfl_xor_sync(mask, var, laneMask, width) __shfl_xor(var, laneMask, width)
++#define __shfl_sync(mask, var, laneMask, ...) __shfl(var, laneMask, ##__VA_ARGS__)
++#define __shfl_up_sync(mask, var, laneMask, ...) __shfl_up(var, laneMask, ##__VA_ARGS__)
++#define __shfl_xor_sync(mask, var, laneMask, ...) __shfl_xor(var, laneMask, ##__VA_ARGS__)
+ #define __all_sync(mask, var) __all(var)
+ #define __any_sync(mask, var) __any(var)
+ #define cublasStrsmBatched hipblasStrsmBatched
