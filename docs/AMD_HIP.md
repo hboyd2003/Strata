@@ -476,6 +476,8 @@ gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 ba
 (`include/strata/platform/hip_compat/`), with a CUDA warp mapped to a logical half of the 64-lane wavefront
 (32-wide shuffles, a ballot of its own half). The hot kernels have wave64 layouts of their own (below). Setup does
 not build it yet: build by hand, and run `serve/server.py` with a config as on any other card.
+(This fork: setup here does build it when `STRATA_EXPERIMENTAL_GFX906=1` is set - the engine step passes this same
+wave64 configuration, witnessed against the build this fork runs; see `docs/gfx906/START-HERE.md`.)
 
 **Community-tested, opt-in (0.1.42).** The gfx906 build is maintained with its users: we have no gfx906 card, so what is here was measured by community members on their MI50s (the attention switches `STRATA_GFX906_ATTN_QUERY_SWIZZLE=1` and `STRATA_GFX906_ATTN_REDUCE12=1`, PRs #1661 and #1718 by 0FL01, are off by default and compiled only into this build) and the engine here is checked to compile for gfx906, nothing more. Nothing in it changes the builds for other cards. A wave32 card seen by this build is refused at start with a message (#1728). Please report how it runs on your card.
 

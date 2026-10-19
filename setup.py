@@ -3005,9 +3005,20 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
         if meta.get("backend") == "hip" and (eng / EXE).exists() and has_archs
         else f"  Compiling the Strata engine for your AMD GPU{'s' if len(archs) > 1 else ''} ({', '.join(archs)}; "
              "10-20 minutes, once) ...")
+    # gfx906 fork: the wave64 compat backend (docs/AMD_HIP.md: "Setup does not build it yet" - here it does, behind the
+    # STRATA_EXPERIMENTAL_GFX906 gate that let this card past the PC check). The two HIP backends refuse each other
+    # (CMakeLists.txt:67) and the wave32 one refuses gfx906 (cmake/hip_backend.cmake); the flags are the wave64 build
+    # this fork witnessed (its build-906 cache), passed explicitly because CMake keeps the cached -D values of an
+    # older wave32 configure of the same build-hip folder.
+    wave64 = "gfx906" in archs
     cmake_build(ROOT, ROOT / "build-hip", "strata",
-                ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
-                 "-DSTRATA_PREFILL_MMQ=ON", "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
+                (["-DSTRATA_HIP_GFX906=ON", "-DSTRATA_ENABLE_HIP=OFF", "-DSTRATA_ENABLE_CUDA=ON",
+                  "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_PREFILL_MMQ=OFF",
+                  f"-DCMAKE_C_COMPILER={root / 'llvm' / 'bin' / 'clang'}",
+                  f"-DCMAKE_CXX_COMPILER={root / 'llvm' / 'bin' / 'clang++'}"] if wave64 else
+                 ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
+                  "-DSTRATA_PREFILL_MMQ=ON"]) +
+                ["-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
                  f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
                  f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",

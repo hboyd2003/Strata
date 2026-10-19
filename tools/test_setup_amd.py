@@ -201,6 +201,35 @@ class GpuLists(unittest.TestCase):
                 for k, v in saved.items():
                     setattr(setup, k, v)
 
+    def test_build_gfx906_is_the_wave64_backend(self):
+        """gfx906 fork: the engine step builds the wave64 compat backend, not the wave32 HIP that refuses gfx906."""
+        calls = {}
+        saved = {k: getattr(setup, k) for k in ("ROOT", "rocm_root", "cmake_build", "source_hash", "source_version",
+                                                "ok", "shutil")}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            def fake_build(src, bdir, target, defs, vcvars, bat):
+                calls["defs"] = defs
+                (bdir).mkdir(parents=True, exist_ok=True)
+                (bdir / setup.EXE).write_text("engine")
+
+            class Sh:
+                which = staticmethod(lambda name: "/usr/bin/" + name)
+                copy2 = staticmethod(lambda a, b: Path(b).write_text(Path(a).read_text()))
+            setup.ROOT, setup.cmake_build, setup.ok, setup.shutil = root, fake_build, lambda *a: None, Sh
+            setup.source_hash, setup.source_version = (lambda *a: "h"), (lambda: "0.1.31")
+            setup.rocm_root = lambda archs: (root, [str(root / "lib")])
+            try:
+                setup.build_engine_hip({"arch": "gfx906", "archs": ["gfx906"]}, root)
+                self.assertIn("-DSTRATA_HIP_GFX906=ON", calls["defs"])        # the wave64 compat backend
+                self.assertNotIn("-DSTRATA_ENABLE_HIP=ON", calls["defs"])     # the backends refuse each other (CMakeLists.txt:67)
+                self.assertIn("-DSTRATA_PREFILL_MMQ=OFF", calls["defs"])      # the witnessed wave64 config (build-906's cache)
+                self.assertIn("-DCMAKE_HIP_ARCHITECTURES=gfx906", calls["defs"])
+            finally:
+                for k, v in saved.items():
+                    setattr(setup, k, v)
+
 
 class WindowsDetection(unittest.TestCase):
     """Windows: the AMD cards from the display adapters (mocked Win32_VideoController rows and display-class registry
