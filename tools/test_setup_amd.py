@@ -79,6 +79,19 @@ class KfdDetection(unittest.TestCase):
         self.assertEqual(setup.ROCM_INDEXES["gfx1031"], setup.ROCM_INDEXES["gfx1030"])
         self.assertIsNone(setup.amd_problem({"arch": "gfx1031"}))
 
+    def test_gfx906_opt_in(self):
+        # the gfx906 fork: STRATA_EXPERIMENTAL_GFX906=1 takes the Radeon Instinct MI50 (Vega 20); unset: unchanged
+        self.assertNotIn("gfx906", setup.AMD_ARCHS)                    # these tests run with the env unset
+        self.assertIn("gfx906", setup.ROCM_INDEXES)                    # inert until the arch is chosen, like gfx1103
+        g = {"index": 0, "name": "AMD Instinct MI50 32GB", "arch": "gfx906", "vram_gb": 31.9}
+        self.assertIn("not supported", setup.amd_problem(g))           # upstream's refusal stands by default
+        saved = setup.AMD_ARCHS
+        try:
+            setup.AMD_ARCHS = saved + ("gfx906",)                      # what the opt-in computes at import
+            self.assertIsNone(setup.amd_problem(g))
+        finally:
+            setup.AMD_ARCHS = saved
+
 
 class GpuLists(unittest.TestCase):
     """--gpus with AMD cards: every chosen card must be supported; the first is the main one."""

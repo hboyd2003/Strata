@@ -59,7 +59,11 @@ config. Neither exists on this box yet (only GLM/DS4.1 ported-engine artifacts a
 `serve/` holds no model config). Steps: download/convert the Qwen3.8-Flash-Next Strata artifact
 per `docs/MODEL-DOWNLOADS.md` + `setup.py`'s flow, generate its serve config, and record its
 identity (sha, quant, ctx). This is operator-gated (disk/RAM): 869 GB free on `/ai` as of
-2026-10-18.
+2026-10-18. **Status 2026-10-19:** the first attempt stopped at setup's PC check - upstream's AMD allow-list
+refuses gfx906 (`setup.py:5982`); the fork now accepts it behind
+`STRATA_EXPERIMENTAL_GFX906=1` (mirroring upstream's own gfx1103 opt-in, `setup.py:2095`), gated by
+`tools/test_setup_amd.py` (37 tests) and witnessed live on the 4x MI50 box (unset refuses 4/4, set
+accepts 4/4). Re-run the same setup command with that env var set, behind the RAM watchdog.
 
 **P0.1 - no-GPU server-side suite. DONE 2026-10-19.**
 `python3 -m serve.test_parallel` from the repo root (NOT `python3 serve/test_parallel.py` - the

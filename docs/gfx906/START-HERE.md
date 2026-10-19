@@ -23,6 +23,14 @@ rebuild result for the fork's present source revision.
 The [container guide](CONTAINER.md) shows the archived digest-pinned runtime with external model mounts and
 experimental AB/CD kept off by default.
 
+The installer follows the same opt-in culture: `STRATA_EXPERIMENTAL_GFX906=1` lets `setup.py` accept gfx906
+cards at its PC check (the same mechanism upstream uses for `STRATA_EXPERIMENTAL_GFX1103=1`); unset, setup
+refuses gfx906 exactly as upstream does. Checked 2026-10-19 on this 4x MI50 box: unset refuses 4/4, set
+accepts 4/4 (`tools/test_setup_amd.py`, 37 tests including a gfx906 case). This opens the mainline-model
+install (pack, PLE shard, pinned MTP draft, run config). The engine remains the one this fork builds; setup's
+ROCm-wheel fallback (`rocm.nightlies.amd.com/v2/gfx906/`, seen carrying 7.14.0a20260608 to ...20260612) is
+reached only on machines without a system ROCm 7.
+
 ## Evidence boundary
 
 The exact source base, archived native binary SHA-256, OCI index digest, and historical AB/CD throughput scope are
