@@ -20,7 +20,7 @@ Scope: the Qwen3.8-Flash-Next engine path (`src/program/generate.cpp` + `src/cor
 dispatches to its own engine (`generate.cpp:1874-1886`, `src/qwen35/`) which has none of the
 slot/checkpoint machinery described here - extending this analysis to it is separate work. (q36 has
 its own `--serve` protocol, a one-conversation-deep prefix reuse (`q36_engine.cu:2274-2287`) and
-mid-request STOP (`:2211, 2305`); `--batch` degrades safely there - it skips unknown args and never
+mid-request STOP (`:2209-2211, 2313`); `--batch` degrades safely there - it skips unknown args and never
 prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engine.cu:2388-2390`,
 `serve/server.py:965`.)
 
@@ -31,7 +31,7 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    "SEVERAL SEQUENCES IN ONE WINDOW" (`include/strata/core/verify.hpp:183-203`); opt-in
    `--batch-mtp` runs four slots x 2 rows rotated (`generate.cpp:581, 9981-10006`); CUDA graphs are captured per
    row-layout with LRU eviction (`verify.hpp:340-356`). Window rows are capped by
-   `kVerifyMaxT = 8` (`include/strata/kernels/verify_kernels.hpp:21`).
+   `kVerifyMaxT = 8` (`include/strata/kernels/verify_kernels.hpp:20`).
 2. **The line protocol already interleaves streams.** `BGEN <slot>` dynamic admission
    (`generate.cpp:10362-10398`), `BADM` continue, `BT/BDONE <slot>` per-slot token streams routed
    into per-slot server queues (`serve/server.py:984-1032`, `generate_batched` `:1544`), `BSTOP`,
@@ -49,7 +49,7 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    tokens in one pass (`src/core/layer.cpp:398-422`).
 4. **Per-sequence isolation and three preemption tiers.** Each batch slot owns a full
    `SessionState` (`src/core/verify.cpp:2765`); preemption exists at three costs: verifier
-   snapshot (rollback, us), `Ds41Dense::park/unpark` (host RAM, positional caches, single parked
+   snapshot (device-side rollback; no cost is documented anywhere I found), `Ds41Dense::park/unpark` (host RAM, positional caches, single parked
    conversation `tools/v41/engine/ds41_dense.cpp:1685-1718`), and `SAVE`/`RESTORE` disk session
    files (`generate.cpp:10438-10448`) - but tier 3 is REFUSED exactly when it would be needed:
    slot save/restore returns 501 with `"parallel"`/`--batch` active, and even solo it needs
@@ -63,7 +63,7 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
 6. **The admission state machine is production, not a sketch.** A waiting prompt announces its
    length; the reading request yields at the next chunk boundary and PARKS its part-read into a
    slot with matching checkpoints handed over (`copy_to_slot` `generate.cpp:9889, 11644-11712`,
-   `YIELDED` `:13068`), and its later `BGEN` resumes from the parked prefix (`slot_source`
+   `YIELDED` `:13060`), and its later `BGEN` resumes from the parked prefix (`slot_source`
    `:11002-11026`). Between prompt chunks the pump decodes active slots for
    `STRATA_BATCH_DECODE_SHARE` (default 0.5) of the chunk time (`:11634-11640`); with stdin idle
    it pumps decode at all times (`:10353-10354`). A conversation prefers its old slot next turn
@@ -72,7 +72,7 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    variable rather than erroring, with a stall witness and orphan-slot reaper (`:1645-1686,
    1462-1481`); only repeated engine `BGEN` refusals produce a retry-after (`:1735-1737`). Shared
    blast radius is real though: a failed window kills the engine process and every lane with it
-   (`server.py:1046-1048`, `generate.cpp:10041-10044`) - the server-side behavior is pinned by
+   (`server.py:1041-1042`, `generate.cpp:10041-10044`) - the server-side behavior is pinned by
    `test_a_failed_window_names_its_error`; the engine has no recovery.
 
 Demonstrated ceiling so far: the fork's archived-binary evidence - P4 AB/CD, 4 lanes, 102K
@@ -87,9 +87,8 @@ receipt, not to this row.
 |---|---|---|---|
 | G1 | window rows capped at 8 (`kVerifyMaxT`) - a WINDOW cap, not a slot cap: `--batch-mtp` already rotates >8 slots past it (`generate.cpp:4530-4533, 9981-10006`) | raising the constant is cross-cutting: it sizes solo `--pipeline-windows` buffers and graph rows (`:4635, 7832, 7926`), penalty history (`kHistSlots = 4096 x kVerifyMaxT`, `:7765`), static asserts and exact-T kernel instantiations (`verify_kernels.cu:1006-1008, 1129-1130`), CPU `MAXT` (`kq_avx2.cpp:28`) - it moves allocations on default solo+pipeline paths, which collides with the byte-identical-default rule; plus each captured row-layout is a graph pair in VRAM competing with expert slots on 32 GB (`verify.hpp:210-211`) | M, 2-3 wk |
 | G2 | the serialized residue is ONE prompt read on the wire - and it is already chunk-interleaved with preempt-resume (item 6): waiting prompts force `BYIELD` at chunk boundaries, the part-read parks into a slot and resumes (`generate.cpp:11644-11712, 11002-11026`), slots keep decoding between chunks (`:11634-11640`) | the real gap: prompts read via a private path ("BGEN reads as a GEN 1", `:570, 10362`) instead of running as ROWS of the shared verify window, so a prefill chunk cannot share a step with other slots' decode | M, 2-4 wk |
-| G3 | recurrent-state kernels are sequence-serial | `gdn_step_norm_multi` takes ONE state pointer (`include/strata/kernels/verify_kernels.hpp:41-44`); batch windows loop slots host-side (`src/core/verify.cpp:1208-1247`). Past ~4 lanes needs a multi-state step kernel (state-stride grid dim) + parity gate | M, 3-6 wk |
 | G3 | recurrent-state kernels are sequence-serial | `gdn_step_norm_multi` takes ONE state pointer (`include/strata/kernels/verify_kernels.hpp:41-44`); batch windows loop slots host-side (`src/core/verify.cpp:1208-1247`). Whether that serial loop is the limiter at N lanes is UNMEASURED (small kernels x 36 layers x N per step); measure per-step host-loop time at 4 slots before building the multi-state kernel (state-stride grid dim) + parity gate | M, 3-6 wk |
-| G4 | memory scales x N: every slot gets a FULL `--max-context` session pool (one `cudaMalloc` each, `generate.cpp:4564-4576`; pool bytes scale with ctx, `layer.cpp:660-688`) + ~118 MB running state per sequence (GDN + PLE + indexer tails; `generate.cpp:1502`, `docs/DETAILS.md:968`) | the cap SHIPS: the fit check allocates until OOM, self-reports `INFO batch_slots=fit slot_cache=..` and the server obeys (`:4574-4603`, `serve/server.py:962-968`); N = min(8 unless `--batch-mtp`, floor(free / session_bytes(full ctx))) per device; a slot past `max_context` ends `finish=length` (`generate.cpp:10097-10100`). Part 2 removes the ctx factor | - |
+| G4 | memory scales x N: every slot gets a FULL `--max-context` session pool (one `cudaMalloc` each, `generate.cpp:4564-4576`; pool bytes scale with ctx, `layer.cpp:660-688`) + ~118 MB running state per sequence (GDN + PLE + indexer tails; `generate.cpp:1502`, `docs/DETAILS.md:968`) | the cap SHIPS: the fit check allocates until OOM, self-reports `INFO batch_slots=fit slot_cache=..` and the server obeys (`:4574-4603`, `serve/server.py:962-968`); N = min(8 unless `--batch-mtp`, floor(free / session_bytes(full ctx))) per device; a slot past `max_context` ends `finish=length` (`generate.cpp:10105-10106`). Part 2 removes the ctx factor | - |
 | G5 | per-request sampling IS plumbed (server `sampling_keys` -> `BGEN` -> `set_slot_sampling` at admission, `server.py:1195-1240`, `generate.cpp:11739-11747, 13082`; Philox seeded by position matches the solo draw, `verify.cpp:3219`) | what genuinely drifts: the batch sampler zeroes penalties (`sp.penalty_last_n = 0`, `verify.cpp:3218`) while the server keeps sending them (`server.py:1213-1227`) - same request, different sampling semantics solo vs batched, silently | S |
 | G6 | MoE cache policy sized for 1 stream (`pcie_frac` comment at `ds41_moe.hpp:280`: "single-token decode only") | prefetch budget `pf_b=1.43` experts/token (`:288`), `kMaxPf=6` (`:344`); N streams multiply the per-step union; `predict_multi` + `STRATA_ROUTE_LOG` are batch-census seeds but exist ONLY in the ported DS4.1 engine - mainline `src/` has no route census | M, measure-driven |
 | G7 | ported engines are single-global | GLM `L.kvc`/KDA state and DS4.1 comp/idxk caches have no sequence dim (`tools/glm/glm_dense.cpp:839-844`, `ds41_dense.cpp:1085-1094`) - per-session conversion over positional caches (park/unpark proves the swap primitive) | L, phase-3 |
@@ -136,7 +135,7 @@ The three structural gaps (from the sweep, in ascending hardness):
    able to restore the running state (GDN + PLE + indexer tails): ~118 MB per snapshot (figure at
    `generate.cpp:1502`, `docs/DETAILS.md:968`; the copy set at `conversation_state.cpp:165-186`)
    is ~9,300 tokens' worth of int8 KV (12,672 B/token, `include/strata/kernels/kv_q8.hpp:8`) - at
-   a 4-token page granule the state is ~10^4x the page's cost. Two economics notes that matter for
+   a 4-token page granule the state is ~2,300x the page's cost (118 MB / 4 x 12,672 B). Two economics notes that matter for
    the design: the snapshots live in HOST RAM (`generate.cpp:637-639`) while the shared pages are
    VRAM, so the tree's state cost and its page cost compete for DIFFERENT budgets; and a resume
    pays a ~118 MB H2D per node restore (the engine logs `session restored ... in %.1f ms`,
