@@ -131,6 +131,15 @@ python3 tools/v41/extract_engram.py \
   --to layers.14=/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l14
 ```
 
+**DONE 2026-10-18 21:58.** Both tables landed, 2m49s, exit 0, 2000 random rows per tensor verified
+against the FP8 source:
+`engram/l1/engram-L1.safetensors` (101,377,628,584 B) and
+`engram/l14/engram-L14.safetensors` (101,380,404,328 B), each with its own
+`model.safetensors.index.json`. Note the script is on the merge branch, so run it from that tree
+(`/ai/engines/gfx906/worktrees/xolotl-merge/tools/v41/extract_engram.py`) - the main checkout's
+branch predates the Xolotl merge and has no `tools/v41`.
+The `/ai` volume is now at 680 GB free.
+
 After the extraction reports ~203 GB of tables, the FP8 shards can be deleted. The engine then runs
 with `--engram /ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l1:/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l14`.
 Without `--engram` the engine warns `the Engram add is skipped (not the real model)` - Engram is an
