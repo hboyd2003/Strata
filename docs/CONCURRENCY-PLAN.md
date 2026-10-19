@@ -61,11 +61,15 @@ per `docs/MODEL-DOWNLOADS.md` + `setup.py`'s flow, generate its serve config, an
 identity (sha, quant, ctx). This is operator-gated (disk/RAM): 869 GB free on `/ai` as of
 2026-10-18.
 
-**P0.1 - no-GPU server-side suite (can run today).**
-`python3 serve/test_parallel.py` - 30 cases over the protocol: BYIELD re-admission order,
+**P0.1 - no-GPU server-side suite. DONE 2026-10-19.**
+`python3 -m serve.test_parallel` from the repo root (NOT `python3 serve/test_parallel.py` - the
+suite imports `serve.frontend`/`serve.server`, which needs the repo root on `sys.path`; BATCHING.md
+does not record this). 30 cases over the protocol: BYIELD re-admission order,
 solo<->slot transitions, per-lane stop semantics, fit handshake, SSE stream integrity (one
 `[DONE]` per lane), `finish=length|stop` exactness, the batched sampler ignoring penalties,
-`--batch-mtp` with 12 slots through 8-row windows. Witness: 30/30 green on this checkout.
+`--batch-mtp` with 12 slots through 8-row windows. Witness recorded: **Ran 30 tests ... OK,
+53.9 s, this checkout at `4b4a5b35`**, scripted fake engine behind the real `StrataEngine` +
+`Service`, no GPU used.
 
 **P0.2 - engine parity on gfx906 (GPU, minutes per run).**
 `python3 tools/batch_test.py --exe build-906/strata --config <flash-next.json> --batch 4 --n 4`
@@ -215,5 +219,6 @@ Sequence so each step is independently shippable and opt-in:
 
 Effort summary: P0 ~1 week (mostly waiting on GPU/RAM windows), G8 ~0, P1 2-4 weeks, P3 3-6 weeks
 (conditional), P2 1-2 months (conditional), P4 last and gated on the ported-engine bring-up.
-The honest current position: P0.1 runs today with no GPU; everything else waits on the P0.0
+The honest current position: P0.1 is DONE (30/30 OK, 2026-10-19, this checkout); everything else
+waits on the P0.0
 artifact and a GPU+RAM window on this box.
