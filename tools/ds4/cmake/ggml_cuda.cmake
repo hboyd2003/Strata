@@ -8,4 +8,25 @@ if(STRATA_GGML_CUDA)
   # ggml defaults CUDA graphs OFF when it is not llama.cpp's own build; without them the DS4 dense half's ~17k tiny
   # kernels per token run at launch-overhead speed (measured: 97 ms/token of attention, 2.1M cudaLaunchKernel)
   set(GGML_CUDA_GRAPHS ON CACHE BOOL "" FORCE)
+  if(STRATA_HIP_GFX906)
+    # HIP: ggml-cuda/CMakeLists.txt needs tools/gfx906/ggml/hip-cmake.patch (skips find_package(CUDAToolkit) -
+    # the CUDA::cudart/CUDA::cublas imported targets above already carry hip::host/roc::hipblas).
+    # NO_VMM: the CUDA driver link and the cu* VMM path stay off; ALL_WARNINGS: the warning-probe block shells out
+    # to nvcc, which does not exist here.
+    set(GGML_CUDA_NO_VMM ON CACHE BOOL "" FORCE)
+    set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+    if(STRATA_GGML_DIR)
+      get_filename_component(_hip_ggml_parent ${STRATA_GGML_DIR} DIRECTORY)
+      execute_process(COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${_hip_ggml_parent}
+                              git apply --reverse --check ${CMAKE_CURRENT_SOURCE_DIR}/tools/gfx906/ggml/hip-cmake.patch
+                      WORKING_DIRECTORY ${STRATA_GGML_DIR}
+                      RESULT_VARIABLE _hip_cmake_patched OUTPUT_QUIET ERROR_QUIET)
+      if(NOT _hip_cmake_patched EQUAL 0)
+        message(FATAL_ERROR "STRATA_HIP_GFX906 + STRATA_GGML_CUDA: STRATA_GGML_DIR=${STRATA_GGML_DIR} does not carry "
+                            "tools/gfx906/ggml/hip-cmake.patch - apply it to the llama.cpp checkout first "
+                            "(git apply tools/gfx906/ggml/hip-cmake.patch); the GGML_HIP option in this llama.cpp "
+                            "commit is dead code, the CMakeLists does not act on it")
+      endif()
+    endif()
+  endif()
 endif()
