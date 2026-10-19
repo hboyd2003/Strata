@@ -242,4 +242,6 @@ drift (`server.py:3133` not `:215`; `DETAILS.md:967` not `:968`; the G3 loop ran
 quote to the header's own words). A fresh audit's challenge to the ~2,300x page-cost ratio was
 checked and REJECTED: 118 MB / (4 tokens x 12,672 B/token) = 2,328, consistent with the per-token
 figure being across all 12 QSA layers (`kv_q8.hpp:8`) - the correct unit for a shared node's
-savings. An auditor's arithmetic is itself an audit target.
+savings. An auditor's arithmetic is itself an audit target. The build plan for these phases -
+PR splits, gates, receipts, and the conditional go/no-go measurements - is
+[CONCURRENCY-PLAN.md](CONCURRENCY-PLAN.md).
