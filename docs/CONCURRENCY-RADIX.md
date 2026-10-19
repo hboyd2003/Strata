@@ -1,10 +1,11 @@
 # vLLM-style concurrency and Radix KV in Strata - source-based gap analysis
 
 Investigation 2026-10-18, four read-only source sweeps of this tree (mainline engine `src/`,
-`include/strata/`, server `serve/`, ported engines `tools/glm`, `tools/v41`), three citation
-audits, and a reconciliation against the shipped feature's own production doc (`docs/BATCHING.md`,
-plus `docs/MESSAGE_BOUNDARY_CACHE.md`, `docs/DISJOINT_EXPERT_CACHE.md`, `docs/LOGIT_BIAS.md`).
-Every claim is a
+`include/strata/`, server `serve/`, ported engines `tools/glm`, `tools/v41`), seven review passes
+(framing, citations, completeness - the last three re-read every file fresh), and a reconciliation
+against the shipped feature's own production docs (`docs/BATCHING.md`, `docs/MULTI_GPU.md`,
+`docs/MESSAGE_BOUNDARY_CACHE.md`, `docs/DISJOINT_EXPERT_CACHE.md`, `docs/LOGIT_BIAS.md`,
+`docs/KV_PREFETCH.md`, `docs/DETAILS.md`). Every claim is a
 file:line from this checkout or a number from an evidence doc, with that doc's own caveats
 attached. Engineering effort figures are estimates, not commitments. Like every new feature here,
 each phase below is opt-in and the default path stays byte-identical (AGENTS.md).
@@ -34,14 +35,17 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    windows carry "SEVERAL SEQUENCES IN ONE WINDOW" (`include/strata/core/verify.hpp:183-203`); opt-in
    `--batch-mtp` runs four slots x 2 rows rotated (`generate.cpp:581, 9981-10006`); on a layer split
    `--batch-groups G` pipelines the slots through the stages (default `auto` since 0.1.41;
-   measured 8 clients: 166 against 86 tok/s on 4 GPUs, `docs/BATCHING.md`); CUDA graphs are captured per
+   measured 8 clients: 166 against 86 tok/s on 4 GPUs, `docs/BATCHING.md`) - while the speculative
+   `--pipeline-windows` overlap is switched OFF by `--batch` itself (`docs/MULTI_GPU.md`), so on a
+   split the pipelining that survives batching is the group-per-stage one; CUDA graphs are captured per
    row-layout with LRU eviction (`verify.hpp:340-356`). Window rows are capped by
    `kVerifyMaxT = 8` (`include/strata/kernels/verify_kernels.hpp:20`).
 2. **The line protocol already interleaves streams.** `BGEN <slot>` dynamic admission
    (`generate.cpp:10362-10398`), `BADM` continue, `BT/BDONE <slot>` per-slot token streams routed
    into per-slot server queues (`serve/server.py:984-1032`, `generate_batched` `:1544`), `BSTOP`,
    and `BYIELD`/`YIELDED` prompt preemption (`generate.cpp:11644-11712`). The "single turn" is a
-   server-side fifo lock for solo requests (`serve/server.py:215, 3133`); batch requests bypass it.
+   server-side fifo lock for solo requests (`serve/server.py:3133`); batch requests bypass it
+   (`:4293-4302`).
    With `"parallel": N` this is the NORMAL `/v1/chat/completions` path, not a special endpoint
    (`parallel_args` `serve/server.py:2699-2718`; the fifo is never taken, `:4300-4302`), hardened
    through at least ten filed issues visible in-line (#656, #1012, #1527, #1603, #1869, #1994,
@@ -59,17 +63,21 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    files (`generate.cpp:10438-10448`) - but tier 3 is REFUSED exactly when it would be needed:
    slot save/restore returns 501 with `"parallel"`/`--batch` active, and even solo it needs
    `--slot-save-path DIR` (`serve/server.py:3209-3213`). Disk-tier preemption is absent precisely
-   where concurrency runs. A fourth mechanism sits beside the tiers and DOES work with slots and
-   layer splits: the conversation parking cache (`--conversation-cache-mib/-slots`) restores a
-   parked conversation on every stage before its admission - follow-ups reached first token in
-   0.53 s against 3.9 s for fresh reads on a 4-GPU split (`docs/BATCHING.md`, `docs/DETAILS.md`).
+   where concurrency runs. A fourth mechanism sits beside the tiers: the conversation parking
+   cache (`--conversation-cache-mib/-slots`) restores a parked conversation on every stage before
+   its admission - follow-ups reached first token in 0.53 s against 3.9 s for fresh reads on a
+   4-GPU split (`docs/BATCHING.md`, `docs/DETAILS.md`); it is verified for layer splits by
+   `tools/parking_test.py`, refuses itself under RAM pressure (2,560 MiB floor by default,
+   `--conversation-cache-min-free-mib`), and its HIP and multi-GPU coverage is explicitly called
+   out as needing separate evidence from Linux/CUDA (`docs/DETAILS.md`) - unvalidated on this box.
 5. **Prefix reuse is checkpoint-chain based.** Up to `--prompt-cache` 6 checkpoints at multiple
    depths (root, turn boundaries, pin, every 16,384 tokens, tail) in host RAM
    (`generate.cpp:639-658, 8447-8485`); resume at longest token-prefix match; `pin=N` marks one
    pinned anti-eviction prefix (`conversation_cache.hpp:24-28`); replicas route on chained
    64-token block hashes (`serve/replicas.py:32,123-159`); turn-boundary prefix reuse is measured
    work: first-edit time fell 33.1%, reused prefix grew 22,016 -> 32,831 tokens, at prefixes
-   >= 8,192 with a tail <= 1,024 (`docs/MESSAGE_BOUNDARY_CACHE.md`).
+   >= 8,192 with a tail <= 1,024 - opt-in (`STRATA_CACHE_MESSAGE_BOUNDARY=1`) and LAYER-SPLIT
+   EXECUTION IS EXCLUDED, which is this box's intended shape (`docs/MESSAGE_BOUNDARY_CACHE.md`).
 6. **The admission state machine is production, not a sketch.** A waiting prompt announces its
    length; the reading request yields at the next chunk boundary and PARKS its part-read into a
    slot with matching checkpoints handed over (`copy_to_slot` `generate.cpp:9889, 11644-11712`,
@@ -88,8 +96,10 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
 Demonstrated ceiling so far. The shipped feature's own measurements are the strongest evidence
 and match this box's shape: a 4-GPU layer split (4x 16 GB, PCIe Gen3, IQ3_S,
 `--batch 8 --batch-groups 4 --trim-stage-weights`) served 1/2/4/8 concurrent requests at
-aggregate 120/113/205/360 tok/s (`docs/BATCHING.md`, PR #559; `--trim-stage-weights` raised the
-VRAM expert share from 76-85% to 84-100%). The same doc's 12 GB card table shows the other side:
+aggregate 120/113/205/360 tok/s (`docs/BATCHING.md`, engine PR #559). `--trim-stage-weights` (PR
+#639) raised the VRAM expert share from 76-85% to 84-100%, with MI50 evidence in the same
+direction (2x MI50 16 GB, Coder: 8,819 -> 10,626 experts in VRAM, 39.2 -> 41.7 tok/s,
+`docs/MULTI_GPU.md`). The same doc's 12 GB card table shows the other side:
 where most experts run on the CPU, slots buy waiting time, not speed (-11..-24%; the fourth of four
 requests starts after 1.8 s there instead of 11.2 s queued). Older fork-specific evidence, the
 archived AB/CD binary - 4 lanes, 102K context, 71.17/53.94 tok/s aggregate on MI50
@@ -103,12 +113,12 @@ EVIDENCE.md records this row only as "archived MI50" and does not state its card
 |---|---|---|---|
 | G1 | window rows capped at 8 (`kVerifyMaxT`) - a WINDOW cap, not a slot cap: `--batch-mtp` already rotates >8 slots past it (`generate.cpp:4530-4533, 9981-10006`) | raising the constant is cross-cutting: it sizes solo `--pipeline-windows` buffers and graph rows (`:4635, 7832, 7926`), penalty history (`kHistSlots = 4096 x kVerifyMaxT`, `:7765`), static asserts and exact-T kernel instantiations (`verify_kernels.cu:1006-1008, 1129-1130`), CPU `MAXT` (`kq_avx2.cpp:28`) - it moves allocations on default solo+pipeline paths, which collides with the byte-identical-default rule; plus each captured row-layout is a graph pair in VRAM competing with expert slots on 32 GB (`verify.hpp:210-211`) | M, 2-3 wk |
 | G2 | the serialized residue is ONE prompt read on the wire - and it is already chunk-interleaved with preempt-resume (item 6): waiting prompts force `BYIELD` at chunk boundaries, the part-read parks into a slot and resumes (`generate.cpp:11644-11712, 11002-11026`), slots keep decoding between chunks (`:11634-11640`) | the real gap: prompts read via a private path ("BGEN reads as a GEN 1", `:570, 10362`) instead of running as ROWS of the shared verify window, so a prefill chunk cannot share a step with other slots' decode | M, 2-4 wk |
-| G3 | recurrent-state kernels are sequence-serial | `gdn_step_norm_multi` takes ONE state pointer (`include/strata/kernels/verify_kernels.hpp:41-44`); batch windows loop slots host-side (`src/core/verify.cpp:1208-1247`). Whether that serial loop is the limiter at N lanes is UNMEASURED (small kernels x 36 layers x N per step); measure per-step host-loop time at 4 slots before building the multi-state kernel (state-stride grid dim) + parity gate | M, 3-6 wk |
-| G4 | memory scales x N: every slot gets a FULL `--max-context` session pool (one `cudaMalloc` each, `generate.cpp:4564-4576`; pool bytes scale with ctx, `layer.cpp:660-688`) + ~118 MB running state per sequence (GDN + PLE + indexer tails; `generate.cpp:1502`, `docs/DETAILS.md:968`) | the cap SHIPS: the fit check allocates until OOM, self-reports `INFO batch_slots=fit slot_cache=..` and the server obeys (`:4574-4603`, `serve/server.py:962-968`); N = min(8 unless `--batch-mtp`, floor(free / session_bytes(full ctx))) per device; a slot past `max_context` ends `finish=length` (`generate.cpp:10105-10106`). Part 2 removes the ctx factor | - |
+| G3 | recurrent-state kernels are sequence-serial | `gdn_step_norm_multi` takes ONE state pointer (`include/strata/kernels/verify_kernels.hpp:41-44`); batch windows loop slots host-side (`src/core/verify.cpp:1208-1217, 1242-1255`). Whether that serial loop is the limiter at N lanes is UNMEASURED (small kernels x 36 layers x N per step); measure per-step host-loop time at 4 slots before building the multi-state kernel (state-stride grid dim) + parity gate | M, 3-6 wk |
+| G4 | memory scales x N: every slot gets a FULL `--max-context` session pool (one `cudaMalloc` each, `generate.cpp:4564-4576`; pool bytes scale with ctx, `layer.cpp:660-688`) + ~118 MB running state per sequence (GDN + PLE + indexer tails; `generate.cpp:1502`, `docs/DETAILS.md:967`) | the cap SHIPS: the fit check allocates until OOM, self-reports `INFO batch_slots=fit slot_cache=..` and the server obeys (`:4573-4611`, `serve/server.py:962-968`); N = min(8 unless `--batch-mtp`, floor(free / session_bytes(full ctx))) per device; a slot past `max_context` ends `finish=length` (`generate.cpp:10105-10106`). Part 2 removes the ctx factor | - |
 | G5 | per-request sampling IS plumbed (server `sampling_keys` -> `BGEN` -> `set_slot_sampling` at admission, `server.py:1195-1240`, `generate.cpp:11739-11747, 13082`; Philox seeded by position matches the solo draw, `verify.cpp:3219`; sampled rows documented as drawn row-by-row with the solo counter, `docs/BATCHING.md` Exactness) | what genuinely drifts: the batch sampler zeroes penalties (`sp.penalty_last_n = 0`, `verify.cpp:3218`) while the server keeps sending them (`server.py:1213-1227`) - same request, different sampling semantics solo vs batched. The limitation is DOCUMENTED (`docs/BATCHING.md` Limits: "Repetition / frequency / presence penalties are not applied in batch windows") but not enforced per-request - and the enforcement pattern exists next door: `logit_bias` returns HTTP 400 under `--batch` rather than being silently ignored (`docs/LOGIT_BIAS.md`) | S |
 | G6 | expert-cache policy is per-stream, and cross-card duplication is real. NOT because batch windows ignore routes - they count them and adapt the VRAM tier every `--adapt-every` windows (`--adapt-async 1` measured 89.2 against 74.7 blocking against 45.2 frozen tok/s, `docs/BATCHING.md`) | the prefetch budget `pf_b=1.43` experts/token (`ds41_moe.hpp:288`, ported engine; `pcie_frac` comment `:280` "single-token decode only") is sized for one stream; disjoint-route cost is MEASURED: 4 lanes read ~24 CPU experts/layer against ~8 solo (54 ms against 20 ms per window, RTX 5070, `docs/BATCHING.md`) - why setup recommends `parallel` only where experts mostly fit VRAM; helper/primary duplicate slots measured ~1,900-2,000 with an ownership-guard fix (+15.5% historical, `docs/DISJOINT_EXPERT_CACHE.md`, upstream-GPU perf unvalidated); `predict_multi` + `STRATA_ROUTE_LOG` census seeds exist ONLY in the ported DS4.1 engine | M, measure-driven |
 | G7 | ported engines are single-global | GLM `L.kvc`/KDA state and DS4.1 comp/idxk caches have no sequence dim (`tools/glm/glm_dense.cpp:839-844`, `ds41_dense.cpp:1085-1094`) - per-session conversion over positional caches (park/unpark proves the swap primitive) | L, phase-3 |
-| G8 | batched output is NOT bit-equal to solo by default | the CPU IQ grouped kernels round a token's expert rows differently alone than in a group (#152: `native_expert.cpp:155-162`) so greedy can depend on how many drafts the window held, and kernel choice depends on CPU ISA; the equalizer `STRATA_IQ_MT_MIN=1` costs a measured -1..-3% decode on IQ3_S. Plus plain `--batch` runs NO drafts (1 row/slot): every lane loses MTP unless `--batch-mtp`. The full exactness recipe is documented (`docs/BATCHING.md`: `STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--adapt-every 1000000`, `--no-prefill-borrow` - the adaptive tier moving experts between runs and a prompt borrowing cache slots ALSO change rounding); without it, measured drift on RTX 5070: 3 of 4 lanes apart from solo from token 0/99/174. The comparator EXISTS: `tools/batch_test.py` compares alone-vs-together token by token (8 conversations, with and without pipeline) and `tools/batch_interleave_test.py` covers BYIELD/resume/solo-return. Decide the semantics, then wire the recipe into CI | S (a decision, not code) |
+| G8 | batched output is NOT bit-equal to solo by default | the CPU IQ grouped kernels round a token's expert rows differently alone than in a group (#152: `src/kernels/cpu/native_expert.cpp:155-162`) so greedy can depend on how many drafts the window held, and kernel choice depends on CPU ISA (quant- and CPU-dependent: without AVX-512, IQ3_S already takes the multi-token kernel for every group by default and its rows no longer depend on drafting, `:162-168`); the equalizer `STRATA_IQ_MT_MIN=1` costs a measured -1..-3% decode on IQ3_S on AVX-512 boxes. Plus plain `--batch` runs NO drafts (1 row/slot): every lane loses MTP unless `--batch-mtp`. The full exactness recipe is documented (`docs/BATCHING.md`: `STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--adapt-every 1000000`, `--no-prefill-borrow` - the adaptive tier moving experts between runs and a prompt borrowing cache slots ALSO change rounding); without it, measured drift on RTX 5070: 3 of 4 lanes apart from solo from token 0/99/174. The comparator EXISTS: `tools/batch_test.py` compares alone-vs-together token by token (8 conversations, with and without pipeline) and `tools/batch_interleave_test.py` covers BYIELD/resume/solo-return. Decide the semantics, then wire the recipe into CI | S (a decision, not code) |
 
 Physics note that differentiates this from vLLM's version - and bounds it. What batching amortizes
 here is expert reads (lanes routing to overlapping experts read each expert once, the `run_multi`
@@ -129,8 +139,10 @@ What this tree already provides:
 
 - **Real page tables, kernel-verified.** QSA layers: paged K/V with int32 `page_table`,
   `page_size = 4` cells (`src/core/layer.cpp:746-776`, `include/strata/kernels/qsa.hpp:113-115`);
-  the attention kernel "does NOT assume the identity" and tests demand identical output under
-  permuted tables at page_size 1/4/512 (`qsa.hpp:70-77`). The addressing spine for shared pages
+  the attention kernel reads "a gathered scratch and never a pool", tests demand identical output
+  under permuted tables at page_size 1/4/512, and "nothing outside this header may assume the
+  mapping" (`qsa.hpp:70-77`; the `page_table` "NOT assumed to be the identity" line is `:179-180`).
+  The addressing spine for shared pages
   exists and is tested.
 - **A page-granular eviction primitive**: the `--kv-resident` streaming mode runs a CLOCK
   second-chance sweep over residency slots (`include/strata/kernels/kv_stream.hpp:6-15`).
@@ -151,13 +163,15 @@ The three structural gaps (from the sweep, in ascending hardness):
    VA contiguity and no driver VMM at all; the sharing rides on the table.
 2. **The recurrent state breaks the page-tree premise.** A branch point in a hybrid model must be
    able to restore the running state (GDN + PLE + indexer tails): ~118 MB per snapshot (figure at
-   `generate.cpp:1502`, `docs/DETAILS.md:968`; the copy set at `conversation_state.cpp:165-186`)
+   `generate.cpp:1502`, `docs/DETAILS.md:967`; the copy set at `conversation_state.cpp:165-186`)
    is ~9,300 tokens' worth of int8 KV (12,672 B/token, `include/strata/kernels/kv_q8.hpp:8`) - at
    a 4-token page granule the state is ~2,300x the page's cost (118 MB / 4 x 12,672 B). Two economics notes that matter for
    the design: the snapshots live in HOST RAM (`generate.cpp:637-639`) while the shared pages are
    VRAM, so the tree's state cost and its page cost compete for DIFFERENT budgets; and a resume
    pays a ~118 MB H2D per node restore (the engine logs `session restored ... in %.1f ms`,
-   `generate.cpp:10665`). A page-granular radix tree is economically impossible here. What IS affordable: a
+   `generate.cpp:10665`) - upload/compute overlap for RAM-resident KV already has a precedent
+   (`STRATA_KV_PREFETCH=1`, prefill -5.3% at 32K, HIP unvalidated, `docs/KV_PREFETCH.md`). A
+   page-granular radix tree is economically impossible here. What IS affordable: a
    **checkpoint tree** - a radix tree whose nodes sit only at depths that already get checkpoints
    (system-prompt boundary, turn boundaries, pin, every-16K cadence), each node = {refcounted KV
    pages, sparse GDN snapshot, token-keyed child edges}. At the 16K cadence a GDN snapshot adds
@@ -220,4 +234,12 @@ pass found a different class of gap: the analysis had not read the feature's own
 and had consequently missed the shipped `--batch-groups` pipeline, its measured 4-GPU tables, the
 batch-window tier adaptation, the parking cache, and the existing parity harnesses - corrected
 throughout above, and a reminder that a source sweep is incomplete until it has read what the repo
-already wrote down.
+already wrote down. Passes five to seven (fresh re-reads, no cached files) added the
+`--pipeline-windows`-off-under-`--batch` interaction, the parking cache's RAM floor and its
+unvalidated-HIP caveat, the message-boundary cache's layer-split EXCLUSION (this box's intended
+shape), the MI50 trim-stage numbers, and the KV-prefetch overlap precedent; and they fixed line
+drift (`server.py:3133` not `:215`; `DETAILS.md:967` not `:968`; the G3 loop range; the `qsa.hpp`
+quote to the header's own words). A fresh audit's challenge to the ~2,300x page-cost ratio was
+checked and REJECTED: 118 MB / (4 tokens x 12,672 B/token) = 2,328, consistent with the per-token
+figure being across all 12 QSA layers (`kv_q8.hpp:8`) - the correct unit for a shared node's
+savings. An auditor's arithmetic is itself an audit target.
