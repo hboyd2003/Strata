@@ -2078,7 +2078,7 @@ ROCM_INDEXES = {"gfx1100": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",   
                 "gfx1031": "https://rocm.nightlies.amd.com/v2/gfx103X-all/",
                 "gfx1151": "https://rocm.nightlies.amd.com/v2/gfx1151/",       # Strix Halo (docs/STRIX_HALO.md)
                 "gfx1103": "https://rocm.nightlies.amd.com/v2/gfx110X-all/",   # Radeon 780M: only with STRATA_EXPERIMENTAL_GFX1103=1
-                "gfx906": "https://rocm.nightlies.amd.com/v2/gfx906/"}          # Radeon Instinct MI50 (Vega 20): only with STRATA_EXPERIMENTAL_GFX906=1 (gfx906 fork); the index has 7.14.0a20260608 to ...20260612 (seen 2026-10-19), no 7.10 - rocm_pick takes the newest of the line
+                "gfx906": "https://rocm.nightlies.amd.com/v2/gfx906/"}          # Radeon Instinct MI50 (Vega 20): only with STRATA_EXPERIMENTAL_GFX906=1 (gfx906 fork); wheels untested, see the ROCM_FAMILY_PINS note
 # The TheRock nightly indexes are pruned and move on, and each GPU family's index holds its own range (#1103: gfx103X-all
 # starts at 7.13.0a20260422 and has no 7.10; #1267: the 7.10 wheel segfaults on a Strix Halo with kernel 7.2.8), so one
 # version for every card cannot work.  The wheel is chosen per index (the family): a preferred version, tried first; when
@@ -2087,7 +2087,8 @@ ROCM_INDEXES = {"gfx1100": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",   
 ROCM_VERSION_DEFAULT = "7.10.0a20251120"                 # what Strata's HIP build was tested with (gfx120X, gfx110X)
 ROCM_FAMILY_PINS = {"gfx103X-all": "7.13.0a20260515",    # #1103: 7.13.0a20260515 runs; the 7.14 nightlies time out
                     "gfx110X-all": "7.10.0a20251121",    # the experimental gfx1103: this index has no ...20251120
-                    "gfx1151": "7.14.0a20260608"}        # #1267: 7.14.0a20260529 to 20260608 run on kernel 7.2.8; the 7.10 wheel segfaults
+                    "gfx1151": "7.14.0a20260608",   # #1267: 7.14.0a20260529 to 20260608 run on kernel 7.2.8; the 7.10 wheel segfaults
+                    "gfx906": "7.14.0a20260612"}     # gfx906 fork (opt-in): the index has 7.12.0a20260226 to 7.14.0a20260612 and no 7.10 (fetched 2026-10-19); pinned for reproducibility, UNTESTED as a wheel - a system ROCm 7 is preferred (rocm_root) and is what this fork's box runs
 ROCM_VERSION_OVERRIDE = os.environ.get("STRATA_ROCM_VERSION") or None
 ROCM_VERSION = ROCM_VERSION_OVERRIDE or ROCM_VERSION_DEFAULT   # kept for callers that read one version
 ROCM_SYSTEM_MIN = (7, 0)       # an older system ROCm is passed over for the wheels (gfx1201 needs ROCm 6.4 or newer)
