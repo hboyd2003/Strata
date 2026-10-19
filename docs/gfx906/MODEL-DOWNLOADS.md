@@ -140,6 +140,13 @@ against the FP8 source:
 branch predates the Xolotl merge and has no `tools/v41`.
 The `/ai` volume is now at 680 GB free.
 
+The `dealignai` FP8 shards were **deleted 2026-10-18** (operator), so the extracted tables are the
+only local copy; they were verified at extraction (all tensor sizes + 2000 random rows per tensor
+against the source) but not byte-exhaustively - a byte-exhaustive checker is now
+`tools/v41/verify_engram.py` for any future re-extraction. Rollback if ever doubted: re-download
+the two shards from `dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8` (203 GB) and re-run. `/ai` is
+back to 869 GB free.
+
 After the extraction reports ~203 GB of tables, the FP8 shards can be deleted. The engine then runs
 with `--engram /ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l1:/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l14`.
 Without `--engram` the engine warns `the Engram add is skipped (not the real model)` - Engram is an
