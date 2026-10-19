@@ -1,7 +1,10 @@
 # vLLM-style concurrency and Radix KV in Strata - source-based gap analysis
 
 Investigation 2026-10-18, four read-only source sweeps of this tree (mainline engine `src/`,
-`include/strata/`, server `serve/`, ported engines `tools/glm`, `tools/v41`). Every claim is a
+`include/strata/`, server `serve/`, ported engines `tools/glm`, `tools/v41`), three citation
+audits, and a reconciliation against the shipped feature's own production doc (`docs/BATCHING.md`,
+plus `docs/MESSAGE_BOUNDARY_CACHE.md`, `docs/DISJOINT_EXPERT_CACHE.md`, `docs/LOGIT_BIAS.md`).
+Every claim is a
 file:line from this checkout or a number from an evidence doc, with that doc's own caveats
 attached. Engineering effort figures are estimates, not commitments. Like every new feature here,
 each phase below is opt-in and the default path stays byte-identical (AGENTS.md).
@@ -26,10 +29,12 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
 
 ## Part 1 - concurrency: what already exists
 
-1. **Multi-slot batch mode.** `--batch N` advertises `INFO batch_slots=N`; `batch_step` builds one
-   verify window from active `BSlot`s (`src/program/generate.cpp:9975-10150`); windows carry
-   "SEVERAL SEQUENCES IN ONE WINDOW" (`include/strata/core/verify.hpp:183-203`); opt-in
-   `--batch-mtp` runs four slots x 2 rows rotated (`generate.cpp:581, 9981-10006`); CUDA graphs are captured per
+1. **Multi-slot batch mode.** `--batch N` (alias `--slots N`) advertises `INFO batch_slots=N`;
+   `batch_step` builds one verify window from active `BSlot`s (`src/program/generate.cpp:9975-10150`);
+   windows carry "SEVERAL SEQUENCES IN ONE WINDOW" (`include/strata/core/verify.hpp:183-203`); opt-in
+   `--batch-mtp` runs four slots x 2 rows rotated (`generate.cpp:581, 9981-10006`); on a layer split
+   `--batch-groups G` pipelines the slots through the stages (default `auto` since 0.1.41;
+   measured 8 clients: 166 against 86 tok/s on 4 GPUs, `docs/BATCHING.md`); CUDA graphs are captured per
    row-layout with LRU eviction (`verify.hpp:340-356`). Window rows are capped by
    `kVerifyMaxT = 8` (`include/strata/kernels/verify_kernels.hpp:20`).
 2. **The line protocol already interleaves streams.** `BGEN <slot>` dynamic admission
@@ -40,7 +45,7 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    With `"parallel": N` this is the NORMAL `/v1/chat/completions` path, not a special endpoint
    (`parallel_args` `serve/server.py:2699-2718`; the fifo is never taken, `:4300-4302`), hardened
    through at least ten filed issues visible in-line (#656, #1012, #1527, #1603, #1869, #1994,
-   ...) and pinned by `serve/test_parallel.py` (30 cases).
+   ...; server #465, engine PR #559) and pinned by `serve/test_parallel.py` (30 cases).
 3. **MoE decode already batches by expert union.** `run_multi`/`gpu_run_n`: "Each distinct expert is
    read/fetched once and applied to every token that routed to it" (`tools/v41/engine/ds41_moe.hpp:469-473`,
    dedup + grouping `ds41_moe.cpp:2856-2967`, kernel `native_expert_grouped`,
@@ -54,12 +59,17 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    files (`generate.cpp:10438-10448`) - but tier 3 is REFUSED exactly when it would be needed:
    slot save/restore returns 501 with `"parallel"`/`--batch` active, and even solo it needs
    `--slot-save-path DIR` (`serve/server.py:3209-3213`). Disk-tier preemption is absent precisely
-   where concurrency runs.
+   where concurrency runs. A fourth mechanism sits beside the tiers and DOES work with slots and
+   layer splits: the conversation parking cache (`--conversation-cache-mib/-slots`) restores a
+   parked conversation on every stage before its admission - follow-ups reached first token in
+   0.53 s against 3.9 s for fresh reads on a 4-GPU split (`docs/BATCHING.md`, `docs/DETAILS.md`).
 5. **Prefix reuse is checkpoint-chain based.** Up to `--prompt-cache` 6 checkpoints at multiple
    depths (root, turn boundaries, pin, every 16,384 tokens, tail) in host RAM
    (`generate.cpp:639-658, 8447-8485`); resume at longest token-prefix match; `pin=N` marks one
    pinned anti-eviction prefix (`conversation_cache.hpp:24-28`); replicas route on chained
-   64-token block hashes (`serve/replicas.py:32,123-159`).
+   64-token block hashes (`serve/replicas.py:32,123-159`); turn-boundary prefix reuse is measured
+   work: first-edit time fell 33.1%, reused prefix grew 22,016 -> 32,831 tokens, at prefixes
+   >= 8,192 with a tail <= 1,024 (`docs/MESSAGE_BOUNDARY_CACHE.md`).
 6. **The admission state machine is production, not a sketch.** A waiting prompt announces its
    length; the reading request yields at the next chunk boundary and PARKS its part-read into a
    slot with matching checkpoints handed over (`copy_to_slot` `generate.cpp:9889, 11644-11712`,
@@ -75,11 +85,17 @@ prints `INFO batch_slots=`, so the server keeps everything solo-fifo, `q36_engin
    (`server.py:1041-1042`, `generate.cpp:10041-10044`) - the server-side behavior is pinned by
    `test_a_failed_window_names_its_error`; the engine has no recovery.
 
-Demonstrated ceiling so far: the fork's archived-binary evidence - P4 AB/CD, 4 lanes, 102K
-context, 71.17/53.94 tok/s aggregate on MI50 (`docs/gfx906/EVIDENCE.md:12`; archived binary,
-parity open, not a causal claim across rows). EVIDENCE.md records this row only as "archived MI50"
-and does not state its card count - its "two MI50 cards" note belongs to the 2026-10-16 smoke
-receipt, not to this row.
+Demonstrated ceiling so far. The shipped feature's own measurements are the strongest evidence
+and match this box's shape: a 4-GPU layer split (4x 16 GB, PCIe Gen3, IQ3_S,
+`--batch 8 --batch-groups 4 --trim-stage-weights`) served 1/2/4/8 concurrent requests at
+aggregate 120/113/205/360 tok/s (`docs/BATCHING.md`, PR #559; `--trim-stage-weights` raised the
+VRAM expert share from 76-85% to 84-100%). The same doc's 12 GB card table shows the other side:
+where most experts run on the CPU, slots buy waiting time, not speed (-11..-24%; the fourth of four
+requests starts after 1.8 s there instead of 11.2 s queued). Older fork-specific evidence, the
+archived AB/CD binary - 4 lanes, 102K context, 71.17/53.94 tok/s aggregate on MI50
+(`docs/gfx906/EVIDENCE.md:12`; archived binary, parity open, not a causal claim across rows;
+EVIDENCE.md records this row only as "archived MI50" and does not state its card count - its
+"two MI50 cards" note belongs to the 2026-10-16 smoke receipt, not to this row).
 
 ## Part 1b - the gaps, as work items
 
@@ -89,10 +105,10 @@ receipt, not to this row.
 | G2 | the serialized residue is ONE prompt read on the wire - and it is already chunk-interleaved with preempt-resume (item 6): waiting prompts force `BYIELD` at chunk boundaries, the part-read parks into a slot and resumes (`generate.cpp:11644-11712, 11002-11026`), slots keep decoding between chunks (`:11634-11640`) | the real gap: prompts read via a private path ("BGEN reads as a GEN 1", `:570, 10362`) instead of running as ROWS of the shared verify window, so a prefill chunk cannot share a step with other slots' decode | M, 2-4 wk |
 | G3 | recurrent-state kernels are sequence-serial | `gdn_step_norm_multi` takes ONE state pointer (`include/strata/kernels/verify_kernels.hpp:41-44`); batch windows loop slots host-side (`src/core/verify.cpp:1208-1247`). Whether that serial loop is the limiter at N lanes is UNMEASURED (small kernels x 36 layers x N per step); measure per-step host-loop time at 4 slots before building the multi-state kernel (state-stride grid dim) + parity gate | M, 3-6 wk |
 | G4 | memory scales x N: every slot gets a FULL `--max-context` session pool (one `cudaMalloc` each, `generate.cpp:4564-4576`; pool bytes scale with ctx, `layer.cpp:660-688`) + ~118 MB running state per sequence (GDN + PLE + indexer tails; `generate.cpp:1502`, `docs/DETAILS.md:968`) | the cap SHIPS: the fit check allocates until OOM, self-reports `INFO batch_slots=fit slot_cache=..` and the server obeys (`:4574-4603`, `serve/server.py:962-968`); N = min(8 unless `--batch-mtp`, floor(free / session_bytes(full ctx))) per device; a slot past `max_context` ends `finish=length` (`generate.cpp:10105-10106`). Part 2 removes the ctx factor | - |
-| G5 | per-request sampling IS plumbed (server `sampling_keys` -> `BGEN` -> `set_slot_sampling` at admission, `server.py:1195-1240`, `generate.cpp:11739-11747, 13082`; Philox seeded by position matches the solo draw, `verify.cpp:3219`) | what genuinely drifts: the batch sampler zeroes penalties (`sp.penalty_last_n = 0`, `verify.cpp:3218`) while the server keeps sending them (`server.py:1213-1227`) - same request, different sampling semantics solo vs batched, silently | S |
-| G6 | MoE cache policy sized for 1 stream (`pcie_frac` comment at `ds41_moe.hpp:280`: "single-token decode only") | prefetch budget `pf_b=1.43` experts/token (`:288`), `kMaxPf=6` (`:344`); N streams multiply the per-step union; `predict_multi` + `STRATA_ROUTE_LOG` are batch-census seeds but exist ONLY in the ported DS4.1 engine - mainline `src/` has no route census | M, measure-driven |
+| G5 | per-request sampling IS plumbed (server `sampling_keys` -> `BGEN` -> `set_slot_sampling` at admission, `server.py:1195-1240`, `generate.cpp:11739-11747, 13082`; Philox seeded by position matches the solo draw, `verify.cpp:3219`; sampled rows documented as drawn row-by-row with the solo counter, `docs/BATCHING.md` Exactness) | what genuinely drifts: the batch sampler zeroes penalties (`sp.penalty_last_n = 0`, `verify.cpp:3218`) while the server keeps sending them (`server.py:1213-1227`) - same request, different sampling semantics solo vs batched. The limitation is DOCUMENTED (`docs/BATCHING.md` Limits: "Repetition / frequency / presence penalties are not applied in batch windows") but not enforced per-request - and the enforcement pattern exists next door: `logit_bias` returns HTTP 400 under `--batch` rather than being silently ignored (`docs/LOGIT_BIAS.md`) | S |
+| G6 | expert-cache policy is per-stream, and cross-card duplication is real. NOT because batch windows ignore routes - they count them and adapt the VRAM tier every `--adapt-every` windows (`--adapt-async 1` measured 89.2 against 74.7 blocking against 45.2 frozen tok/s, `docs/BATCHING.md`) | the prefetch budget `pf_b=1.43` experts/token (`ds41_moe.hpp:288`, ported engine; `pcie_frac` comment `:280` "single-token decode only") is sized for one stream; disjoint-route cost is MEASURED: 4 lanes read ~24 CPU experts/layer against ~8 solo (54 ms against 20 ms per window, RTX 5070, `docs/BATCHING.md`) - why setup recommends `parallel` only where experts mostly fit VRAM; helper/primary duplicate slots measured ~1,900-2,000 with an ownership-guard fix (+15.5% historical, `docs/DISJOINT_EXPERT_CACHE.md`, upstream-GPU perf unvalidated); `predict_multi` + `STRATA_ROUTE_LOG` census seeds exist ONLY in the ported DS4.1 engine | M, measure-driven |
 | G7 | ported engines are single-global | GLM `L.kvc`/KDA state and DS4.1 comp/idxk caches have no sequence dim (`tools/glm/glm_dense.cpp:839-844`, `ds41_dense.cpp:1085-1094`) - per-session conversion over positional caches (park/unpark proves the swap primitive) | L, phase-3 |
-| G8 | batched output is NOT bit-equal to solo by default | the CPU IQ grouped kernels round a token's expert rows differently alone than in a group (#152: `native_expert.cpp:155-162`) so greedy can depend on how many drafts the window held, and kernel choice depends on CPU ISA; the equalizer `STRATA_IQ_MT_MIN=1` costs a measured -1..-3% decode on IQ3_S. Plus plain `--batch` runs NO drafts (1 row/slot): every lane loses MTP unless `--batch-mtp`. Decide the intended semantics before claiming any parity | S (a decision, not code) |
+| G8 | batched output is NOT bit-equal to solo by default | the CPU IQ grouped kernels round a token's expert rows differently alone than in a group (#152: `native_expert.cpp:155-162`) so greedy can depend on how many drafts the window held, and kernel choice depends on CPU ISA; the equalizer `STRATA_IQ_MT_MIN=1` costs a measured -1..-3% decode on IQ3_S. Plus plain `--batch` runs NO drafts (1 row/slot): every lane loses MTP unless `--batch-mtp`. The full exactness recipe is documented (`docs/BATCHING.md`: `STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--adapt-every 1000000`, `--no-prefill-borrow` - the adaptive tier moving experts between runs and a prompt borrowing cache slots ALSO change rounding); without it, measured drift on RTX 5070: 3 of 4 lanes apart from solo from token 0/99/174. The comparator EXISTS: `tools/batch_test.py` compares alone-vs-together token by token (8 conversations, with and without pipeline) and `tools/batch_interleave_test.py` covers BYIELD/resume/solo-return. Decide the semantics, then wire the recipe into CI | S (a decision, not code) |
 
 Physics note that differentiates this from vLLM's version - and bounds it. What batching amortizes
 here is expert reads (lanes routing to overlapping experts read each expert once, the `run_multi`
@@ -100,7 +116,9 @@ contract) and the dense pass; that is the scarce-bandwidth currency, not tensor-
 What batching does NOT amortize: every lane reads its OWN attention KV at every step, so attention
 traffic scales N x ctx - at long contexts (the AB/CD evidence ran at 102K) that term can dominate
 and the dedup savings stop mattering. Lanes with disjoint expert routes thrash the VRAM LRU instead
-of dedup'ing. Route overlap under real multi-agent traffic is the open measurement, and the census
+of dedup'ing. Route overlap under real multi-agent traffic is partly measured already (BATCHING.md:
+~24 against ~8 CPU experts per layer at 4 lanes on a CPU-expert card) but not on MI50 or past 4
+lanes, and the census
 tools are ported-engine-only (`STRATA_ROUTE_LOG` in tools/v41, `--dump-routes` in tools/glm; mainline
 `src/` has neither) - measuring it in the mainline batch mode costs about a day of instrumentation,
 the only new code P0 needs.
@@ -160,21 +178,26 @@ the one cross-cutting change with correctness teeth.
 ## Phased plan (each phase gates on measurements, per repo rules)
 
 - **P0 - measure the shipped batch mode on this box** (~1 day of new code: a mainline route census -
-  `STRATA_ROUTE_LOG`/`--dump-routes` are ported-engine tools only): `"parallel": 4` tok/s and
-  behavior under real concurrent load here, route overlap, restore-cost timing for checkpoint
-  chains. `serve/test_parallel.py` (30 cases) runs WITHOUT a GPU - the cheapest gate on the list.
+  `STRATA_ROUTE_LOG`/`--dump-routes` are ported-engine tools only): first locate this box against
+  `docs/BATCHING.md`'s two tables - the 4-GPU all-in-VRAM split (360 tok/s at 8 concurrent) is the
+  expert-fit side, the 12 GB CPU-expert card (slots buy latency, -11..-24%) the other; then
+  `"parallel": 4` tok/s, route overlap, restore-cost timing for checkpoint chains, and the
+  engine-driving harnesses `tools/batch_test.py` / `batch_interleave_test.py` (need a GPU).
+  `serve/test_parallel.py` (30 cases) runs WITHOUT a GPU - the cheapest gate on the list.
   Answers whether G1-G6 are
   worth opening at all. ~1 week.
 - **P1 - prefill-as-window-rows + parity tightening** (G2 residue, G5, G8): run prompt chunks as
   rows of the shared verify window instead of a private GEN-style pass; apply penalties in the
-  batch sampler or stop sending them; settle the solo-vs-batched equality semantics (G8) and
-  rewrite the AB/CD comparator against `WindowContext`. The remaining blast-radius item is
+  batch sampler or stop sending them (the `logit_bias` 400-under-batch pattern is the precedent);
+  settle the solo-vs-batched equality semantics (G8) and extend `tools/batch_test.py` /
+  `tools/batch_interleave_test.py` - which already compare alone-vs-together token by token - to
+  the `--batch-mtp` drafts path. The remaining blast-radius item is
   engine-side recovery from a failed window (today: process death, all lanes with it). 2-4 weeks.
 - **P2 - checkpoint-tree radix** (Part 2): global frame ARENA allocator (no VMM on HIP),
   refcounted frozen prefix pages, `pin=N` generalized to many pins = multi-root sharing.
   1-2 months.
-- **P3 - batched GDN multi-state kernel** (G3) to push past 8 window rows, plus AB/CD comparator
-  rewritten against the current `WindowContext` API (fixtures exist:
+- **P3 - batched GDN multi-state kernel** (G3) to push past 8 window rows, plus the AB/CD parity
+  harness extended to the multi-state path (fixtures exist:
   `benchmarks/gfx906/fixtures/abcd-parity-contract-v2.json`). Note raising `kVerifyMaxT` touches
   the solo/pipeline path (G1) - keep solo window length a runtime choice so solo behavior stays
   byte-identical. 3-6 weeks.
@@ -192,4 +215,9 @@ Two review corrections are part of this doc's record: an earlier draft UNDERSTAT
 surface (it listed admission serialization, sampling plumbing and untested stop paths as gaps;
 all three are production code with a test suite - Part 1 item 6), and batched lanes are NOT
 bit-equal to solo by default (G8: grouped-kernel rounding, dropped penalties, no drafts without
-`--batch-mtp`) - every parity or throughput claim above is conditional on those settings.
+`--batch-mtp`) - every parity or throughput claim above is conditional on those settings. A fourth
+pass found a different class of gap: the analysis had not read the feature's own production docs,
+and had consequently missed the shipped `--batch-groups` pipeline, its measured 4-GPU tables, the
+batch-window tier adaptation, the parking cache, and the existing parity harnesses - corrected
+throughout above, and a reminder that a source sweep is incomplete until it has read what the repo
+already wrote down.
