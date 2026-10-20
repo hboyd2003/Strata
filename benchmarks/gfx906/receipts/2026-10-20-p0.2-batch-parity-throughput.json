@@ -1,0 +1,49 @@
+{
+  "task": "P0.2 (task #6): first HIP gfx906 batched-decode parity + throughput witness",
+  "date": "2026-10-20T05:39:57-04:00",
+  "run_by": "operator (tools/gfx906/run-p0.2-batch.sh, captured run-p0.2-batch.log); analysis agent-side",
+  "box": "4x MI50 32GB gfx906, ROCm 7.2, Threadripper 3975WX, 125 GiB DDR4; ONE engine alive (all other servers stopped first per crash rule)",
+  "engine": {
+    "exe": "engine/strata (setup-installed)",
+    "binary_mtime": "2026-10-19T20:34",
+    "identity": "v0.1.44.1 HIP wave64 (STRATA_HIP_GFX906)",
+    "census_capability": "NONE - binary predates census commit 683c92f5 (22:53); strings: 0 hits. STRATA_ROUTE_CENSUS was set but unknown to this build; census data deferred to a build-906/strata run."
+  },
+  "config": {
+    "file": "strata-swift-iq3_xxs.json",
+    "model": "Swift-1.5 GSQ RCO IQ3_XXS",
+    "max_context": 512000,
+    "rope": "yarn 1.953125",
+    "kv": "int8 resident 32768",
+    "expert_cache": "auto (16928 experts, 25.8 GiB VRAM tier at boot)",
+    "device": "--gpu 1 (fully free card; server was down)",
+    "batch_mtp": false,
+    "recipe": "STRATA_IQ_MT_MIN=1 (batch_test.py default), --pcie-frac 0, --adapt-every 1000000, --no-prefill-borrow (BATCHING.md exactness settings)"
+  },
+  "results": {
+    "parity_G8": {
+      "batch4": "4/4 slots IDENTICAL token-for-token to their solo runs",
+      "batch8": "8/8 slots IDENTICAL",
+      "claim": "First HIP/gfx906 witness of BATCHING.md's batched==solo exactness claim (text equality under the exactness recipe; not a bit-exactness proof)"
+    },
+    "solo_decode_tok_s": {
+      "batch4_runs_solo": [27.5, 60.4, 51.3, 44.2],
+      "batch8_runs_solo": [35.0, 58.9, 49.9, 48.5, 48.1, 44.4, 44.7, 43.0],
+      "mean": 46.6,
+      "note": "per-stream, from DONE decode-ms; first stream of each arm ~13-20 tok/s slower (warm-up)"
+    },
+    "batch_aggregate_tok_s": {
+      "batch4": {"overall_incl_admissions": 38.8, "from_first_batch_token": 58.5, "per_lane": 14.6},
+      "batch8": {"overall_incl_admissions": 42.1, "from_first_batch_token": 63.1, "per_lane": 7.9}
+    },
+    "speedup_vs_solo_mean": {"batch4": 1.26, "batch8": 1.35},
+    "window_profile": {
+      "batch4": "63 windows x 4.00 rows = 71.07 ms/window; per layer-window CPU experts 17.40 ms vs VRAM hits 20.40 ms; routed entries VRAM 51.0% / CPU 49.0% / PCIe 0.0%; 56.3 rows/s",
+      "batch8": "63 windows x 8.00 rows = 131.24 ms/window; CPU experts 41.11 ms vs VRAM hits 29.92 ms; routed entries VRAM 37.4% / CPU 62.6% / PCIe 0.0%; 61.0 rows/s",
+      "reading": "batches grow CPU-bound: at 8 lanes 62.6% of routed entries ran on AVX-2 CPU kernels (pcie-frac 0 by recipe). The modest aggregate gain is explained by CPU-expert service saturating, not by lane contention on GPU work."
+    }
+  },
+  "census": "NO DATA (binary gap, stated above). P2's read-factor gate needs a run with build-906/strata (has the instrument).",
+  "limits": "64-token greedy decode, 4/8 real prompts; --batch-mtp NOT exercised (plain batch = no drafts); single run per arm (no repeat); ctx 512000 yarn unlike BATCHING.md's 102K tables - state when comparing.",
+  "exit": "sweep rc=0, both arms"
+}
