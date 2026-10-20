@@ -59,11 +59,27 @@ config. Neither exists on this box yet (only GLM/DS4.1 ported-engine artifacts a
 `serve/` holds no model config). Steps: download/convert the Qwen3.8-Flash-Next Strata artifact
 per `docs/MODEL-DOWNLOADS.md` + `setup.py`'s flow, generate its serve config, and record its
 identity (sha, quant, ctx). This is operator-gated (disk/RAM): 869 GB free on `/ai` as of
-2026-10-18. **Status 2026-10-19:** the first attempt stopped at setup's PC check - upstream's AMD allow-list
-refuses gfx906 (`setup.py:5982`); the fork now accepts it behind
-`STRATA_EXPERIMENTAL_GFX906=1` (mirroring upstream's own gfx1103 opt-in, `setup.py:2095`), gated by
-`tools/test_setup_amd.py` (37 tests) and witnessed live on the 4x MI50 box (unset refuses 4/4, set
-accepts 4/4). Re-run the same setup command with that env var set, behind the RAM watchdog.
+2026-10-18. **Status 2026-10-19: CLOSED.** Three fork gaps stood between the first attempt and
+"All set", each fixed behind the opt-in (36f91961, 8add6741, 5b578ef7 - details in daily logs and
+START-HERE): the PC check refused gfx906; the engine step configured the wave32 HIP backend, which
+refuses gfx906 (the fix passes the witnessed wave64 configuration); and a build-hip folder of the
+other backend made CMake re-configure without setup's -D flags (cache now dropped on a backend
+switch). Witnessed end state on this box:
+- engine: `engine/strata`, BUILD.json `local-hip / hip / 0.1.44.1 / archs [gfx906] / src
+  a44013c50376ca60` - the first setup-built wave64 engine on gfx906 (its configure line is the
+  manual `docs/AMD_HIP.md` recipe's flags, plus the cache-purge guard);
+- model: `ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF` IQ3_XXS, 2 shards, 75,966,073,120 B on
+  disk, fingerprint `qwen4exp / 1224 tensors / bpw 3.434 / experts_bpw 2.842`
+  (data/gguf_fingerprints.json), landed in `/ai/engines/gfx906/worktrees/Strata-data/models/`;
+- pack: `worktrees/Strata-data/packs/swift-iq3_xxs` (dense.bin 1,538,035,200 B + tokenizer);
+  MTP draft: `worktrees/Strata-data/mtp/rt` (786 MB);
+- config: `strata-swift-iq3_xxs.json` - ctx 131072, `--kv int8 --kv-resident 32768`, `--spec 4
+  --spec-min-p 0.5`, `--expert-cache auto`, `--prefill auto`, exe `engine/strata`; start script
+  `run-swift-iq3_xxs.sh`; server NOT started (--no-start).
+Because the setup-built engine and `build-906/strata` are both wave64 builds of this tree, P0.2 can
+take `--exe engine/strata` (the production identity the config uses) with `build-906/strata` as the
+cross-check; the exactness recipe and the GPU/RAM window still apply (setup says ~43 GB RAM for this
+quant; the incumbent currently holds the box).
 
 **P0.1 - no-GPU server-side suite. DONE 2026-10-19.**
 `python3 -m serve.test_parallel` from the repo root (NOT `python3 serve/test_parallel.py` - the
