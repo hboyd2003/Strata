@@ -15,7 +15,9 @@ AVAIL=$(free -g | awk '/Mem/{print $7}')
 echo "P0.4 sweep $(date +%T) RAM avail ${AVAIL} GiB - need >= 65"
 [ "$AVAIL" -lt 65 ] && { echo "REFUSING: not enough RAM for the single engine (crash rule)"; exit 3; }
 rc=0
-for B in 1 2 4 8; do
+# B=1 is not a batch: the engine refuses a 1-slot group (BGEN, witnessed 2026-10-20);
+# the solo rate is already measured by batch_test.py's per-slot solo runs.
+for B in 2 4 8; do
   echo "=== batch $B start $(date +%T) (RAM avail $(free -g | awk '/Mem/{print $7}') GiB) ==="
   BATCH_TEST_LOG="logs/p0.4-b${B}-${TS}.log" \
   STRATA_ROUTE_CENSUS="$REC/census-p0.4-b${B}-${TS}.txt" \

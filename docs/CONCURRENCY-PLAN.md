@@ -196,6 +196,14 @@ Exit: per-step GDN cost at 8 lanes <= measured solo-equivalent; exact-state pari
 
 ## Phase P2 - arena + checkpoint-tree radix (1-2 months, ONLY if P0 census/reuse justifies)
 
+**Gate resolved NO-GO 2026-10-20 with the first live census** (box: 1x MI50, Swift IQ3_XXS,
+unrelated conversations, batches 2/4/8; receipts
+`benchmarks/gfx906/receipts/2026-10-20-p0.4-census-sweep.json`): mean pairwise lane route Jaccard
+0.7-1.9%, within-window read factor 1.04/1.31/1.44 at 2/4/8 lanes (b8 per-layer spread
+1.14-1.58). There is no cross-lane route reuse to share at ~2% overlap, so the checkpoint-tree
+radix does not start. Revisit only for shared-prefix-heavy traffic (same system prompt across
+lanes) - there the win is prefill reuse, not decode route sharing.
+
 Sequence so each step is independently shippable and opt-in:
 
 1. **P2a - arena allocator** (`src/core/vmm.cpp` HIP branch + a new frame arena): one large

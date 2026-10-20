@@ -1,0 +1,23 @@
+{
+  "task": "P0.4 (task #8): batched decode sweep 1/2/4/8 with the route census (P2 gate data)",
+  "date": "2026-10-20T06:03:56-04:00",
+  "run_by": "operator (tools/gfx906/run-p0.4-sweep.sh, captured run-p0.4-sweep.log); analysis agent-side",
+  "engine": "build-906/strata (census-capable, tree 1f42c522, wave64 HIP) - engine/strata lacks the instrument (predates 683c92f5)",
+  "recipe": "identical to P0.2: --gpu 1 --pcie-frac 0 --adapt-every 1000000 --no-prefill-borrow, ctx 512000 yarn, single engine (crash rule)",
+  "throughput_reproduction": {
+    "batch2": {"from_first_token": 46.7, "overall": 35.8},
+    "batch4": {"from_first_token": 58.2, "overall": 38.7},
+    "batch8": {"from_first_token": 64.1, "overall": 41.5},
+    "note": "batch4/8 reproduce P0.2 (58.5/63.1) within run-to-run noise with a different binary - cross-check satisfied"
+  },
+  "batch1": "engine refuses a 1-slot batch group (BGEN: no such free slot); solo arm still ran (20.7 tok/s decode, cache hit 69.2%). Batch-1 == solo is already the solo number; script should start at B=2.",
+  "route_census_FIRST_LIVE_DATA": {
+    "files": "census-p0.4-b{1,2,4,8}-20261020-060356.txt (88-443 KB, cumulative dumps, 48 layers x 512 experts)",
+    "read_factor_entries_per_unique": {"b2": 1.043, "b4": 1.312, "b8": 1.436},
+    "b8_per_layer_spread": {"min": 1.138, "median": 1.463, "max": 1.578},
+    "mean_pairwise_lane_jaccard": {"b2": "1.68%", "b4": "0.71%", "b8": "1.93%"},
+    "reading": "Across an 8-row window an expert unique to the window is requested by ~1.44 rows on average, and any two lanes' route sets overlap ~1-2%. Lane routes are near-orthogonal for unrelated conversations: batching buys only the small within-window dedup (the b8 read-factor is exactly the ~44% of extra entries nothing shares), and no cross-lane route reuse exists to exploit."
+  },
+  "P2_GATE_VERDICT": "NO-GO for the unrelated-conversation workload this box serves: cross-lane route overlap ~2% cannot pay for a checkpoint-tree radix (~2300x state/page cost, CONCURRENCY-RADIX.md). Revisit only for shared-prefix-heavy traffic (same system prompt across lanes), where the win would be prefill reuse, not decode route sharing.",
+  "limits": "one sweep, 64-token greedy decode, 4 fixed prompt classes (fr/en/code/math mix); census counts mainline drive_pool funnels only (stated blind spots in P0.3 receipt); lane stats under --batch only"
+}
