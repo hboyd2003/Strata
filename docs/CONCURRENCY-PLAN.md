@@ -113,6 +113,19 @@ code in P0. Output: overlap % per window over a fixed script, comparable across 
 the gate input for P2. Prior numbers to compare against: 4 lanes disjoint cost 54 ms vs 20 ms per
 window on an RTX 5070, 24 vs ~8 CPU-experts/layer (BATCHING.md); gfx906 numbers do not exist yet.
 
+> **SHIPPED (instrumentation) 2026-10-19, task #7.** `STRATA_ROUTE_CENSUS=FILE` opt-in,
+> `strata::core::RouteCensus` (header-only) hooked into `drive_pool`/`drive_pool_multi` in
+> `generate.cpp` beside the existing `--dump-routing` tap - the two functions every decode path
+> (solo, session, verify window, batch `run_slot_rows`, layer-split) funnels through, ids already
+> host-pinned by the doorbell, so zero extra GPU->CPU syncs. Emits H (per-layer/expert hits), U
+> (read factor: window union vs lane sum), J (pairwise lane Jaccard). Unset = byte-identical.
+> Gate witnessed: HIP wave64 build + `route_census_test` (8 cases) + full ctest where the
+> change-fails are a strict subset of a clean-parent stash run (`comm -23` empty). Census OUTPUT and
+> live batch lane semantics still need the P0.2 GPU window. Receipt
+> `benchmarks/gfx906/receipts/2026-10-19-p0.3-route-census-instrumentation.json`. NOTE for later
+> gates: this box's parity-test fail-set is not a fixed list under GPU contention - the sound gate
+> is a parent-subset comparison, not a hardcoded name list.
+
 **P0.4 - batched tok/s at several sizes (GPU, ~half day).**
 `"parallel": 1/2/4/8` (and 12 with `--batch-mtp`) on one MI50, then on the 4-card layer split with
 `--batch-groups` default auto. Record against BATCHING.md's two regimes; locate the box.

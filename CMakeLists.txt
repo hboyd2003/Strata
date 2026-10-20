@@ -567,6 +567,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       set_tests_properties(split_lend_complement_test PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 120)
     endif()
   endif()
+  # P0.3 route census (PR1, docs/CONCURRENCY-PLAN.md): the read-factor and lane-Jaccard accumulators that
+  # gate P2 (CPU only, header-only - it reads no device, links nothing).  Registered beside the #477
+  # profile tests, which live in the region this build actually configures.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/route_census_test.cpp")
+    enable_testing()
+    add_executable(route_census_test tests/core/route_census_test.cpp)
+    target_include_directories(route_census_test PRIVATE include)
+    add_test(NAME route_census_test COMMAND route_census_test)
+    set_tests_properties(route_census_test PROPERTIES TIMEOUT 60)
+  endif()
   # #477: the learned expert profile (--expert-profile-save): its order and make_profile.py's file format (CPU only)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/expert_profile_save_test.cpp")
     enable_testing()

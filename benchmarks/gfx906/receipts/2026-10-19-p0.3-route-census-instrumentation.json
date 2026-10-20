@@ -1,0 +1,34 @@
+{
+  "receipt": "P0.3 route census instrumentation (PR1) - build + unit gate",
+  "date": "2026-10-19",
+  "task": "docs/CONCURRENCY-PLAN.md P0.3 / task #7",
+  "source_identity": {
+    "branch": "gfx906/xolotl-merge",
+    "parent_head": "0f9d8019",
+    "working_tree_diff_files": [
+      "include/strata/core/route_census.hpp (new, header-only RouteCensus: H hist / U read-factor / J lane-Jaccard)",
+      "tests/core/route_census_test.cpp (new, CPU-only, 8 cases)",
+      "src/program/generate.cpp (census hooked into drive_pool + drive_pool_multi, bootstrap beside --dump-routing, STRATA_ROUTE_CENSUS=FILE opt-in)",
+      "CMakeLists.txt (route_census_test registered beside the #477 profile tests)",
+      "tools/gfx906/gate-route-census.sh (the gate script)"
+    ]
+  },
+  "hardware": "4x MI50 32GB gfx906, ROCm 7.2, Threadripper Pro 3975WX; incumbent workload held ~99% VRAM all cards (parity flakiness context)",
+  "gates_witnessed": {
+    "build": "ninja strata + route_census_test in build-906 (STRATA_HIP_GFX906=ON wave64, /opt/rocm/llvm clang++), exit 0, log gate-route-census.log",
+    "unit": "route_census_test: ok (disjoint/shared/partial overlap, hist, prefill-no-lanes, OOB ids, lane-cap, dump parse); via ctest Test #4 Passed",
+    "ctest_substrate": "full ctest -j1 with change: 6 failed of 54; clean-parent (stash) reference: 8 failed of 53; comm -23 proof: change-fails are a STRICT SUBSET of parent-fails - zero regressions",
+    "baseline_drift_note": "the recorded 4-failure baseline (split_lend, mmvq_il, verify, ple) is NOT stable under this box's GPU contention: clean parent shows 8 (adds dequant_wide, kv_stream, iq_multi, native_grouped), serial re-runs move members between pass/fail. The sound gate on THIS box is the parent-subset comparison, not a fixed name list."
+  },
+  "not_witnessed": [
+    "census OUTPUT: producing H/U/J lines needs a live boot (GPU+RAM window); this receipt witnesses instrumentation only",
+    "CUDA/SYCL compiles: no nvcc on this box; the header is pure C++ stdlib and the generate.cpp diff compiles under the HIP wave64 gate",
+    "batch lane semantics under real --batch traffic: record(..., overlap) path unit-tested, live witness comes with P0.2"
+  ],
+  "stated_blind_spots": [
+    "--no-pool: ids never reach the host (same rule --dump-routing enforces); census refuses with a stderr line",
+    "100% VRAM-resident stages take the zero-doorbell graph (verify.cpp resident_plan): those layers emit no records - silence IS the nothing-left-to-share answer",
+    "solo/verify-window rows are one stream's draft positions: counted in the histogram only; lane stats activate only under --batch"
+  ],
+  "usage": "STRATA_ROUTE_CENSUS=/path/census.txt strata ... [--batch N]; cumulative H/U/J appended every 8192 pool calls and at exit; unset = nothing constructed, default path byte-identical"
+}

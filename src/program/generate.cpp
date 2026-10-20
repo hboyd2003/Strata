@@ -22,6 +22,7 @@
 #include "strata/core/device.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/route_census.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/core/conversation_file.hpp"
 #include "strata/core/session_save_reclaim.hpp"
@@ -999,6 +1000,13 @@ struct Drive {
     /// needs no locking.  `d.layers` is the CURRENT layer on entry (the adapter increments it as it walks the
     /// blob), which is why the layer index comes from there rather than from a counter of our own.
     std::FILE* routing = nullptr;
+    /// P0.3 route census (STRATA_ROUTE_CENSUS=FILE, docs/CONCURRENCY-PLAN.md PR1): null unless opted in, so
+    /// the default path is byte-identical; the bootstrap sits beside `--dump-routing`'s open below and the
+    /// records happen in `drive_pool`/`drive_pool_multi`, the same two taps the routing trace writes.
+    /// `census_lanes` is true only under `--batch`, where a window's rows ARE concurrent slots; a solo
+    /// verify window's rows are one stream's draft positions and must not be counted as lanes.
+    std::unique_ptr<strata::core::RouteCensus> census;
+    bool census_lanes = false;
 };
 
 void drive_pool(void* user, const float* x_f, const int32_t* ids, const float* weights, int64_t n_embd, int64_t k,
@@ -1008,6 +1016,13 @@ void drive_pool(void* user, const float* x_f, const int32_t* ids, const float* w
     strata::core::expert_pool_dispatch(&t->d, x_f, ids, weights, n_embd, k, out);
     t->cpu_ms += std::chrono::duration<double, std::milli>(Clock::now() - a).count();
     ++t->calls;
+    // THE CENSUS (P0.3): same tap as the routing trace, ids already host-pinned by the doorbell, so zero
+    // extra syncs.  Solo: one token, no lane stats (`census_lanes` is false by construction here anyway).
+    // The layer index comes from `d.layers - 1` for the reason the routing trace documents below.
+    if (t->census != nullptr) {
+        t->census->record((int32_t) (t->d.layers - 1), ids, 1, (int) k, false);
+        if ((t->calls & 8191) == 0) t->census->dump(t->census->path());
+    }
     // THE ROUTING TRACE.  Written AFTER the dispatch so the layer index is still this layer's: `d.layers` is
     // advanced by the adapter as it consumes the blob, and reading it after the call is the same value the
     // dispatch used.  Record = int32 layer, int32 k, k int32 ids, k float weights.
@@ -1051,6 +1066,15 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, int64_t 
             static const float one[64] = {};   // k <= 64 in a verify window; zeros read as unit weights
             std::fwrite(one, sizeof(float), (size_t) k, t->routing);
         }
+    }
+    // THE CENSUS (P0.3): the window's rows are token-major `ids[tok * k + j]`, exactly the layout
+    // RouteCensus reads.  Lane stats count only when this engine was started with `--batch` (see
+    // `census_lanes`); a solo verify window contributes to the histogram only.  A window wider than the
+    // census' lane cap (only possible with `--batch-mtp` rotation past the slot count) keeps the
+    // histogram and is skipped for pairs, which RouteCensus::record enforces itself.
+    if (t->census != nullptr) {
+        t->census->record((int32_t) layer, ids, (int) n_tok, (int) k, t->census_lanes);
+        if ((t->calls & 8191) == 0) t->census->dump(t->census->path());
     }
 }
 
@@ -5944,6 +5968,35 @@ int main(int argc, char** argv) {
             return 1;
         }
         drive.routing = routing;
+    }
+    // STRATA_ROUTE_CENSUS=FILE (P0.3, docs/CONCURRENCY-PLAN.md PR1): the opt-in mainline route census -
+    // per-(layer, expert) hits, the per-window union-vs-sum READ FACTOR, and pairwise lane Jaccard, dumped
+    // cumulatively to FILE.  It answers whether concurrent lanes re-read the SAME experts (batching
+    // amortizes the expert reads) or DISJOINT ones (the VRAM tier thrashes), which is the measurement P2's
+    // checkpoint-tree economics hang on (docs/CONCURRENCY-RADIX.md: the census tools were ported-engine-
+    // only; `--dump-routing` traces exist but a reader has to rebuild the lane sets from the binary blob).
+    // UNSET = NOTHING IS CONSTRUCTED: the default path is byte-identical (AGENTS.md).  Two blind spots are
+    // the engine's, not the instrument's, and are stated here so a census run is read correctly: with
+    // `--no-pool` the ids never reach the host (the same rule `--dump-routing` enforces), and a stage at
+    // 100% VRAM residency takes the zero-doorbell graph (verify.cpp's `resident_plan`), whose layers emit
+    // no records - silence there IS the "nothing left to share" answer.  This is a measurement run: the
+    // numbers are set relations, not timings.
+    if (const char* cpath = std::getenv("STRATA_ROUTE_CENSUS"); cpath != nullptr && cpath[0] != '\0') {
+        if (o.no_pool) {
+            std::fprintf(stderr, "strata generate: STRATA_ROUTE_CENSUS needs the expert pool; the routed ids "
+                                 "reach the host through the doorbell the pool reads. Census is OFF.\n");
+        } else {
+            // lane cap: batch slots when batching (a `--batch-mtp` window can rotate more rows than slots -
+            // those keep the histogram only); 8 otherwise, which is kVerifyMaxT, so no window is ever refused
+            // stats it could honestly answer (census_lanes is then false and only the histogram is kept)
+            drive.census = std::make_unique<strata::core::RouteCensus>(
+                (int) g.n_layers, (int) g.n_expert, (int) (o.batch >= 2 ? o.batch : 8));
+            drive.census->set_path(cpath);
+            drive.census_lanes = o.batch >= 2;
+            std::fprintf(stderr, "strata generate: route census -> %s (%d layers x %d experts, lane stats %s)\n",
+                         cpath, (int) g.n_layers, (int) g.n_expert,
+                         drive.census_lanes ? "on: --batch slots" : "off: not --batch, histogram only");
+        }
     }
     strata::core::PoolFn pool_fn = o.no_pool ? nullptr : &drive_pool;
     // The hit hook rides the same switch as the pool: with no pool there is no `parts` staging to
