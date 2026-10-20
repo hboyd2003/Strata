@@ -70,9 +70,15 @@ switch). Witnessed end state on this box:
   manual `docs/AMD_HIP.md` recipe's flags, plus the cache-purge guard);
 - model: `ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF` IQ3_XXS, 2 shards, 75,966,073,120 B on
   disk, fingerprint `qwen4exp / 1224 tensors / bpw 3.434 / experts_bpw 2.842`
-  (data/gguf_fingerprints.json), landed in `/ai/engines/gfx906/worktrees/Strata-data/models/`;
-- pack: `worktrees/Strata-data/packs/swift-iq3_xxs` (dense.bin 1,538,035,200 B + tokenizer);
-  MTP draft: `worktrees/Strata-data/mtp/rt` (786 MB);
+  (data/gguf_fingerprints.json), landed in `/ai/models/hf.co/Swift/models/`;
+- pack: `/ai/models/hf.co/Swift/packs/swift-iq3_xxs` (dense.bin 1,538,035,200 B + tokenizer);
+  MTP draft: `/ai/models/hf.co/Swift/mtp/rt` (786 MB);
+  (moved from `worktrees/Strata-data/` the same evening at the operator's request - all model data
+  lives under `/ai/models` now; `~/.config/strata/settings.json` `data_dir` points at the new root
+  and a full setup re-run witnessed "already downloaded / model prepared" at the new paths, exit 0.
+  Note: setup's `--data-dir` migration would NOT have found the default `Strata-data` - it only
+  merges from folders that contain a `setup.py` (setup.py:4310) - so a move like this must edit
+  `data_dir` and the config paths together, which is what was done, 5 paths, verified present.);
 - config: `strata-swift-iq3_xxs.json` - ctx 131072, `--kv int8 --kv-resident 32768`, `--spec 4
   --spec-min-p 0.5`, `--expert-cache auto`, `--prefill auto`, exe `engine/strata`; start script
   `run-swift-iq3_xxs.sh`; server NOT started (--no-start).
