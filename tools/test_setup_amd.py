@@ -226,6 +226,20 @@ class GpuLists(unittest.TestCase):
                 self.assertNotIn("-DSTRATA_ENABLE_HIP=ON", calls["defs"])     # the backends refuse each other (CMakeLists.txt:67)
                 self.assertIn("-DSTRATA_PREFILL_MMQ=OFF", calls["defs"])      # the witnessed wave64 config (build-906's cache)
                 self.assertIn("-DCMAKE_HIP_ARCHITECTURES=gfx906", calls["defs"])
+                # a build-hip folder configured for the wave32 backend must arrive at cmake without that cache: CMake's
+                # own answer to the changed compilers re-configures WITHOUT setup's -D definitions (2026-10-19, no
+                # 'strata' target); the fresh configure has to be the only configure
+                (root / "build-hip").mkdir(exist_ok=True)
+                setup.source_hash = lambda *a: "h2"                       # source moved: engine_ok no longer short-circuits
+                (root / "build-hip" / "CMakeCache.txt").write_text("STRATA_HIP_GFX906:BOOL=OFF\nCMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++\n")
+                calls.clear()
+                setup.build_engine_hip({"arch": "gfx906", "archs": ["gfx906"]}, root)
+                self.assertFalse((root / "build-hip" / "CMakeCache.txt").exists())
+                (root / "build-hip" / "CMakeCache.txt").write_text("STRATA_HIP_GFX906:BOOL=ON\n")   # already wave64: kept
+                setup.source_hash = lambda *a: "h3"
+                calls.clear()
+                setup.build_engine_hip({"arch": "gfx906", "archs": ["gfx906"]}, root)
+                self.assertTrue((root / "build-hip" / "CMakeCache.txt").exists())
             finally:
                 for k, v in saved.items():
                     setattr(setup, k, v)

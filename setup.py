@@ -3011,6 +3011,13 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
     # this fork witnessed (its build-906 cache), passed explicitly because CMake keeps the cached -D values of an
     # older wave32 configure of the same build-hip folder.
     wave64 = "gfx906" in archs
+    hip_cache = ROOT / "build-hip" / "CMakeCache.txt"
+    if hip_cache.exists() and ("STRATA_HIP_GFX906:BOOL=ON" in hip_cache.read_text(errors="ignore")) != wave64:
+        # the folder holds the OTHER HIP backend's configure: the first pass takes our -D values into the old cache,
+        # then the changed compilers make CMake delete the cache and re-configure WITHOUT them (witnessed 2026-10-19:
+        # a wave32-configured build-hip met the wave64 flags, the re-run lost them, and ninja had no 'strata' target).
+        # Same treatment as isa_floor_defs below: drop the cache, let one fresh configure own the folder.
+        hip_cache.unlink()
     cmake_build(ROOT, ROOT / "build-hip", "strata",
                 (["-DSTRATA_HIP_GFX906=ON", "-DSTRATA_ENABLE_HIP=OFF", "-DSTRATA_ENABLE_CUDA=ON",
                   "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_PREFILL_MMQ=OFF",
