@@ -146,6 +146,15 @@ numbers, replacing the assumed ~120 ms.
 **Exit criteria:** a `benchmarks/gfx906/receipts/` entry per step; route-overlap % and per-step
 loop cost written into CONCURRENCY-RADIX.md replacing "UNMEASURED"; a go/no-go on P2 and P3.
 
+**P0 EXIT 2026-10-21:** met. Receipts P0.0-P0.5 in `benchmarks/gfx906/receipts/`; both
+UNMEASURED markers replaced (P0.4 census, P0.5 profile); **P2 NO-GO and P3 NO-GO on measured
+ground**, both recorded in this plan and CONCURRENCY-RADIX.md. P0.6 was skipped by decision, not
+by failure: it fed P2's economics (now NO-GO); its residual value - witnessing HIP coverage of
+`--conversation-cache-mib` parking restores - remains open as ordinary ops verification, not a
+phase gate. What the data says the next lever is: batched decode on this box is CPU-expert-bound
+(~32% of an 8-lane window is the GPU waiting on CPU expert service), so batching effort belongs
+to expert service, not to lane-count kernel work.
+
 ## Phase G8 - the exactness decision (free, do first)
 
 Decide and document ONE of: (a) batched serving guarantees exact solo parity by default (pay
@@ -182,6 +191,15 @@ Exit: the three BATCHING.md "does not batch" paths are batched or explicitly exe
 numbers; parity harness green on gfx906.
 
 ## Phase P3 - batched recurrent-state kernel (3-6 weeks, ONLY if P0.5 says the loop costs)
+
+**Gate resolved NO-GO 2026-10-21 by P0.5** (63 batch windows/arm, `STRATA_VERIFY_PROFILE` stage
+stamps bracketing the per-slot loops; calibration: profile total within 0.5-1% of the host-run
+ms/window at all three lanes): conv+rec at 8 lanes = 3.43 ms of a 115 ms window (3%), all GDN
+recurrent stages together 7.8%, growth sublinear-to-linear in lanes; ~32% of the window is the
+GPU waiting on CPU expert service (`waitCPU` 36.4 ms/window at b8), which this phase does not
+touch. Receipt `benchmarks/gfx906/receipts/2026-10-21-p0.5-recurrent-step-cost-p3-nogo.json`.
+The measured side observation that outranks P3 for GPU-side batching work: QSA attention grows
+0.49 ms solo to 8.54 ms at 8 lanes per window.
 
 1. Batched GDN/PLE/indexer variants taking a state-stride grid dim
    (`include/strata/kernels/verify_kernels.hpp:41-44` shows the single-state signature today);

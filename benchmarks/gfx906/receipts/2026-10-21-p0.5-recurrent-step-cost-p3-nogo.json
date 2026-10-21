@@ -1,0 +1,21 @@
+{
+  "task": "P0.5 (task #9): recurrent-state per-step cost at 2/4/8 lanes = the P3 go/no-go",
+  "date": "2026-10-21T05:36:01-04:00",
+  "run_by": "operator (tools/gfx906/run-p0.5-profile.sh, captured run-p0.5-profile.log); analysis agent-side",
+  "instrument": "NO new engine code. STRATA_VERIFY_PROFILE=1 (#610): per-window GPU stage stamps; gfx906 stamp branch (verify_kernels.cu:1399) reads wall_clock64() at 25 MHz, this card's hipDeviceAttributeWallClockRate=25000 kHz; batch path collects (verify.cpp:3092/3156/3314) and prints per-stage lines (generate.cpp:10240). The conv stamp interval brackets the batch_rec_ per-slot conv loop and rec brackets the per-slot recurrence loop (verify.cpp:1208-1217, 1242-1255) - exactly P3's fusion targets.",
+  "engine": "build-906/strata, tree 97439889, recipe + --gpu 1 identical to P0.4, single engine (crash rule), 63 batch windows per arm",
+  "calibration_WITNESSED": {
+    "profile_total_vs_host_run_ms_per_window": {"b2": "39.46 vs 39.83", "b4": "62.63 vs 63.03", "b8": "115.28 vs 115.80"},
+    "note": "profile and host agree within 0.5-1% on all three arms - the 25 MHz clock scale is confirmed end-to-end on live batch data; these stage numbers are absolute-safe for THIS receipt"
+  },
+  "per_slot_serial_loop_cost_ms_per_window": {
+    "conv": {"b2": 0.26, "b4": 0.44, "b8": 0.87, "b2_to_b8_growth": "3.3x for 4x lanes (sublinear)"},
+    "rec": {"b2": 0.66, "b4": 1.27, "b8": 2.56, "b2_to_b8_growth": "3.9x (near-linear)"},
+    "conv_plus_rec_b8": {"ms": 3.43, "pct_of_115ms_window": 3.0},
+    "all_gdn_recurrent_stages_conv_ab_z_rec_b8": {"ms": 9.01, "pct_of_115ms_window": 7.8}
+  },
+  "where_b8_time_actually_goes_ms_per_window": {"waitCPU_GDN_plus_QSA": 36.35, "pct_waitCPU": 31.5, "VRAM_hits": 12.75, "attention_QSA_b8": 8.54, "comment": "the GPU waits on the CPU expert pool for ~1/3 of the window - the CPU-service bottleneck P0.2 identified, which P3 does not touch"},
+  "P3_GATE_VERDICT": "NO-GO. The per-slot conv+rec loops cost 3.4 ms of a 115 ms batch window (3%), all four GDN recurrent stages together 7.8%, and they scale sublinear-to-linear with lanes. A 3-6-week multi-state kernel could reclaim only a fraction of that 3%, while ~32% of the window is the GPU waiting on CPU expert service - a different bottleneck entirely. The prior UNMEASURED marker (CONCURRENCY-RADIX.md G3) is replaced by these numbers.",
+  "side_observation_for_future_work": "QSA attention grows 0.49 ms (solo) to 8.54 ms (b8) per window, superlinear vs 4x lanes - batched attention across lanes' K/V is a bigger GPU-side term than the recurrent loops, and belongs to any future batching work that targets the GPU rather than CPU expert service.",
+  "limits": "64-token greedy arms, fixed prompts, profiler adds slight decode overhead (stages compared within one run, never quoted as speed); solo-profile lines from the same logs show prefill-dominated windows (qkv gemv 471 ms/window over 5 windows) - excluded from all batch numbers above"
+}
