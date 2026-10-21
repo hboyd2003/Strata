@@ -157,6 +157,16 @@ to expert service, not to lane-count kernel work.
 
 ## Phase G8 - the exactness decision (free, do first)
 
+**RESOLVED 2026-10-21: option (b).** Recorded in `docs/BATCHING.md` ("The decision (G8, this
+fork, 2026-10-21)" paragraph): batched serving is "same model, not bit-equal" by default, the
+exactness recipe is the documented opt-in, generated `"parallel"` configs keep the default
+(byte-identical-default rule), and the recipe is what the comparison tools and this fork's
+benchmark scripts (`tools/gfx906/run-p0.*.sh`) pass. Witness basis: P0.2 (12/12 slots
+token-identical on gfx906 under the recipe) and the pre-existing default-settings drift
+measurement (RTX 5070, cited in BATCHING.md). The planned CI job (`batch_test.py --extra
+"<recipe>"` green) waits on a GPU runner - this fork's CI (`.github/workflows/gfx906-cpu.yml`)
+is CPU-only - stated openly instead of silently dropped.
+
 Decide and document ONE of: (a) batched serving guarantees exact solo parity by default (pay
 `STRATA_IQ_MT_MIN=1` + `--pcie-frac 0` + `--adapt-every 1000000` + `--no-prefill-borrow` in
 `"parallel"` configs); or (b) batched output is "same model, not bit-equal" and the exactness

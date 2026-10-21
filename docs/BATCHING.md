@@ -204,6 +204,18 @@ the settings above): one equal to its solo run, the others apart from token 0, 9
 differed for one, because the adaptive VRAM tier had moved experts between the solo runs and the batch; all four
 texts read as well as their solo runs.
 
+**The decision (G8, this fork, 2026-10-21):** batched serving is *the same model, not bit-equal* by default, and
+the settings above are the documented opt-in for users who need solo-identical output. The default stays the
+fastest rule: the equalizer costs a measured -1..-3% IQ3_S decode (DETAILS.md, Ryzen 7600 AVX-512), and every
+lane of a plain `--batch` already loses its drafts (MTP returns only with `--batch-mtp`). Generated `"parallel"`
+configs keep the default (the fork's rule: the default path stays byte-identical); the recipe is what the
+comparison tools and this fork's benchmark scripts pass. Witness on gfx906 (MI50 + an AVX-2 Threadripper, the
+path where an expert's rows round differently alone than in a group): 4/4 and then 8/8 batched slots produced
+their solo output token for token, 64 tokens greedy, `tools/batch_test.py` with the settings above
+(`benchmarks/gfx906/receipts/2026-10-20-p0.2-batch-parity-throughput.json`). CI wiring of the recipe into a
+batch-parity job waits on a GPU runner - this fork's CI is CPU-only - so until then the witnesses are the
+receipts and the scripts, named here rather than implied.
+
 Sampled requests (temperature, top_p, top_k, min_p, seed) are drawn row by row with the solo window's
 counter-based draw (Philox(seed, position)).
 

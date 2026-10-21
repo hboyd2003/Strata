@@ -1,0 +1,11 @@
+{
+  "task": "G8: the exactness decision (a decision phase, not a measurement - the measurement basis is the P0.2 receipt)",
+  "date": "2026-10-21T06:20:00-04:00",
+  "decision": "Option (b): batched serving is 'same model, not bit-equal' by default; the exactness recipe (STRATA_IQ_MT_MIN=1 + --pcie-frac 0 + --adapt-every 1000000 + --no-prefill-borrow, docs/BATCHING.md) is the documented opt-in for parity-sensitive users.",
+  "why": "The default stays the fastest rule: the equalizer costs a measured -1..-3% IQ3_S decode (DETAILS.md:97-103, Ryzen 7600 AVX-512); the repo had already drifted into (b) by documentation (BATCHING.md's divergence measurement, RTX 5070: 3 of 4 lanes apart from solo without the recipe) - G8 converts the drift into a recorded policy. The fork's byte-identical-default rule forbids quietly rewriting generated 'parallel' configs to the recipe.",
+  "gfx906_witness": "P0.2 (2026-10-20, operator-run): 4/4 and 8/8 batched slots token-identical to their solo runs under the recipe, on the exact rounding-sensitive path (MI50 + AVX-2 Threadripper, no AVX-512; engine log: 'the expert kernels run on AVX-2 (multi-token for the i-quant gate/up rows)'). benchmarks/gfx906/receipts/2026-10-20-p0.2-batch-parity-throughput.json.",
+  "recorded_in": ["docs/BATCHING.md ('The decision (G8, this fork, 2026-10-21)' paragraph, Exactness section)", "docs/CONCURRENCY-RADIX.md G8 gap row (closed)", "docs/CONCURRENCY-PLAN.md Phase G8 (RESOLVED block)"],
+  "wired": "tools/gfx906/run-p0.2-batch.sh and run-p0.4-sweep.sh and run-p0.5-profile.sh all pass the recipe (--gpu 1 --pcie-frac 0 --adapt-every 1000000 --no-prefill-borrow + batch_test.py's STRATA_IQ_MT_MIN=1 default).",
+  "deferred_stated": "CI batch-parity job with the recipe (the plan's original witness) waits on a GPU runner - this fork's CI (.github/workflows/gfx906-cpu.yml) is CPU-only; recorded in all three docs rather than silently dropped.",
+  "not_claimed": "Bit-exactness proof (this is token-text equality, same caveat BATCHING.md states for its own comparisons); parity without the recipe (measured NOT to hold, which is the point of the decision); sampled-request parity (out of scope, BATCHING.md's counter-based draws govern)."
+}
