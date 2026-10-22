@@ -1,0 +1,42 @@
+{
+  "task": "P1-exit (issue #17) - three BATCHING.md 'does not batch' paths batched-or-exempted with numbers; parity harness green on gfx906",
+  "date": "2026-10-21",
+  "verdict": "P1 CLOSED WITH EXEMPTIONS - every limit batched or exempted with a measured number; parity harness green on one unchanged engine tree",
+  "machine": "4x MI50 32GB (gfx906), ROCm 7.2.0, Swift-1.5 Qwen3.8-Flash-Next IQ3_XXS, engine/strata 0.1.44.1, exactness recipe throughout (STRATA_IQ_MT_MIN=1, --pcie-frac 0, --adapt-every 1000000, --no-prefill-borrow)",
+  "the_three_paths": {
+    "1_penalties": {
+      "status": "BATCHED",
+      "how": "per-row penalties from each slot's staged history (per-row sampler already took history; the batch path was passing nullptr,0); request without penalties unchanged byte for byte",
+      "witness": "greedy 4/4 + seeded-sampled 4/4 at repetition 1.1 and 1.8 IDENTICAL to solo; unseeded sampled differs by design (steady_clock stream, generate.cpp:11854) - arm D confirms with no penalty involved",
+      "receipt": "2026-10-21-p1.1-penalty-batch-parity.json",
+      "upstream": "issue #55 + PR #56 (against upstream/main e063ec6c, zero drift; PR tree gates: build rc=0, ctest = the 4 stable baseline fails, test_parallel 31/31 at PR tip)"
+    },
+    "2_prompt_reads": {
+      "status": "EXEMPTED WITH NUMBERS",
+      "limit": "prompt shorter than one chunk read in one piece; gives way only at chunk boundaries; not for pictures",
+      "measurement": "same 4888/4890-token prompts, same contention, read two ways: chunked time-share 182.5-184.9 tok/s (5.5 ms/token) vs windowed rows 74.2-74.8 tok/s (13.5 ms/token) = 2.5x slower; the chunked control also fed the slots 398 tokens + 8912 ms of whole windows between 8 parts, and BYIELD mid-read worked (D yielded, E admitted). Windowed reads take no BYIELD and no decode-share - those live only in the chunked path",
+      "verdict_basis": "removing this limit means window rows; window rows lose the prompt side of the dual gate by 2.5x before building anything - no engine code written, default untouched; the layout stays expressible for a VRAM-resident regime (~2.8 ms/row), which owes its own probe",
+      "pictures": "exempted as UNTESTED, not as measured: no image has been sent through a batch window on gfx906",
+      "receipts": "2026-10-21-p1.2-prefill-rows-nogo.json"
+    },
+    "3_admissions_one_at_a_time": {
+      "status": "EXEMPTED WITH NUMBERS",
+      "how": "admission IS prompt read (BGEN reads its prompt and first token through the usual path); the serialized total already runs at the measured chunked-service cap, and batching two reads together is the item-2 window-row idea at the same 2.5x loss; fairness needs are already met (BYIELD + decode-share, witnessed above); serial admission costs measured 1.1-1.8 s for 2-4 slots",
+      "failed_window_sibling": "the P1 item-3 lifecycle decision resolved alongside: exit+restart kept with engine-fault ledger + 2.4 faults/h row-recovery reminder (arm A) - 2026-10-21-p1.3-fault-ledger.json"
+    }
+  },
+  "parity_harness_green": {
+    "engine_tree": "engine sources identical to 795ac8fe (git diff 795ac8fe..HEAD touches serve/, docs/, benchmarks/ only) - every witness below ran on this same engine tree",
+    "batch_parity": "P0.2: 12/12 slots IDENTICAL; P1.1: 4/4 x 3 arms IDENTICAL; P1.4: 8/8 IDENTICAL + ACCEPTANCE OK (both arms within counting bands; cross-check BT == windows + accepted exact)",
+    "cpu_gates": "serve/test_parallel 32/32 (56 s, no GPU; includes the new fault-ledger test); batch_test --parse-check 11/11; setup battery fail-set unchanged (draft_vocab, engine_hash, golden - pre-existing)",
+    "open_observation_not_a_blocker": "batch first-proposal acceptance sat -6.3/-9.6 pp below solo in both P1.4 lanes, band-dominated at 43-142 windows; a --max-new 256 run settles whether it is real (command in the P1.4 receipt); token exactness unaffected"
+  },
+  "docs_landed": {
+    "BATCHING.md": "three Limits bullets now carry their batched/exempted reason + numbers; new 'Failed windows' section (restart cost, snapshot price, crossover, ledger)",
+    "CONCURRENCY-PLAN.md": "P1 phase verdict paragraph + Exit line rewritten as met-with-exemptions",
+    "CONCURRENCY-RADIX.md": "P1 work-item row marked CLOSED 2026-10-21",
+    "upstream": "issue #24 commented with the arm-A decision and the crossover arithmetic (2026-10-21)"
+  },
+  "phase_ledger": "P0 CLOSED (P0.0-P0.5, P0.6 skipped by decision) | G8 decision (b) recorded | P1 CLOSED WITH EXEMPTIONS (this receipt) | P2 NO-GO (census) | P3 NO-GO (profile) | P4 = GLM/DS4.1 T0-T5 next (needs operator GPU+RAM window)",
+  "receipt": "benchmarks/gfx906/receipts/2026-10-21-p1-exit.json"
+}

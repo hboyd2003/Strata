@@ -207,6 +207,11 @@ the one cross-cutting change with correctness teeth.
   `tools/batch_interleave_test.py` - which already compare alone-vs-together token by token - to
   the `--batch-mtp` drafts path. The remaining blast-radius item is
   engine-side recovery from a failed window (today: process death, all lanes with it). 2-4 weeks.
+  **CLOSED 2026-10-21 with exemptions** (plan P1 section): penalties batched (#55/#56); the
+  prefill-as-rows idea NO-GO by measurement on this box (window rows 2.5x slower than the
+  chunked time-share), which also exempts batched admissions; failed windows keep exit+restart
+  with a counted fault ledger whose reminder fires past 2.4 faults/h; acceptance parity
+  witnessed 8/8. Receipts `2026-10-21-p1-exit.json` and the per-item receipts beside it.
 - **P2 - checkpoint-tree radix** (Part 2): global frame ARENA allocator (no VMM on HIP),
   refcounted frozen prefix pages, `pin=N` generalized to many pins = multi-root sharing.
   1-2 months.

@@ -236,8 +236,17 @@ counter-based draw (Philox(seed, position)).
   token-identical in a batch slot, at repetition 1.1 and at 1.8 alike (4/4 slots each, Swift IQ3_XXS, gfx906,
   2026-10-21).
 - A prompt shorter than one chunk is read in one piece (the slots wait for it); a read gives way only at a chunk
-  boundary, and not for pictures.
-- Admissions are one at a time: two new long prompts are read one after the other.
+  boundary, and not for pictures. Kept by measurement (P1.2, gfx906, 2026-10-21): reading prompts through
+  window rows instead - what removing this limit means - measures 2.5x slower (74.2-74.8 tok/s vs
+  182.5-184.9 chunked, same prompts while slots decode), so one-piece reads are the fast path, not a missing
+  batch; the wait a one-piece read costs the slots is bounded by one chunk. Pictures: no image has been sent
+  through a batch window on gfx906 (the vision paths boot-validate first) - exempted as untested, not as measured.
+- Admissions are one at a time: two new long prompts are read one after the other. Kept by the same arithmetic:
+  admission IS prompt read, and its total already runs at the measured chunked-service cap (182.5-184.9 tok/s
+  per read while slots decode); reading two together means window rows, which cost 2.5x more (above). What
+  fairness needs already exists: BYIELD at chunk boundaries (witnessed: a long read gave way mid-read and the
+  waiting request was admitted into the freed slot) and the decode-share, which kept the slots decoding
+  8912 ms inside a 26.8 s read. Serial admission costs measured 1.1-1.8 s for 2-4 slots.
 - `--batch-groups` needs every stage on its own GPU. A pipelined slot is a conversation cache again (0.1.41): a request left alone in its slot goes back to the solo path with its drafts, as on one GPU.
 - The slot sessions take VRAM (above) and, with KV streaming, pinned RAM.
 

@@ -179,6 +179,16 @@ Witness: CI job runs `tools/batch_test.py --extra "<recipe>"` green.
 
 One PR per item; each opt-in.
 
+**Phase verdict 2026-10-21: CLOSED WITH EXEMPTIONS.** The three BATCHING.md "does not batch"
+paths: penalties are batched (item 1, #55/#56); prompt-as-window-rows is exempted with
+numbers (item 2, NO-GO: 74.8 vs 182.5 tok/s on identical prompts); serial admissions are
+exempted with the same arithmetic (their total already runs at the measured chunked-service
+cap - item 3 below). Failed windows keep exit+restart with a counted fault ledger (item 3, arm A).
+Acceptance parity witnessed (item 4). Parity harness green on this box: 12/12 (P0.2), 4/4 x 3
+arms (P1.1), 8/8 + ACCEPTANCE OK (P1.4) - all on the same engine tree, unchanged since
+(`git diff 795ac8fe..HEAD` touches no engine file). Exit receipt:
+`benchmarks/gfx906/receipts/2026-10-21-p1-exit.json`.
+
 1. **Penalties under batch** - two options, pick in the issue first: apply them in the batched
    sampler (`src/core/verify.cpp:3218`, where the comment pins the ignore), or reject them at the
    server the way `logit_bias` already returns HTTP 400 under `--batch` (`docs/LOGIT_BIAS.md`).
@@ -257,8 +267,11 @@ One PR per item; each opt-in.
    is untouched - identical tokens, and a rejected proposal can only cost a slot speed, never a
    wrong token. Receipt `benchmarks/gfx906/receipts/2026-10-21-p1.4-batch-mtp-acceptance.json`.
 
-Exit: the three BATCHING.md "does not batch" paths are batched or explicitly exempted with
-numbers; parity harness green on gfx906.
+Exit - **met 2026-10-21**: penalties batched (#56); the prompt-read and admission serialization
+exempted with numbers (both are the same window-row economics, measured 2.5x slower as rows);
+parity harness green on gfx906 (P0.2/P1.1/P1.4 receipts on one unchanged engine tree). Closed
+with exemptions, no open P1 work; the surviving P1 observation (batch acceptance -6..-10 pp,
+band-limited) is recorded in the P1.4 receipt with the run that would settle it.
 
 ## Phase P3 - batched recurrent-state kernel (3-6 weeks, ONLY if P0.5 says the loop costs)
 
