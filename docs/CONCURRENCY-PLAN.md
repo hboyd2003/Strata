@@ -437,7 +437,10 @@ structures so they can carry a device field from day one.
    token); native `--layer-split K --split-device 0,0` single-card bit-exact check adopted as P5's
    G8-equivalent; hidden dims measured from artifacts (GLM 4096, DS4.1 5120).
 2. **P5.1 (#26) - interconnect probe (operator, cards free; maps < 100 MB - a different risk class
-   than an engine, but run in a free window).** Tiny hipcc program: enumerate 4 devices, pairwise
+   than an engine, but run in a free window).** **TOOLING SHIPPED 2026-10-22** (`8007a144`:
+   `tools/gfx906/probe-p2p.cu` compiles clean under `hipcc --offload-arch=gfx906`, operator script
+   `run-p5.1-probe.sh` guards engine-alive + logs sysfs link state); AWAITING OPERATOR WINDOW.
+   Program: enumerate 4 devices, pairwise
    `hipDeviceCanAccessPeer`, measured peer-direct vs host-staged copy MB/s. Decides the relay
    transport (P2P vs pinned ring through host). Infinity Fabric is NOT assumed - MI50 IF needs
    board support this workstation may not expose.
