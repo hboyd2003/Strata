@@ -26,10 +26,13 @@ export STRATA_BUILD_DIR="$PWD/$BIN"
 export ASAN_OPTIONS=detect_leaks=0:abort_on_error=0:print_stacktrace=1:symbolize=1
 export STRATA_NO_LARGEPAGES=1   # same as the smokes (box has vm.nr_hugepages=0)
 IDS=logs/p4-ids-$STAMP.i32
-printf '151644 856 279 315 264 279 1294 315 82 4072 29 82 29 9446' | tr ' ' '\n' |
-    xxd -r -p -c 4 > "$IDS" 2>/dev/null ||
-    python3 -c "import struct,sys; ids=[151644,856,279,315,264,279,1294,315,82,4072,29,82,29,9446]
-open('$IDS','wb').write(b''.join(struct.pack('<i',i) for i in ids))"
+# run-4 lesson (logs p4.4/p4.2-asan-0815xx): 'xxd -r -p' fed DECIMAL ids produced garbage bytes and
+# exited 0, so the fallback never ran and both engines died early on 'token id out of range'.
+# Mid-vocab ids are valid in both vocabs (GLM 154880, DS4.1 129k); content is irrelevant to the crash.
+python3 -c "import struct,sys
+ids=list(range(1000,1014))
+open(sys.argv[1],'wb').write(b''.join(struct.pack('<i',i) for i in ids))
+print(f'prompt ids: {len(ids)} tokens -> {sys.argv[1]}')" "$IDS" || exit 1
 
 if [ "$MODEL" = ds41 ]; then
     LOG=$LOGDIR/p4.4-asan-$STAMP.log
