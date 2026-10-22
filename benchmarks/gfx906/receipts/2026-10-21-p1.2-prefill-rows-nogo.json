@@ -1,0 +1,40 @@
+{
+  "task": "P1.2 (issue #14) - prefill chunks as batch window rows (--prefill-rows)",
+  "date": "2026-10-21",
+  "verdict": "NO-GO - decided at the economics gate before building, with measured numbers",
+  "machine": "4x MI50 32GB (gfx906), Threadripper Pro 3975WX, 125 GiB DDR4-3200, ROCm 7.2.0",
+  "model": "Swift-1.5 Qwen3.8-Flash-Next IQ3_XXS (strata-swift-iq3_xxs.json), engine/strata 0.1.44.1",
+  "recipe": "--gpu 1 --pcie-frac 0 --adapt-every 1000000 --no-prefill-borrow, STRATA_IQ_MT_MIN=1 (BATCHING.md exactness recipe, same as every P0/P1 witness)",
+  "gate": "docs/CONCURRENCY-PLAN.md P1.2 + task #14: --prefill-rows must show slot tok/s AND prompt tok/s >= the time-share control; the probe decision line was within ~1.5x build, far slower report NO-GO with numbers",
+  "probe": {
+    "script": "tools/gfx906/run-p1.2-economics.sh",
+    "logs": [
+      "logs/p1.2-econ-chunked-20261021-222605.log",
+      "logs/p1.2-econ-windowed-20261021-222605.log",
+      "run-p1.2-economics.log"
+    ],
+    "harness": "tools/batch_interleave_test.py (A, B decode while C's 4888-token prompt is read; D/E test BYIELD)",
+    "why_windowed_measures_the_ceiling": "a --prefill-rows read advances at most 8 - (active decodes) prompt tokens per window and pays the same per-row service a verify window row pays (measured ~16 ms/row at b8, P0.2 b8 log line 128; the engine's own comment: a window ~16 ms/token vs a chunked run ~300 ms however few tokens, generate.cpp:11405-11409); the windowed arm (read_windows with --short-read 999999) reads the prompt through exactly those rows, so its rate upper-bounds the prompt side of any mixed window",
+    "arm_chunked": {
+      "C_read": "4888 tokens in 26781 ms = 182.5 tok/s (5.48 ms/token) while slots A, B decoded",
+      "D_read": "4890 tokens in 26444 ms = 184.9 tok/s",
+      "interleave": "the prompt was read in 8 parts, the slots decoding 8912 ms between them (second read: 6 parts, 6302 ms)",
+      "slots_during_admissions": 398
+    },
+    "arm_windowed": {
+      "C_read": "4888 tokens in 65841 ms = 74.2 tok/s (13.47 ms/token)",
+      "D_read": "4890 tokens in 65422 ms = 74.7 tok/s",
+      "extra_legs": "4888 -> 74.8, 4890 -> 74.6 tok/s (four independent reads, spread 74.2-74.8)",
+      "slots_during_admissions": 2,
+      "side_finding": "under --short-read 999999 a long read does not take BYIELD (D gave way: None) and does not interleave (2 slot tokens vs 398): read_windows has no yield/interleave points, only read_part does (BYIELD consumed at chunk boundaries, generate.cpp:11776-11824). The scenario then hit ERR BGEN: no such free slot and the arm exited 1. This is a property of the proxy flag, not of any default path (default --short-read is 64), and it is itself the reason --prefill-rows would need the MIXED window rather than more read_windows: BYIELD and the decode-share interleave live only in the chunked path."
+    }
+  },
+  "comparison": {
+    "prompt_side": "74.2-74.8 tok/s windowed vs 182.5-184.9 tok/s chunked on the same prompts at the same contention = 2.46-2.48x slower, past the 1.5x build line",
+    "slot_side": "a mixed window at b8 costs ~131 ms (P0.2 log), so a decode row in it advances 1 token per 131 ms (~7.6 tok/s/lane); the time-share control already gave the two slots 398 tokens plus 8912 ms of whole windows between parts. The gate demands BOTH sides beat control; the prompt side loses 2.5x before the slot side is even reached",
+    "engine_comment_agreement": "13.5 ms/token measured for window rows vs the comment's ~16 ms/token; 5.5 ms/token chunked here vs ~300 ms fixed per run + streaming there"
+  },
+  "what_still_holds_from_the_source_map": "the mixed layout is expressible TODAY (batch_rows.hpp validates a slot owning N contiguous rows - batch-mtp uses 2-row groups; keep-all commit = teacher-forced, verify.cpp:3167-3172; short parts already read through windows, --short-read 64). The finding is that on THIS machine's CPU-expert regime the row cost, not expressibility, kills the feature. On a VRAM-resident model (the paper's all-in-VRAM split, ~2.8 ms/row) the arithmetic differs - re-evaluate there before calling it dead engine-wide",
+  "not_tested": "a real mixed window (prefill rows + decode rows together) - not built, by this gate's design; its prompt rate is upper-bounded by the windowed arm since it pays the same rows with fewer of them",
+  "closure": "task #14 closes via its own NO-GO path (report NO-GO with the numbers, no engine change, default path untouched); docs/CONCURRENCY-PLAN.md P1 item 2 updated"
+}

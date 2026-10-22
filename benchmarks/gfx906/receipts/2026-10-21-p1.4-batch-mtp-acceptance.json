@@ -1,0 +1,38 @@
+{
+  "task": "P1.4 (issue #16) - --batch-mtp acceptance parity, batched vs solo",
+  "date": "2026-10-21",
+  "verdict": "PASS at the gate: every slot IDENTICAL (8/8) and ACCEPTANCE OK on both lanes; one open observation recorded below",
+  "machine": "4x MI50 32GB (gfx906), ROCm 7.2.0, engine/strata 0.1.44.1",
+  "model": "Swift-1.5 Qwen3.8-Flash-Next IQ3_XXS, greedy (no seed needed), MTP rt/ + draft_vocab.bin",
+  "recipe": "--gpu 1 --pcie-frac 0 --adapt-every 1000000 --no-prefill-borrow --batch-mtp, STRATA_IQ_MT_MIN=1, STRATA_SPEC_DEPTH=1 (set by --acceptance)",
+  "tool": "tools/batch_test.py --acceptance (commit d2abbc35); witness tools/gfx906/run-p1.4-acceptance.sh",
+  "logs": [
+    "logs/p1.4-b2-20261021-222415.log",
+    "logs/p1.4-b4-20261021-222415.log",
+    "logs/p1.4-b2-stdout-20261021-222415.log",
+    "logs/p1.4-b4-stdout-20261021-222415.log",
+    "run-p1.4-acceptance.log"
+  ],
+  "measure_pair": "batch side = drain tally 'strata batch: MTP proposals accepted A of O' (generate.cpp:10283, summed over slots at :10168); solo side = the spec-depth ladder's depth 0 (first proposal per window with a draft, :13354, counted :12893) - the same single decision a slot window makes",
+  "batch2": {
+    "parity": "2/2 slots IDENTICAL to solo",
+    "solo_first_proposal": "36/43 = 83.7% (19/26 + 17/17)",
+    "batch": "55/71 = 77.5%",
+    "diff": "-6.3 pp, tolerance +/-5.0 pp, counting band +/-15.5 pp -> ACCEPTANCE OK",
+    "cross_check": "126 BT tokens == 71 windows + 55 accepted (exact)",
+    "solo_ladder_context": "depth 1: 29/33, depth 2: 19/26 - the deeper proposals a solo window also verifies, rejected more often (why raw DONE rates are not the batch comparator)",
+    "throughput": "aggregate 35.2 tok/s overall, 52.2 tok/s from the first batch token; admissions 1.1s"
+  },
+  "batch4": {
+    "parity": "4/4 slots IDENTICAL to solo",
+    "solo_first_proposal": "74/85 = 87.1% (19/25 17/17 18/20 20/23)",
+    "batch": "110/142 = 77.5%",
+    "diff": "-9.6 pp, tolerance +/-5.0 pp, counting band +/-10.7 pp -> ACCEPTANCE OK",
+    "cross_check": "252 BT tokens == 142 windows + 110 accepted (exact)",
+    "solo_ladder_context": "depth 1: 59/66, depth 2: 38/54",
+    "throughput": "aggregate 41.1 tok/s overall, 59.4 tok/s from the first batch token; admissions 1.8s"
+  },
+  "open_observation": "the batched first-proposal rate sat below solo in BOTH lanes (-6.3 and -9.6 pp, batch 77.5% in each) - direction consistent, but both verdicts are band-dominated at 85-142 windows. If a sharper number is wanted: --max-new 256 shrinks the b4 band to roughly +/-5.4 pp; if the gap survives that run it is real, and the first suspect to read is the batched slot's private per-slot MTP drafter K/V path vs the solo shared drafter (candidate mechanism only - nothing here says correctness is affected: every slot output stayed token-identical, and a lower acceptance rate can only cost a slot tokens/s, never emit a wrong token)",
+  "correctness_boundary": "tokens IDENTICAL batched-vs-solo (8/8) under the exactness recipe, consistent with the P0.2 (12/12) and P1.1 receipts; acceptance is a performance/behaviour parity claim, kept separate per the fork's rule",
+  "closure": "task #16 closes with tool (d2abbc35) + this hardware witness; docs/CONCURRENCY-PLAN.md P1 item 4 marked witnessed"
+}

@@ -215,6 +215,16 @@ One PR per item; each opt-in.
    999999` windowed read of the same long prompt while slots decode); NO-GO with those numbers
    closes the item without building, within ~1.5x it justifies the build. Extends
    `tools/batch_test.py` / `batch_interleave_test.py` with a mixed chunk+decode scenario.
+   **RESOLVED NO-GO 2026-10-21 by the probe** (same long prompts, same contention, exactness
+   recipe): windowed read 74.2-74.8 tok/s vs chunked 182.5-184.9 = **2.5x slower** on the prompt
+   side (13.5 vs 5.5 ms/token, matching the engine's own ~16 ms/token comment), while the
+   time-share control already fed the decoding slots 398 tokens plus 8912 ms of whole windows
+   between parts. A mixed window pays the same rows with fewer of them, so it cannot beat the
+   prompt-side number; the gate needs both sides. Side finding: a windowed long read takes no
+   BYIELD and no decode-share (those live only in the chunked path) - the feature would also
+   have to port them. The layout stays expressible today for a regime where rows are cheap
+   (VRAM-resident model, ~2.8 ms/row); this machine's CPU-expert regime is the exemption, with
+   numbers. Receipt `benchmarks/gfx906/receipts/2026-10-21-p1.2-prefill-rows-nogo.json`.
 3. **Failed-window blast radius** - today `ERR+exit` pins the slot and the server re-admits from
    checkpoints (server recovers, engine dies). Minimal honest step: engine-side recovery of the
    failed row (fail the row, keep the window) behind a flag, or explicitly keep exit+restart and
@@ -224,8 +234,14 @@ One PR per item; each opt-in.
    drain tally (`generate.cpp:10283`) against the solo windows' FIRST proposal (spec-depth ladder
    depth 0, `:13354` with `STRATA_SPEC_DEPTH=1`, which the flag sets) - within `--acceptance-tol`
    pp or the 2-sigma counting band, whichever is wider; `--parse-check` proves the readers with no
-   engine (11/11 on this box). Hardware witness queued: `tools/gfx906/run-p1.4-acceptance.sh`
-   (batches 2 and 4, exactness recipe, refuses while another engine lives).
+   engine (11/11 on this box). **Witnessed 2026-10-21** (MI50, `--batch-mtp`, exactness recipe,
+   batches 2 and 4): 8/8 slots IDENTICAL to solo; first-proposal acceptance solo 83.7%/87.1% vs
+   batch 77.5%/77.5%, diffs -6.3/-9.6 pp inside the counting bands (+/-15.5/+/-10.7 pp) - both
+   arms ACCEPTANCE OK, cross-checks exact (BT tokens == windows + accepted). Open observation:
+   the batch rate sat below solo in both lanes; a `--max-new 256` run would decide whether the
+   gap is real (candidate mechanism: the batched slot's private per-slot drafter K/V). Correctness
+   is untouched - identical tokens, and a rejected proposal can only cost a slot speed, never a
+   wrong token. Receipt `benchmarks/gfx906/receipts/2026-10-21-p1.4-batch-mtp-acceptance.json`.
 
 Exit: the three BATCHING.md "does not batch" paths are batched or explicitly exempted with
 numbers; parity harness green on gfx906.
