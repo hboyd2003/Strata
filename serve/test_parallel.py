@@ -694,6 +694,54 @@ class ParallelService(unittest.TestCase):
         self.assertIn("exited (code 1)", note)
         self.assertIn("verify batch: layer 34 never rang (graph finished)", note)
 
+    def test_a_window_fault_is_ledgered_with_the_crossover_reminder(self):
+        # P1.3: the failed-window policy is exit-and-restart (upstream #24: state after a submitted kernel is
+        # sticky uncertain), so one bad row stalls every stream for a restart.  The server keeps the count and
+        # the cost in a ledger beside the engine log, and past the crossover rate - where snapshotting the
+        # slots' state every window would have been cheaper - it says so (serve/faults.py).
+        from serve import faults
+        self.start(2, fail=True)
+        self.engine.log_path = str(self.log)      # a config with an engine log: the ledger goes beside it
+        errors = []
+
+        def go(t):
+            try:
+                self.chat(t)
+            except urllib.error.HTTPError as e:
+                errors.append(e.code)
+
+        threads = [threading.Thread(target=go, args=(t,)) for t in ("first question LONGREPLY", "second question")]
+        for th in threads:
+            th.start()
+            time.sleep(0.05)
+        for th in threads:
+            th.join(30)
+        self.assertEqual(len(errors), 2, errors)               # both streams paid the blast radius
+
+        # the restart (and with it the ledger line) happens when the next request finds the engine gone (#27).
+        # start() mocks Popen only for the first construction; keep the same fake behind the restart spawn:
+        import serve.server as server
+        real = server.subprocess.Popen
+        script = Path(self.tmp.name) / "fake_strata.py"
+        with mock.patch.object(server.subprocess, "Popen",
+                               lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)):
+            self.assertEqual(self.chat("after the fault")["choices"][0]["message"]["content"], "ok, done.")
+        path = faults.ledger_path(str(self.log))
+        rows = [json.loads(x) for x in Path(path).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("verify batch: layer 34 never rang", rows[0]["reason"])    # the engine's own words
+        self.assertGreaterEqual(rows[0]["restart_s"], 0.0)
+        self.assertEqual(faults.count_in(path, 3600.0), 1)
+
+        # the crossover arithmetic, pinned where the reminder reads it: quiet below, loud at/above.
+        # (numbers of this box: ~2.45% snapshot tax vs ~37 s a fault => ~2.4 faults/h)
+        self.assertLess(1.0, faults.CROSSOVER_FAULTS_PER_H)
+        self.assertGreater(faults.CROSSOVER_FAULTS_PER_H, 1.0)
+        self.assertEqual(faults.reminder(1), "")
+        r = faults.reminder(faults.CROSSOVER_FAULTS_PER_H + 1)
+        self.assertIn("row-recovery", r)
+        self.assertIn("crossover", r)
+
     def test_nonfinite_in_batch_mode(self):
         """#879 in --batch mode: DONE ... nonfinite on the solo path or at an admission (nothing emitted yet) sends the
         request again once; BDONE ... nonfinite in a slot ends the reply that had started, as "length"."""

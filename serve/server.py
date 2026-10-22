@@ -70,6 +70,7 @@ from serve.responses import ResponsesError, error_body as responses_error_body  
 from serve.voice import VoiceServer, start_lazy_voice  # noqa: E402  local: the voice sidecar (ASR/TTS)
 from serve import images as images_api  # noqa: E402
 from serve import native_trace  # noqa: E402
+from serve import faults  # noqa: E402  local: the engine-fault ledger and the restart/recovery crossover (P1.3)
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -1114,7 +1115,14 @@ class StrataEngine:
         """Start the engine again (the same command) after it died; the new process has its own line queue.
         close() ends and waits for the old process first (EngineStuck when it cannot be ended).  A start that still
         exits before READY - a dead engine's VRAM can take a while to come back, notably on ROCm - is retried
-        (PR #637)."""
+        (PR #637).  When the old process died by itself (a failed window exits - upstream issue #24 - as do the
+        OOM killer #27 and a hang the silence watchdog ends #481), the death and the restart it cost go to the
+        fault ledger beside the engine log (serve/faults.py); a deliberate close() is not a fault."""
+        died = self.proc is not None and self.proc.poll() is not None    # close() leaves proc None: this died on its own
+        why = self.death_note() if died else ""
+        streams = sum(bool(b) for b in getattr(self, "slot_busy", [])) if died else 0
+        log_path = self.log_path          # __init__ runs again below; where the ledger goes is decided from this start
+        t0 = time.monotonic()
         info = dict(self.info)
         self.starting = True                     # prepare() answers 503 "starting" meanwhile (#344)
         try:
@@ -1143,7 +1151,23 @@ class StrataEngine:
             if "slot_cv" in self.__dict__:
                 with self.slot_cv:               # #1012: wake the requests that waited through it: they go on with the
                     self.slot_cv.notify_all()    # new engine, or (it did not start) end with a clean EngineDied
+            if died:
+                self._fault_report(why, streams, log_path, time.monotonic() - t0)
         self.info = {**info, **self.info}
+
+    def _fault_report(self, why: str, streams: int, log_path: str | None, restart_s: float) -> None:
+        """P1.3: an engine that died on its own took every live stream with it (the failed-window policy is
+        exit-and-restart: after a CUDA/HIP submission the device state is sticky uncertain, upstream issue #24,
+        so nothing can be repaired in place).  The ledger beside the engine log keeps the count and the restart
+        cost; past the crossover rate it also says that snapshotting the slots' state every window (the row-
+        recovery alternative, ~2.4% steady decode) would have paid for itself by now.  Diagnostic only: it
+        writes no engine byte, decides nothing, and never restarts or repairs anything by itself."""
+        path = faults.ledger_path(log_path)
+        try:
+            row = faults.note_death(path, reason=why, streams=streams, restart_s=restart_s)
+            print("[strata] " + faults.report(row, path), flush=True)
+        except Exception as e:                     # a fault ledger must never become a fault of its own
+            print(f"[strata] the fault ledger could not be written ({e})", flush=True)
 
     def _parse_done(self, line):
         f = line.split()

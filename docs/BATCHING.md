@@ -241,6 +241,32 @@ counter-based draw (Philox(seed, position)).
 - `--batch-groups` needs every stage on its own GPU. A pipelined slot is a conversation cache again (0.1.41): a request left alone in its slot goes back to the solo path with its drafts, as on one GPU.
 - The slot sessions take VRAM (above) and, with KV streaming, pinned RAM.
 
+## Failed windows
+
+A window that hits an error after its kernels were submitted cannot be repaired in place: on a CUDA/HIP
+device the state left by a failed submission is uncertain, so the engine's policy is to exit (upstream
+issue #24 - "never clear busy/live state"). Everything that was live pays for that: the server notices
+on the next request, restarts the engine, and re-admits each conversation from its checkpoint. Measured
+on this box's restart: warm (page cache holding the model) 30-35 s to READY plus 1.1-1.8 s to re-admit
+2-4 slots; cold 1-3 min. One bad row can therefore stall every stream for about 37 s.
+
+The alternative is not free either. Resuming only the failed row would mean being able to restore the
+other slots' state to before the window - a snapshot of each slot's recurrent state before every window:
+118 MB per slot on a GDN model, about 2.7 ms of a measured 115 ms 8-row window (~2.4% of decode, every
+window, healthy or not - computed from bytes over HBM bandwidth, not yet measured). So the crossover is
+`3600 s x 2.4% / 37 s` ~ **2.4 faults per hour**: below it, exiting and restarting is cheaper than any
+snapshotting could be; above it, the snapshot engine pays for itself. (The snapshot arm also holds
+~1 GB of VRAM in shadow buffers, and it must not trust state captured after a sticky error - the harder
+problem, and the reason it is parked.)
+
+"Infrequent" is now a counted number, not an assumption: every engine death that was not a deliberate
+unload is appended to `engine-faults.jsonl` beside the engine log (time, the engine's own reason, live
+streams, the restart it cost), and each death prints one line with the count over the last hour. Past
+2.4 deaths/h that line carries the reminder that row recovery would pay now (`serve/faults.py`). On the
+witness box the fault rate is 0/h across every P0/P1 run (2026-10-20..21); the row-level failure class
+that does happen - non-finite logits, #879 - never needed a restart: the engine ends that one slot
+(`BDONE ... nonfinite`) and the others keep going.
+
 ## Measured
 
 One RTX 5070 (12 GB), Ryzen 5 7600, 64 GB DDR5, Q2_0, 32K context, through the HTTP server: C different requests

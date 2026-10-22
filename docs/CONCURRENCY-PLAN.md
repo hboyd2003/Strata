@@ -225,10 +225,24 @@ One PR per item; each opt-in.
    have to port them. The layout stays expressible today for a regime where rows are cheap
    (VRAM-resident model, ~2.8 ms/row); this machine's CPU-expert regime is the exemption, with
    numbers. Receipt `benchmarks/gfx906/receipts/2026-10-21-p1.2-prefill-rows-nogo.json`.
-3. **Failed-window blast radius** - today `ERR+exit` pins the slot and the server re-admits from
-   checkpoints (server recovers, engine dies). Minimal honest step: engine-side recovery of the
-   failed row (fail the row, keep the window) behind a flag, or explicitly keep exit+restart and
-   document the restart cost with a measurement. No silent half-recovery.
+3. **Failed-window blast radius** - **RESOLVED 2026-10-21 (arm A: keep exit+restart, documented with
+   numbers + a counted fault ledger)**. Repair-in-place stays refused (upstream #24: after a CUDA/HIP
+   submission the device state is uncertain - "never clear busy/live state"); the alternative is
+   priced and parked: resuming one row needs a pre-window snapshot of every slot's recurrent state
+   (118 MB per slot on a GDN model), ~2.7 ms of the measured 115 ms 8-row window - ~2.4% of decode
+   in every window, healthy or not (computed from bytes over the box's HBM bandwidth, not yet
+   measured), ~1 GB of shadow VRAM, and the harder problem of not trusting state captured after a
+   sticky error. Restart cost is measured: 30-35 s to READY warm (the P1.4 arms each fit an engine
+   boot plus a full test into 45-65 s), 1-3 min cold, plus 1.1-1.8 s to re-admit 2-4 slots (P0.2) -
+   ~37 s per fault. The crossover `3600 x 2.4% / 37 s` is **2.4 faults/h**, so the decision is only
+   valid while faults stay that rare - and that is now counted, not assumed: every non-deliberate
+   engine death is appended to `engine-faults.jsonl` beside the engine log (its own reason, live
+   streams, the restart it cost) and one server-log line carries the last-hour rate plus the
+   row-recovery reminder once it crosses 2.4/h (`serve/faults.py`, `StrataEngine._fault_report`,
+   test `test_a_window_fault_is_ledgered_with_the_crossover_reminder`; 32/32 in
+   `python3 -m serve.test_parallel`). Fault rate on this box so far: 0/h across every P0/P1 run;
+   the row-level class that does occur (#879 non-finite) never needed a restart. docs/BATCHING.md
+   "Failed windows".
 4. **`--batch-mtp` drafts path in the harness** - **tool shipped 2026-10-21** (`d2abbc35`):
    `tools/batch_test.py --acceptance` compares the tallies the engine already logs - the slots'
    drain tally (`generate.cpp:10283`) against the solo windows' FIRST proposal (spec-depth ladder

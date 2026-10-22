@@ -1,0 +1,41 @@
+{
+  "task": "P1.3 (issue #15) - failed-window blast radius: recovery or documented exit+restart cost",
+  "date": "2026-10-21",
+  "decision": "arm A: keep exit-and-restart (upstream issue #24 policy: after a CUDA/HIP submission the device state is uncertain, 'never clear busy/live state'); document it with measured numbers; and COUNT the fault rate so the decision re-checks itself - past the crossover the server log says row recovery would now pay",
+  "machine": "4x MI50 32GB (gfx906), ROCm 7.2.0; ledger tested without GPU via the fake engine (serve/test_parallel.py)",
+  "restart_cost_measured": {
+    "warm_boot_to_ready_s": "30-35 (the two P1.4 arms each fit engine boot + two solo runs + two batch drains into 45 s and 65 s, logs/p1.4-*-20261021-222415.log)",
+    "cold_boot_s": "1-3 min (first boots, page cache empty, ~40 GB experts - P0 notes)",
+    "readmit_s": "1.1-1.8 for 2-4 slots (P0.2/P1.4 admission lines); a slot mid-prompt-read re-reads at the measured 182.5-184.9 tok/s",
+    "blast_radius": "every live stream pays the whole restart (whole-engine exit is the policy); a mid-read 4.9k prompt adds ~27 s",
+    "event_total_s": "~37 warm"
+  },
+  "snapshot_arm_cost": {
+    "status": "priced and parked, NOT built",
+    "steady_tax": "computed, not measured: pre-window snapshot of every slot's recurrent state = 118 MB/slot (docs/CONCURRENCY-RADIX.md GDN figure) x 8 slots x read+write / 0.7 TB/s effective HBM ~ 2.7 ms; measured window at b8 = 115.28 ms (P0.5) => ~2.45% of aggregate decode, in EVERY window, healthy or not",
+    "other_costs": "~1 GB VRAM shadow buffers (118 MB x 8) on a 32 GB card whose headroom drives the measured 32% waitCPU; and the correctness problem #24 names: state captured after a sticky error may itself be corrupt - resume could serve silently-wrong KV, the failure class this repo ranks worst",
+    "stream_count_cancels": "each fault costs N streams x ~37 s out of N x 3600 stream-seconds/h, so the crossover is stream-count-independent"
+  },
+  "crossover": {
+    "formula": "f* = 3600 s/h x SNAPSHOT_TAX / RESTART_S",
+    "value_per_h": 2.39,
+    "table_amortized_pct_of_aggregate_decode": {
+      "0.042 (1/day)": {"arm_A": 0.04, "arm_B_snapshot": 2.45, "winner": "A by ~60x"},
+      "1/h": {"arm_A": 1.03, "arm_B_snapshot": 2.45, "winner": "A by ~2.4x"},
+      "2.39/h": {"arm_A": 2.45, "arm_B_snapshot": 2.45, "winner": "crossover"},
+      "6/h": {"arm_A": 6.2, "arm_B_snapshot": 2.45, "winner": "B - but at 6 window faults/h the box has a hardware-class correctness bug, not a latency problem"}
+    },
+    "note": "one tail-latency argument for B survives below the crossover: arm A gives EVERY stream a ~37 s cliff per fault; B trades it for a flat ~2.45%. Recorded; the operator's stated reason for the ledger is exactly to notice if that becomes the binding concern"
+  },
+  "frequency_evidence": "0 window-level engine deaths across every witness run on this box (P0.2, P0.4, P0.5, G8, P1.1, P1.4, P1.2 - 2026-10-20..21); the row-level class that DOES occur (non-finite logits, #879) is already row-scoped without a restart (BDONE nonfinite, generate.cpp:6581-6584, server.py:330)",
+  "shipped": {
+    "ledger": "serve/faults.py - engine-faults.jsonl beside the engine log: t, engine's own reason (death_note), live streams, restart_s; counts never trusted from the file (re-read)",
+    "hook": "serve/server.py StrataEngine.restart() detects self-death (close() leaves proc None, so proc-not-None-and-exited is exactly 'died by itself'; deliberate unload/reload is not a fault) and calls _fault_report; the ledger path is taken at entry because restart() re-runs __init__; a ledger failure can never become a fault itself (caught, printed)",
+    "server_log_line": "every self-death prints reason, live streams, restart seconds, deaths in last hour + 24 h; past 2.39/h the line carries the row-recovery reminder with the numbers (verified output above, and in the test)",
+    "crossover_constants": "SNAPSHOT_TAX, RESTART_S, CROSSOVER_FAULTS_PER_H live in serve/faults.py with their receipts cited next to each number",
+    "test": "serve/test_parallel.py::test_a_window_fault_is_ledgered_with_the_crossover_reminder - the #997 fake engine fails a window (engine's own ERR, exit 1), both streams error, the next request restarts, the ledger row carries the engine's reason and the restart cost; reminder quiet at 1/h, loud above the crossover. Battery: 32/32 OK (python3 -m serve.test_parallel, 56 s, no GPU)"
+  },
+  "default_path": "byte-identical while healthy: the ledger code runs only when the engine process died by itself; a deliberate close()/unload writes nothing; no engine byte and no healthy-request path changes (no new config key needed)",
+  "closure": "task #15 closes arm A; #17 (P1-exit) unblocked",
+  "receipt": "benchmarks/gfx906/receipts/2026-10-21-p1.3-fault-ledger.json"
+}
