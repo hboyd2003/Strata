@@ -19,6 +19,10 @@
 #
 # Model preparation runs from the same image with another entrypoint (sh, python3 tools/iq_pack.py ...); see
 # docs/gfx906/CONTAINER.md. AB/CD is not in this source tree. Plain legacy-builder features only (no heredocs, no --mount).
+#
+# The CPU code is built for the CPU that builds the image (STRATA_PORTABLE=OFF: -march=native, AVX-512 on a Zen 4), so
+# the image runs only on CPUs with that instruction set; the CPU computes the experts the GPU cache misses.
+# --build-arg STRATA_PORTABLE=ON builds the AVX2 baseline instead, for other machines.
 
 ARG ROCM_IMAGE=docker.io/mixa3607/rocm-gfx906:10.1-complete@sha256:b1d72163863a56b6b2bf498d159c1dc17627f8751aed6c8b8de2ebe9882972b4
 
@@ -36,23 +40,24 @@ ENV PATH=/buildenv/bin:$PATH
 RUN python3 -c "import setup; print(setup.get_llama_cpp())"
 # extra HIP compiler flags for the engine and the GPU picture reader (empty: none), e.g. "-mllvm -amdgpu-sched-strategy=max-ilp"
 ARG CMAKE_HIP_FLAGS=
+ARG STRATA_PORTABLE=OFF
 ARG ENGINE_TOOLS="strata-concurrent strata-dequant strata-device strata-gguf strata-load strata-overlap strata-plan strata-q36ref"
 RUN set -e; \
     cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
         -DSTRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
-        -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR=/src/third_party/llama.cpp; \
+        -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE} -DSTRATA_GGML_DIR=/src/third_party/llama.cpp; \
     cmake --build build --target strata $ENGINE_TOOLS -j "$(nproc)"
 RUN set -e; \
     cmake -G Ninja -S tools/vision -B build-vision -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=/src/third_party/llama.cpp \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
-        -DSTRATA_VISION_CUDA=OFF -DSTRATA_PORTABLE=ON; \
+        -DSTRATA_VISION_CUDA=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE}; \
     cmake --build build-vision --target strata-vision -j "$(nproc)"; \
     cmake -G Ninja -S tools/vision -B build-vision-hip -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=/src/third_party/llama.cpp \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
         -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" -DCMAKE_HIP_COMPILER_ROCM_ROOT="$ROCM_PATH" \
         -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
-        -DSTRATA_VISION_HIP=ON -DSTRATA_VISION_HIP_ARCHS=gfx906 -DSTRATA_PORTABLE=ON; \
+        -DSTRATA_VISION_HIP=ON -DSTRATA_VISION_HIP_ARCHS=gfx906 -DSTRATA_PORTABLE=${STRATA_PORTABLE}; \
     cmake --build build-vision-hip --target strata-vision -j "$(nproc)"
 # /out/bin is what goes to /usr/local/bin; BUILD.json beside the engine says what it is (setup.py and the tools read it)
 RUN set -e; \
@@ -61,7 +66,7 @@ RUN set -e; \
     for t in $ENGINE_TOOLS; do cp "build/$t" /out/bin/; done; \
     cp build-vision/bin/strata-vision /out/bin/strata-vision; \
     cp build-vision-hip/bin/strata-vision-hip /out/bin/; \
-    python3 -c "import json, setup; print(json.dumps({'source': 'docker build', 'backend': 'hip', 'version': setup.source_version(), 'archs': ['gfx906'], 'vision': 'gpu', 'vision_archs': ['gfx906'], 'vision_gpu': setup.HVEXE, 'vision_cpu': setup.VEXE, 'lib_dirs': ['/opt/rocm/lib'], 'portable': True, 'src': setup.source_hash(setup.ENGINE_SOURCES), 'vision_src': setup.source_hash(setup.VISION_SOURCES)}, indent=1))" \
+    python3 -c "import json, setup; print(json.dumps({'source': 'docker build', 'backend': 'hip', 'version': setup.source_version(), 'archs': ['gfx906'], 'vision': 'gpu', 'vision_archs': ['gfx906'], 'vision_gpu': setup.HVEXE, 'vision_cpu': setup.VEXE, 'lib_dirs': ['/opt/rocm/lib'], 'portable': '${STRATA_PORTABLE}' == 'ON', 'src': setup.source_hash(setup.ENGINE_SOURCES), 'vision_src': setup.source_hash(setup.VISION_SOURCES)}, indent=1))" \
         > /out/bin/BUILD.json; \
     cat /out/bin/BUILD.json
 
