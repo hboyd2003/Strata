@@ -1,0 +1,22 @@
+{
+  "task": "P4.2/P4.4 RUN 3 2026-10-22 - GLM generates tokens (CPU experts); heap corruption isolated to the common GPU-experts path; ASan tooling shipped",
+  "date": "2026-10-22",
+  "logs": {
+    "glm": ["logs/p4.2-base-20261022-073832.log", "logs/p4.2-nograph-20261022-073832.log", "logs/p4.2-cpuexp-20261022-073832.log"],
+    "ds41": ["logs/p4.4-base-20261022-074337.log", "logs/p4.4-noenc-20261022-074337.log", "logs/p4.4-cpuexp-20261022-074337.log"]
+  },
+  "milestone": {
+    "glm_cpu_experts_end_to_end": "cpuexp rung rc=0: prefill 14 tokens in 19.53 s, decode 64 tokens / 63 passes in 88.28 s = 0.71 tok/s, clean finish + stats; VRAM free at end 23.36 GiB. Proves weights, 4-shard load, tokenizer, file tier (1276 ms/pass file reads), sampler. NOT the production path (experts 100% cpu, hit 0%)."
+  },
+  "isolation": {
+    "failure": "BOTH engines abort 'malloc(): invalid size (unsorted)' (glibc heap corruption) after a clean load, on the GPU-experts path",
+    "brackets": "GLM nograph still crashes (GGML graph off); DS4.1 --no-enc-skip still crashes (enc-skip exonerated); GLM CPU-experts clean; margin 4.0 fixed the run-2 c_stage OOM (it is not VRAM capacity)",
+    "ds41_cpu_ladder_gap": "new refuse-reason print did its job: '(layer 0, 14 tokens, device path)' - with --backend cuda the layer-major path always hands DEVICE activations to run_chunk_dev, which refuses cpu_only: ds41 has no GPU-dense/CPU-experts combo (GLM does). rung changed to --backend cpu -n 8 (last -n wins, ds41_generate.cpp:106)"
+  },
+  "tooling": {
+    "asan_build": "build-asan-906: RelWithDebInfo + -fsanitize=address on C/CXX host TUs (HIP device code uninstrumented), same gfx906 options as build-906; ds41_generate + glm_generate link RC=0 in 2m18s, 739 __asan symbols each",
+    "asan_runner": "tools/gfx906/run-p4-asan.sh [ds41|glm] - reuses the engine wrappers via STRATA_BUILD_DIR; ASAN_OPTIONS=detect_leaks=0:abort_on_error=0 (HIP runtime leaks by design); prints the first ERROR block (the corrupting store's stack)"
+  },
+  "next": "operator window: tools/gfx906/run-p4-asan.sh ds41 (then glm). If no ASan report appears at the abort, the corruptor lives in an uninstrumented allocator (HIP runtime or ggml-cuda host side) - step 2 is an ASan ggml archive or MALLOC_CHECK_=3",
+  "not_claimed": "no GPU-experts witness, no correctness or speed claim for the ported engines"
+}

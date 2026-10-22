@@ -395,6 +395,12 @@ with a receipt; correctness, state and performance are recorded separately per A
    (slots 19.89, staging fits with headroom). cpuexp rung additionally OOM'd on the 6.8 GiB dense
    half over a not-yet-drained card (prior rung SIGABRT frees VRAM asynchronously) - both smokes now
    sleep 10 between rungs.
+   **RUN 3 2026-10-22** (logs `p4.2-*-20261022-073832`): margin 4.0 fixed the c_stage OOM and the
+   **cpuexp rung GENERATED TOKENS** - prefill 14 tok + 64 decode at 0.71 tok/s, clean finish
+   (PASS-CPU-ONLY ladder: engine, weights, tokenizer, file tier all work end-to-end; GPU expert
+   path NOT witnessed). base+nograph moved to the SAME glibc heap-corruption abort DS4.1 shows
+   (`malloc(): invalid size (unsorted)`) right after tier load - the failure is now common to BOTH
+   ported engines on the GPU-experts path; CPU experts clean brackets the corruptor to that path.
 4. **P4.3 (#21) - GLM serve** (operator-launched): the `--serve` scope + stdin/stdout protocol
    first live run; LoRA (`--lora-exps` on IQ3_S) first exercise; first GLM decode tok/s.
 5. **P4.4 (#22) - DS4.1 engram smoke** (operator-launched): 128 tokens, engram integrity gate
@@ -410,6 +416,15 @@ with a receipt; correctness, state and performance are recorded separately per A
    `--ctx 32768` removed from the smoke (P4.1 verdict is the engine's auto-4096 - the script had
    contradicted the budget doc). Heap corruption class: NOT papered over - if the noenc rung also
    crashes the next triage is an ASAN/MALLOC_CHECK build of ds41 on the CPU path.
+   **RUN 3 2026-10-22** (logs `p4.4-*-20261022-074337`): the `--no-enc-skip` rung ALSO crashed with
+   `malloc(): invalid size (unsorted)` before any batch line - **enc-skip exonerated**; the
+   corruption is on the common GPU-experts path both engines share. The new refuse-reason print
+   caught the cpuexp rung's real problem: `(layer 0, 14 tokens, device path)` - with `--backend
+   cuda` the layer-major path always hands device activations to `run_chunk_dev`, which refuses
+   `cpu_only`: ds41 has NO GPU-dense/CPU-experts combo (GLM does). cpuexp rung now forces
+   `--backend cpu -n 8`. Next triage tool shipped: `tools/gfx906/run-p4-asan.sh` (AddressSanitizer
+   build `build-asan-906`, host TUs instrumented; names the corrupting store's stack instead of a
+   later malloc's abort).
 6. **P4.5 (#23) - DS4.1 serve** (operator-launched): exact-serve default (`STRATA_SERVE_STEP_MAX=
    96`), engram live, first DS4.1 decode tok/s + the NVMe read-factor if the file tier is the cap.
 7. **P4a exit (#24)**: XOLOTL-PORT.md port log + P4 verdict; every known-unknown dispositioned;

@@ -84,7 +84,11 @@ if run_step base bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}"; then
     echo "P4.4 WITNESS: PASS (engram tables served a greedy continuation)"
 elif run_step noenc bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}" --no-enc-skip; then
     echo "P4.4 WITNESS: PASS-NO-ENC-SKIP - the enc-skip prefill path is the suspect; do not proceed to serve"
-elif run_step cpuexp bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}" --experts cpu; then
+elif run_step cpuexp bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}" --experts cpu --backend cpu -n 8; then
+    # --backend cpu is REQUIRED here (run-3 refuse-reason print, ds41_generate.cpp:926): with
+    # --backend cuda the layer-major path always passes device activations and run_chunk_dev
+    # refuses cpu_only - ds41 has no GPU-dense/CPU-experts combo, unlike GLM. -n 8 (last -n
+    # wins, :106): CPU dense would take hours for 128 tokens; the witness is tokens flowing.
     echo "P4.4 WITNESS: PASS-CPU-ONLY - the GPU expert path is NOT witnessed; do not proceed to serve"
 else
     echo "P4.4 WITNESS: FAIL (both rungs; logs logs/p4.4-*-${TS}.log - attach them to the issue)"
