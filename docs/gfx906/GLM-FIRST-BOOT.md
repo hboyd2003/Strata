@@ -11,7 +11,7 @@ paste-able block with the witness that proves it. Config: `tools/glm/serve/strat
 | patched ggml **CPU** build | **PASS** exit 0, `-j2`, 6m16s (log `/tmp/ggmlcpu.log`) |
 | engine tree + `ds4` tier compile under HIP gfx906 | **PASS** (192 targets, `build-906`) |
 | expert kernels for Maya-L's types on gfx906: IQ3_S(21) gate/up, IQ4_XS(23) down | **PASS by instantiation table** (`src/kernels/cuda/iq_kernels.cu` AMD lists: gate/up {16,17,18,**21**,22,23,29,42,143,11}, down {20,**23**,42,143,11}) |
-| patched ggml **HIP/gfx906** build (`ggml-cuda` as HIP) | **OPEN - the decisive one.** Needs `available >= ~10 GiB` (single-TU peaks). Command: `cmake -S /ai/engines/gfx906/llama.cpp-xolotl -B /ai/engines/gfx906/llama.cpp-xolotl/build-hip -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER=/opt/rocm/llvm/bin/clang++ -DGGML_CUDA_F16=ON -DLLAMA_CURL=OFF && cmake --build .../build-hip -j4` |
+| patched ggml **HIP/gfx906** build (`ggml-cuda` as HIP) | **PASS 2026-10-18 19:25**, built as part of the engine tree (not the standalone `build-hip` sketch below). Artifacts on disk, re-checked 2026-10-21: `build-906/ggml/src/ggml-cuda/libggml-cuda.a` 74,266,036 B (143 objects, 144/144 TUs, `-j2`, 8m01s); engines linked against it: `build-906/glm_generate` 81,171,976 B, `build-906/ds41_generate` 77,374,200 B. Compilation is a build gate, not a runtime claim - the first GLM boot is still T4. (The standalone command kept for reference: `cmake -S /ai/engines/gfx906/llama.cpp-xolotl -B /ai/engines/gfx906/llama.cpp-xolotl/build-hip -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER=/opt/rocm/llvm/bin/clang++ -DGGML_CUDA_F16=ON -DLLAMA_CURL=OFF && cmake --build .../build-hip -j4`) |
 
 ## T1 - artifacts on disk
 
