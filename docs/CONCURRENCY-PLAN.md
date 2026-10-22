@@ -191,17 +191,41 @@ One PR per item; each opt-in.
    did not exist in `serve/test_parallel.py` (citation stale) - a new test was added instead
    (`test_penalties_reach_the_batch_slot`), pinning the server's BGEN forwarding.
 2. **Prefill chunks as window rows** - the last un-batched mainline path is the chunked-prefill
-   GEN step (`generate.cpp:6947-7000`, `:5679-5681` pins "BGEN reads as a GEN 1"). Design: admit a
-   prompt chunk as a row in the shared verify window (the row machinery, graph buckets, and
-   per-row layouts already exist, `include/strata/core/verify.hpp:340-356`); park/resume stays
-   BYIELD. Gate: P0.2 green first; extend `tools/batch_test.py` and `batch_interleave_test.py`
-   with a `--prefill-rows` scenario (mixed chunk+decode rows, exact parity vs sequential).
+   GEN step. Citations re-pinned 2026-10-21 (the old `:6947-7000`/`:5679` point at KV chunk-mapping):
+   the time-share is `STRATA_BATCH_DECODE_SHARE` + the interleave in `read_part`
+   (`src/program/generate.cpp:11747-11750`, `:11825-11831`; one chunk per piece beside slots,
+   `include/strata/program/batch_read.hpp:22-30`); the "BGEN reads as a GEN 1" pin is
+   `rewrite_batch_admission` (`include/strata/program/native_trace_id.hpp:56-59`) plus the
+   one-produced-token continuation (`generate.cpp:13183`).
+   **Feasibility (source-mapped 2026-10-21): the layout already exists.** A slot owning N
+   contiguous rows at p..p+N-1 is exactly what `batch_rows_error` validates for `--batch-mtp`
+   (2-row groups), and GDN conv/recurrence, indexer, PLE chain and commit already execute
+   same-slot groups (`src/core/verify.cpp:1208-1252`, `:2877-2899`, `:3167-3172` keep-all =
+   teacher-forced). Short prompt parts already read through windows (`read_windows`,
+   `generate.cpp:11537-11595`, `--short-read 64`). What a `--prefill-rows` build would add is a
+   row class (prompt rows: commit-all, no BT/eos/penalty-history/nonfinite-slot-kill, per-slot
+   sampling is per-slot), homing the prompt in a carved slot session, and a stable row layout
+   (captures key on the layout, 20-30 MiB/pair).
+   **Gate before building (this box's regime):** a window row costs what the row pays - the
+   witnessed 8-row batch window is 131.24 ms (~16 ms/row, P0.2 b8 log; the engine's own comment:
+   a window ~16 ms/token vs a chunked run ~300 ms however few tokens, `generate.cpp:11405-11409`)
+   - so a prompt read as window rows advances <= 8 - (decodes) tokens per window and can lose the
+   task's dual gate (slot AND prompt tok/s >= time-share) on the prompt side by arithmetic.
+   `tools/gfx906/run-p1.2-economics.sh` measures both sides on this box (chunked vs `--short-read
+   999999` windowed read of the same long prompt while slots decode); NO-GO with those numbers
+   closes the item without building, within ~1.5x it justifies the build. Extends
+   `tools/batch_test.py` / `batch_interleave_test.py` with a mixed chunk+decode scenario.
 3. **Failed-window blast radius** - today `ERR+exit` pins the slot and the server re-admits from
    checkpoints (server recovers, engine dies). Minimal honest step: engine-side recovery of the
    failed row (fail the row, keep the window) behind a flag, or explicitly keep exit+restart and
    document the restart cost with a measurement. No silent half-recovery.
-4. **`--batch-mtp` drafts path in the harness** - extend `tools/batch_test.py` to compare
-   drafted-vs-solo acceptance (not just tokens) so P3 inherits an acceptance-parity harness.
+4. **`--batch-mtp` drafts path in the harness** - **tool shipped 2026-10-21** (`d2abbc35`):
+   `tools/batch_test.py --acceptance` compares the tallies the engine already logs - the slots'
+   drain tally (`generate.cpp:10283`) against the solo windows' FIRST proposal (spec-depth ladder
+   depth 0, `:13354` with `STRATA_SPEC_DEPTH=1`, which the flag sets) - within `--acceptance-tol`
+   pp or the 2-sigma counting band, whichever is wider; `--parse-check` proves the readers with no
+   engine (11/11 on this box). Hardware witness queued: `tools/gfx906/run-p1.4-acceptance.sh`
+   (batches 2 and 4, exactness recipe, refuses while another engine lives).
 
 Exit: the three BATCHING.md "does not batch" paths are batched or explicitly exempted with
 numbers; parity harness green on gfx906.
