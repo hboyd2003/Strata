@@ -330,17 +330,56 @@ Sequence so each step is independently shippable and opt-in:
    sessions, `serve` side announces hits. Exit: two-session same-prefix followups reuse tokens and
    produce byte-identical continuations under the exactness recipe.
 
-## Phase P4 - ported engines' per-session caches (last; follows the GLM/DS4.1 bring-up)
+## Phase P4a - GLM + DS4.1 first boots on gfx906 (the headline; operator-window gated)
 
-- First: the T0-T5 boots in `docs/gfx906/GLM-FIRST-BOOT.md` and the DS4.1 `--engram` smoke (both
-  operator-gated on GPU + >= ~65 GiB free RAM; incumbent holds both today).
-- Then DS4.1 (`tools/v41/engine/`): its caches are positional, so per-session page tables + the
+Tasks #18-#24. Compilation is already a build gate, not a runtime claim - nothing has ever booted
+here. T0's decisive gate (patched ggml as HIP/gfx906) is PASS (T0 table re-checked 2026-10-21:
+`build-906/ggml/src/ggml-cuda/libggml-cuda.a` 74,266,036 B, `glm_generate` 81,171,976 B,
+`ds41_generate` 77,374,200 B); T1/T2 artifacts and the GLM tokenizer are on disk. Each task ends
+with a receipt; correctness, state and performance are recorded separately per AGENTS.md.
+
+1. **P4.0 (#18) - bootable wrappers + local DS4.1 config + engram gate** (no GPU). WITNESSED
+   blocker 2026-10-22: `systemd-run --user --scope` exits 1 here (root session, no user bus;
+   `systemd-run --system --scope` exits 0) - both merged wrappers exec `--user`, so GLM/DS4.1
+   serve would die before the engine starts; fix with an auto-probe that keeps the working
+   `--user` path byte-identical upstream and falls back to `--system` here. Add
+   `strata-ds41-906.json` (local V41-GSQ / `engram/l1:l14` / `rank.bin` / `tokenizer` paths) and
+   `ds41-engine-906.sh`. The engram integrity gate is `check_engram_tables.py` (header + engine-
+   expectation check), NOT `verify_engram.py` - the FP8 source shards were deleted, so the
+   byte-vs-source verifier cannot re-run and the tables (95 GiB each) are the sole copy.
+2. **P4.1 (#19) - RAM/arena budget** (no GPU). Ledger per model on 125 GiB/no-swap (pinned arena +
+   resident + KV-at-smoke-ctx + scratch + headroom) and the MemAvailable refuse-threshold for the
+   witness scripts. The 2026-10-20 SVM/KFD watchdog reset makes these thresholds safety-critical,
+   not hygiene; smoke at reduced ctx (GLM 32768 drafted; DS4.1's own number computed), NOT 512K.
+3. **P4.2 (#20) - GLM T4 direct-engine smoke** (operator-launched). 8 tokens, witnesses: 4-shard
+   split geometry read (Xolotl tuned on 3 shards - the boundary arithmetic is untested here), no
+   `has no kernel` error (IQ3_S gate/up / IQ4_XS down), no shard-layout error, tokens out.
+   Failure ladder: graph-off (`GGML_CUDA_GRAPH_MAX_TOKENS=0`), `--experts cpu`, wider vram-margin.
+4. **P4.3 (#21) - GLM serve** (operator-launched): the `--serve` scope + stdin/stdout protocol
+   first live run; LoRA (`--lora-exps` on IQ3_S) first exercise; first GLM decode tok/s.
+5. **P4.4 (#22) - DS4.1 engram smoke** (operator-launched): 128 tokens, engram integrity gate
+   green first; NO `not the real model` warning; `STRATA_NO_LARGEPAGES=1` (pins the arena at
+   ~1.2 GB/s, load ~50 s). Run plain (no `--prune`/`--route-bias`/`--build-mirror` - this box
+   lacks the authors' profile/mirror files).
+6. **P4.5 (#23) - DS4.1 serve** (operator-launched): exact-serve default (`STRATA_SERVE_STEP_MAX=
+   96`), engram live, first DS4.1 decode tok/s + the NVMe read-factor if the file tier is the cap.
+7. **P4a exit (#24)**: XOLOTL-PORT.md port log + P4 verdict; every known-unknown dispositioned;
+   START-HERE.md validation boundary updated; parity-vs-authors (250 prefill / 17-30 decode tok/s
+   on 4090+90 GB) stated as a LATER, separate claim - this box is a different machine.
+
+All of P4.2-P4.5 are one-engine-at-a-time operator windows (the standing crash rule) and refuse
+below the P4.1 threshold.
+
+## Phase P4b - ported engines' per-session caches (last; follows P4a)
+
+- DS4.1 (`tools/v41/engine/`): its caches are positional, so per-session page tables + the
   P2b/P2c pattern port nearly directly. GLM (`tools/glm/engine/`): KDA state per session first
   (`glm_session.hpp:16-18` already holds S/F per session), shared prefixes last - state
   save/restore at node depth is the same economics as Part 2 of the analysis.
 - `glm_generate`/`ds41_generate` are single-device today; multi-card layer split and any
   replica-scale work (serve/`replicas.py`, whose per-process weights duplicate CPU RAM on a
-  125 GiB box - a shared pinned arena is the same fix as P2a) come after.
+  125 GiB box - a shared pinned arena is the same fix as P2a) come after. 512K context lives here,
+  not in P4a's smokes.
 
 ## Cross-cutting
 
@@ -364,9 +403,12 @@ Sequence so each step is independently shippable and opt-in:
 | HIP paths of shipped-but-unvalidated features (parking, KV-prefetch, conversation cache) misbehave on gfx906 | P0.2/P0.6 are explicitly first-witness events; failures become issues, not assumptions |
 | Write-semantics of shared frames break a rewind path nobody thought of | P2b's rewind-path audit precedes any sharing; exact-parity gate blocks merge |
 | RAM watchdog kills builds/boots mid-phase on the shared 125 GiB box | standing watchdog + schedule heavy boots in incumbent gaps; operator decides |
+| a boot maps past the amdgpu resident-system-memory limit: SVM refusal is NOT a catchable error - it wedged KFD and the IPMI watchdog hard-reset the box 2026-10-20 | one engine at a time (standing rule); P4.1 refuse-thresholds in every witness script (MemAvailable + engine-alive pre-flight); pinned arenas (`--arena-gib`) preferred over SVM paths |
 
 Effort summary: P0 ~1 week (mostly waiting on GPU/RAM windows), G8 ~0, P1 2-4 weeks, P3 3-6 weeks
-(conditional), P2 1-2 months (conditional), P4 last and gated on the ported-engine bring-up.
-The honest current position: P0.1 is DONE (30/30 OK, 2026-10-19, this checkout); everything else
-waits on the P0.0
-artifact and a GPU+RAM window on this box.
+(conditional), P2 1-2 months (conditional), P4a ~1-2 operator windows after the no-GPU prep,
+P4b last and gated on P4a.
+The honest current position (2026-10-22): P0 closed, G8 decided, P1 closed with exemptions, P2 and
+P3 NO-GO with numbers - the only open phase is P4a (GLM + DS4.1 first boots), whose no-GPU prep
+(#18 wrappers/config/engram-gate, #19 RAM budget) can start any time and whose hardware steps
+(#20-#23) are single-engine operator windows.
