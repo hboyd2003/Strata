@@ -1,0 +1,25 @@
+{
+  "task": "P4.2 (#20) GLM direct-engine smoke - RUN 1: FAIL, root-caused, fix shipped, re-run pending",
+  "date": "2026-10-22",
+  "logs": ["logs/p4.2-base-20261022-055725.log", "logs/p4.2-nograph-20261022-055725.log", "logs/p4.2-cpuexp-20261022-055725.log"],
+  "outcome": "all three rungs rc=134 (SIGABRT) at the identical point: after 'tier: gpu, 2014 resident slots, arena 60.0 GiB (5522 experts), file tier 4560; load 42.9 s', ggml-cuda.cu:647 CU_CHECK -> 'HipVMM Failure: invalid argument'",
+  "root_cause": "fork-side: tools/gfx906/ggml/hip-cmake.patch set GGML_CUDA_NO_VMM, but common.cuh:264 disables GGML_USE_VMM under HIP only for GGML_HIP_NO_VMM - the VMM pool compiled in; ROCm 7.2's attribute probe reports VMM yes (boot log shows 'VMM: yes') yet hipMemSetAccess fails with invalid argument at first pool growth (first real ggml alloc after the tier load)",
+  "fix": "hip-cmake.patch adds add_compile_definitions(GGML_HIP_NO_VMM); both directions gated (git apply --reverse --check on the live clone = the gate the fork cmake enforces; fresh-apply on a HEAD worktree of the pinned clone); ggml-cuda rebuilt (GGML_HIP_NO_VMM in 143 TUs per compile_commands.json) and glm_generate + ds41_generate relinked, BUILD RC=0",
+  "boot_facts_before_abort": {
+    "architecture_line": "glm5-next: 45 layers (34 KDA, 11 MLA), 288 experts top-8, vocab 154880",
+    "correction": "11 MLA, NOT the 12 the P4-RAM-BUDGET draft assumed; 45 layers not 46 - doc corrected with this receipt",
+    "shards": "4-shard split geometry read with no layout error (Xolotl had tuned 3 shards - boundary arithmetic survived first contact)",
+    "dense_half_load_s": [7.2, 3.9, 3.9],
+    "tier": "2014 resident slots (21.89 GiB, auto from 23.89 free after dense), arena 60 GiB = 5522 experts, file tier 4560, load 34.8-42.9 s",
+    "kernel_gate": "no 'has no kernel' error up to the abort (IQ3_S/IQ4_XS instantiation held through tier load)"
+  },
+  "tooling_bugs_found_and_fixed": [
+    "run-p4.2: '${ARGS[@]/--experts gpu/--experts cpu}' matches NO array element (flag and value are separate elements) - the cpuexp rung silently ran GPU experts (log said tier: gpu); now flips the element after --experts",
+    "run-p4.4: same substitution pattern, and its ARGS carry no --experts at all (ds41_generate defaults gpu at ds41_generate.cpp:73) - the rung re-ran base; now appends --experts cpu",
+    "ds4_moe never printed the arena backing note (ds41 did) - the pinned-tier witness had nothing to grep on GLM; ds4_moe now prints 'arena: pinned (...)' like ds41_moe.cpp:1497",
+    "smoke-script grep tokens did not match the real note strings - now 'arena: |PORTABLE ok|slices pinned|MemAvailable' (pinned.cu:425 emits 'cudaHostRegister PORTABLE ok', :457 emits 'N slices pinned')"
+  ],
+  "pinned_tier_status": "UNTESTED still: the 60 GiB registration happened (load completed inside the RAM budget) but no note was printed, so no claim either way; the re-run will witness it",
+  "not_claimed": "no token output, no correctness, no speed claim - the engine never reached prefill",
+  "rerun": "operator window: stop vLLM (one HIP engine at a time), then tools/gfx906/run-p4.2-glm-smoke.sh (refuses below 85 GiB MemAvailable)"
+}

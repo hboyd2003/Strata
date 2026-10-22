@@ -19,9 +19,20 @@ been debugged on real hardware. Correctness/performance claims are separated thr
 `rocm-smi --showtopo`: every GPU pair weight **40**, hops **2**, link type **PCIE** — there is
 **no Infinity Fabric between the GPUs on this workstation** (the P5 risk-register assumption,
 CONFIRMED). Same-complex pairs (0↔1, 2↔3) are still 2 hops; they at least share a complex.
-All four are NUMA node 0 (single-socket TR Pro 3975WX). Bandwidth is measured in P5.1 (task
-#26), including whether `hipDeviceCanAccessPeer` works across the complexes; plan fallback is
-host-pinned bounce relay over ~25-31 GB/s PCIe, which the relay arithmetic (§4) shows is fine.
+All four are NUMA node 0 (single-socket TR Pro 3975WX). P5.1 measured the interconnect
+(2026-10-22, engines down, receipt `2026-10-22-p5.1-interconnect-probe.json`): every pair is
+P2P-capable (`EnablePeerAccess` ok on all 12 ordered pairs), **peer-direct is fast only inside
+a complex** (~26.9 GiB/s for 0↔1 and 2↔3 in HIP order) and **collapses to ~7.3 GiB/s across
+complexes**, while **host-pinned staging is uniform at 25–26.7 GiB/s on every pair** — so the
+bounce relay is not the fallback, it is the *best* transport, and it is the one #28 ships.
+Peer-direct cross-complex is 3.6× slower than bouncing; peer mappings stay available for a
+later KV phase but buy nothing for the relay.
+
+**Enumeration order differs by API — map ordinals to BDFs, never trust the number.** sysfs
+lists BDF order (23, 26, 43, 46); HIP and ggml enumerate **43, 46, 23, 26** — so in the engine
+own order, devices 0,1 are the pci0000:40 complex and 2,3 are pci0000:20, and the natural chain
+0→1→2→3 crosses complexes exactly once (1→2). With a uniform bounce transport, stage placement
+is free.
 
 Hidden-vector geometry (read from the artifacts 2026-10-22): GLM-5.3 `embedding_length =
 4096` (GGUF u32 KV at shard-1 byte 369), DS4.1 `hidden_size = 5120` (embedded config JSON),
@@ -108,8 +119,10 @@ that JSON).
 - Relay payload at a stage boundary per decode token: GLM one hidden vector = 4096×2 B =
   8 KiB; DS4.1 = 5120×2 B = 10 KiB (× hyper-connection stream count if `hc` keeps parallel
   streams across the boundary — check at #28). Prefill relays are chunk×hidden (e.g. 512×
-  10 KiB = 5 MiB). Against the ~50 ms/token tier-bound budget these are sub-microsecond
-  bytes; **sync copies first** (one stream-sync per boundary), pipeline only if #28 measures
+  10 KiB = 5 MiB). Measured #26: every transport moves ≥7.3 GiB/s and the chosen host-pinned
+  bounce 25–26.7 GiB/s uniformly, so a decode-token relay is ~0.4 µs against the ~50 ms/token
+  tier-bound budget; **sync copies first**
+  (one stream-sync per boundary), pipeline only if #28 measures
   a cost — the native engine ships sync relay for the same reason.
 
 ## 6. Flag surface (native vocabulary, byte-identical default)

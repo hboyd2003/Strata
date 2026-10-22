@@ -2,7 +2,7 @@ diff --git a/ggml/src/ggml-cuda/CMakeLists.txt b/ggml/src/ggml-cuda/CMakeLists.t
 index 2254090cb..5eaff9b28 100644
 --- a/ggml/src/ggml-cuda/CMakeLists.txt
 +++ b/ggml/src/ggml-cuda/CMakeLists.txt
-@@ -1,6 +1,19 @@
+@@ -1,6 +1,22 @@
  cmake_minimum_required(VERSION 3.18)  # for CMAKE_CUDA_ARCHITECTURES
  
 -find_package(CUDAToolkit)
@@ -15,6 +15,9 @@ index 2254090cb..5eaff9b28 100644
 +    set(CUDAToolkit_FOUND TRUE)
 +    set(CUDAToolkit_VERSION "12.4")
 +    set(GGML_CUDA_NO_VMM ON)
++    # common.cuh:263 turns GGML_USE_VMM off under HIP only for GGML_HIP_NO_VMM; witnessed on MI50/ROCm 7.2:
++    # the attribute probe reports VMM yes but hipMemSetAccess aborts (ggml-cuda.cu:647) at first pool growth
++    add_compile_definitions(GGML_HIP_NO_VMM)
 +    # common.cuh picks vendors/hip.h (hipBLAS + cuda* name maps) on this define, not on __HIPCC__
 +    add_compile_definitions(GGML_USE_HIP)
 +else()

@@ -66,16 +66,18 @@ run_step() {
     "$@" >"$log" 2>&1
     local rc=$?
     echo "--- tail $log:"; tail -25 "$log"
-    # P4.1 witness (P4-RAM-BUDGET.md): the arena pin must say PORTABLE ok; a degraded pin
-    # means the run tested the unpinned fallback path, not the pinned tier
-    grep -m4 -iE "cudaHostRegister|MemAvailable" "$log" 2>/dev/null | sed 's/^/[arena] /'
+    # P4.1 witness (P4-RAM-BUDGET.md): ds41_moe prints "arena: pinned (cudaHostRegister PORTABLE ok; ...)";
+    # "N slices pinned" or an absent PORTABLE = degraded registration = the UNREGISTERED fallback was tested
+    grep -m4 -iE "arena: |PORTABLE ok|slices pinned|MemAvailable" "$log" 2>/dev/null | sed 's/^/[arena] /'
     echo "=== p4.4/$name rc=$rc log=$log ==="
     return $rc
 }
 
+# ds41_generate defaults experts=gpu (ds41_generate.cpp:73) and this ARGS carries no --experts at all, so the
+# old "${ARGS[@]/--experts gpu/--experts cpu}" matched nothing and the rung silently re-ran base. Append the flag.
 if run_step base bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}"; then
     echo "P4.4 WITNESS: PASS (engram tables served a greedy continuation)"
-elif run_step cpuexp bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]/--experts gpu/--experts cpu}"; then
+elif run_step cpuexp bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}" --experts cpu; then
     echo "P4.4 WITNESS: PASS-CPU-ONLY - the GPU expert path is NOT witnessed; do not proceed to serve"
 else
     echo "P4.4 WITNESS: FAIL (both rungs; logs logs/p4.4-*-${TS}.log - attach them to the issue)"

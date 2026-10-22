@@ -11,7 +11,9 @@ if(STRATA_GGML_CUDA)
   if(STRATA_HIP_GFX906)
     # HIP: ggml-cuda/CMakeLists.txt needs tools/gfx906/ggml/hip-cmake.patch (skips find_package(CUDAToolkit) -
     # the CUDA::cudart/CUDA::cublas imported targets above already carry hip::host/roc::hipblas).
-    # NO_VMM: the CUDA driver link and the cu* VMM path stay off; ALL_WARNINGS: the warning-probe block shells out
+    # NO_VMM: the CUDA driver link and the cu* VMM path stay off - AND note common.cuh:263 honors only
+    # GGML_HIP_NO_VMM under HIP (hip-cmake.patch adds it; witnessed MI50/ROCm 7.2: attribute says VMM yes,
+    # hipMemSetAccess aborts at first pool growth). ALL_WARNINGS: the warning-probe block shells out
     # to nvcc, which does not exist here.
     set(GGML_CUDA_NO_VMM ON CACHE BOOL "" FORCE)
     set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)

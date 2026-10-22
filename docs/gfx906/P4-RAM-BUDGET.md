@@ -30,10 +30,13 @@ consequences, each with its guard:
    arena_gib`, so the flag is the ceiling. The floor is a hygiene guard, not the P4 safety
    margin — the witness scripts enforce that.
 2. **Registration refusal is SOFT**: if the driver declines the whole-arena
-   `cudaHostRegister`, `PinnedArena` logs a note and degrades (sliced registration, then
-   unregistered = ~2× slower PCIe share, still correct). So EVERY P4.2/P4.4 log must be
-   grepped for `cudaHostRegister` (the smoke scripts now do):
-   `PORTABLE ok` = full pin; `limited to N GiB` / `FAILED` = degraded tier — a PASS with a
+   `cudaHostRegister`, `PinnedArena` notes it and degrades (sliced registration, then
+   unregistered = ~2× slower PCIe share, still correct). The tier code surfaces the note as an
+   `arena:` stderr line — DS4.1 has printed it since the merge (`ds41_moe.cpp:1497`); the GLM/Ds4Moe
+   path did NOT print anything (witnessed: P4.2 logs had no arena line), so it prints the same
+   line now. EVERY P4.2/P4.4 log must show
+   `arena: pinned (cudaHostRegister PORTABLE ok; ...)`:
+   `PORTABLE ok` = full pin; `N slices pinned` = partial; a PASS with a
    failed pin witnesses correctness, not the pinned path.
 3. **The exact driver limit is not readable on this box** (partial `/usr/src` tree; sysfs
    exposes only the boolean). The witnessed envelope: 49 GiB of GPU-attached host memory on
@@ -48,7 +51,7 @@ consequences, each with its guard:
 | --- | --- | --- | --- |
 | pinned expert arena | 60.0 | RAM, userptr-pinned | `--arena-gib 60` (config default, `glm_generate.cpp:48`) |
 | dense half (attention + shared + head) | 7.3 | RAM (mmap), uploaded to VRAM | GGUF breakdown: 156.31 GB = routed 148.50 + **dense 7.81** + nextn 0.03 (computed from metadata, 2026-10-18) |
-| KV @ 32768 tok, MLA F16 (hardcoded `glm_dense.cpp:842`) | 0.4 | VRAM (host: staging only) | 12 MLA layers × 13,056 B/tok = 0.398 GiB |
+| KV @ 32768 tok, MLA F16 (hardcoded `glm_dense.cpp:842`) | 0.4 | VRAM (host: staging only) | **11** MLA layers × 1,088 B/tok = 11,968 B/tok = 0.365 GiB (12 assumed when drafted; the 2026-10-22 boot log says 45 layers = 34 KDA + 11 MLA) |
 | KDA constant state (34 layers) | 0.14 | VRAM | 139 MB total, ctx-independent |
 | HIP runtime + graph-capture host side | ~2 *estimate* | RAM | first boot log replaces it |
 | **steady RSS** | **≈ 69** | | |
@@ -85,7 +88,8 @@ KV at these ctx is 0.4 / 0.01 GiB (VRAM side) — orders of magnitude from matte
 to smoke at reduced ctx is VRAM and geometry: expert-slot pressure and the 40-layer window
 rings scale with ctx, and GLM's 4-shard split boundary arithmetic (Xolotl tuned on 3 shards)
 is untested. DS4.1 takes the engine's own auto ctx (no `--ctx` passed); GLM pins 32768 as
-drafted in its config. For reference at the P4b target (512K): GLM MLA = 6.5 GiB, DS4.1 =
+drafted in its config. For reference at the P4b target (512K): GLM MLA = 5.9 GiB (11 MLA layers,
+boot-log measured), DS4.1 =
 1.25 GiB VRAM — still not the RAM problem; the VRAM fight is expert slots (per the 2026-10-18
 geometry note).
 

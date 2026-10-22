@@ -375,6 +375,17 @@ with a receipt; correctness, state and performance are recorded separately per A
    split geometry read (Xolotl tuned on 3 shards - the boundary arithmetic is untested here), no
    `has no kernel` error (IQ3_S gate/up / IQ4_XS down), no shard-layout error, tokens out.
    Failure ladder: graph-off (`GGML_CUDA_GRAPH_MAX_TOKENS=0`), `--experts cpu`, wider vram-margin.
+   **RAN 2026-10-22, FAILED all three rungs at one deterministic point** (`HipVMM Failure: invalid
+   argument`, ggml-cuda.cu:647, after `tier: gpu ... load 42.9 s`): root cause was OUR
+   `hip-cmake.patch` - `common.cuh:264` honors only `GGML_HIP_NO_VMM` under HIP and the patch set the
+   CUDA-side name, so the VMM pool compiled in; the ROCm 7.2 attribute probe reports `VMM: yes` but
+   `hipMemSetAccess` aborts at first pool growth. Fixed (patch adds `GGML_HIP_NO_VMM`; both apply
+   directions gated; ggml-cuda + engines rebuilt, def in 143 TUs). Same window also showed the
+   cpuexp rung silently ran GPU experts (`${ARGS[@]/--experts gpu/...}` matches no element - pairs
+   are separate array entries); fixed. Boot facts before the abort: 4-shard geometry read, 45 layers
+   (34 KDA + 11 MLA - **11, not the 12 the budget doc assumed**), 288 experts top-8, vocab 154880,
+   dense half 3.9-7.2 s, 2014 slots, arena 5522 experts, file tier 4560, tier load 35-43 s.
+   **RE-RUN NEEDED** in a free window (vLLM must be down).
 4. **P4.3 (#21) - GLM serve** (operator-launched): the `--serve` scope + stdin/stdout protocol
    first live run; LoRA (`--lora-exps` on IQ3_S) first exercise; first GLM decode tok/s.
 5. **P4.4 (#22) - DS4.1 engram smoke** (operator-launched): 128 tokens, engram integrity gate
@@ -436,14 +447,13 @@ structures so they can carry a device field from day one.
    wrong-owner cache read `expert_source.cpp`) carry into the design; relay sync-first (8/10 KiB per
    token); native `--layer-split K --split-device 0,0` single-card bit-exact check adopted as P5's
    G8-equivalent; hidden dims measured from artifacts (GLM 4096, DS4.1 5120).
-2. **P5.1 (#26) - interconnect probe (operator, cards free; maps < 100 MB - a different risk class
-   than an engine, but run in a free window).** **TOOLING SHIPPED 2026-10-22** (`8007a144`:
-   `tools/gfx906/probe-p2p.cu` compiles clean under `hipcc --offload-arch=gfx906`, operator script
-   `run-p5.1-probe.sh` guards engine-alive + logs sysfs link state); AWAITING OPERATOR WINDOW.
-   Program: enumerate 4 devices, pairwise
-   `hipDeviceCanAccessPeer`, measured peer-direct vs host-staged copy MB/s. Decides the relay
-   transport (P2P vs pinned ring through host). Infinity Fabric is NOT assumed - MI50 IF needs
-   board support this workstation may not expose.
+2. **P5.1 (#26) - interconnect probe.** **CLOSED 2026-10-22, RUN WITNESSED** (`logs/p5.1-probe-20261022-055705.log`,
+   receipt `2026-10-22-p5.1-interconnect-probe.json`): all 12 ordered pairs P2P-capable; peer-direct ~26.9 GiB/s
+   only INSIDE a complex and ~7.3 GiB/s across complexes; **host-pinned staging uniform 25–26.7 GiB/s everywhere**
+   ⇒ relay transport decision = **host-pinned bounce** (peer-direct buys nothing; cross-complex peer is 3.6×
+   slower than bouncing); no Infinity Fabric (peer ≈ staged, all-PCIe signature); HIP enumerates 43,46,23,26
+   (ordinals ≠ sysfs order — map ordinals→BDFs). Cross-complex bidir aggregate (~44 GiB/s vs 7.3 unidirectional)
+   is unreconciled; the design takes unidirectional as the constraint.
 3. **P5.2 (#27) - device plumbing (code; builds gate, no runtime claim).** Opt-in
    `--gpus D1,..` on `glm_generate`/`ds41_generate`: per-stage ggml backend + weight placement,
    expert tier device guards (set-device around raw calls), per-device pinned-buffer registration,

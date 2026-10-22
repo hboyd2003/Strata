@@ -959,6 +959,8 @@ bool Ds4MoeTier::build_arena(const std::vector<std::pair<int32_t, int32_t>>& ran
         gp.arena.base = gp.arena.owner->base;
         gp.arena.pinned = true;
         gp.arena.backing = "pinned (" + gp.arena.owner->note + ")";
+        // the P4.2 pinned-tier witness: same line ds41_moe.cpp prints, so run-p4.2-glm-smoke.sh greps one token
+        std::fprintf(stderr, "arena: %s\n", gp.arena.backing.c_str());
     } else {
         void* p = nullptr;
         if (posix_memalign(&p, 4096, gp.arena.bytes) != 0 || !p) {

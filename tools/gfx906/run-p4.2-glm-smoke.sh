@@ -56,19 +56,26 @@ run_step() {
     "$@" >"$log" 2>&1
     local rc=$?
     echo "--- tail $log:"; tail -25 "$log"
-    # P4.1 witness (P4-RAM-BUDGET.md): the arena pin must say PORTABLE ok; a degraded pin
-    # means the run tested the unpinned fallback path, not the pinned tier
-    grep -m4 -iE "cudaHostRegister|MemAvailable" "$log" 2>/dev/null | sed 's/^/[arena] /'
+    # P4.1 witness (P4-RAM-BUDGET.md): the arena pin says "arena: pinned (cudaHostRegister PORTABLE ok...)";
+    # a degraded pin prints "N of M slice(s) registered" - that ran the UNREGISTERED fallback, not the pinned tier
+    grep -m4 -iE "arena: |PORTABLE ok|slices pinned|MemAvailable" "$log" 2>/dev/null | sed 's/^/[arena] /'
     echo "=== p4.2/$name rc=$rc log=$log ==="
     return $rc
 }
+
+# --experts and its value are SEPARATE array elements, so "${ARGS[@]/--experts gpu/--experts cpu}" matched nothing
+# and the cpuexp rung silently ran GPU experts (witnessed 2026-10-22). Flip the element AFTER --experts instead.
+CPUARGS=(); flip=0
+for a in "${ARGS[@]}"; do
+    if [ "$flip" = 1 ]; then CPUARGS+=(cpu); flip=0; else CPUARGS+=("$a"); [ "$a" = --experts ] && flip=1; fi
+done
 
 if run_step base bash tools/glm/serve/glm-engine-906.sh "${ARGS[@]}"; then
     echo "P4.2 WITNESS: PASS (base path - CUDA graphs on, GPU experts)"
 elif run_step nograph env GGML_CUDA_GRAPH_MAX_TOKENS=0 bash tools/glm/serve/glm-engine-906.sh "${ARGS[@]}"; then
     echo "P4.2 WITNESS: PASS (graphs-off ladder rung - record it, graphs cost ~17% decode elsewhere)"
 elif run_step cpuexp env GGML_CUDA_GRAPH_MAX_TOKENS=0 bash tools/glm/serve/glm-engine-906.sh \
-        "${ARGS[@]/--experts gpu/--experts cpu}"; then
+        "${CPUARGS[@]}"; then
     echo "P4.2 WITNESS: PASS-CPU-ONLY - the GPU expert path is NOT witnessed; do not proceed to serve"
 else
     echo "P4.2 WITNESS: FAIL (all three rungs; logs logs/p4.2-*-${TS}.log - attach them to the issue)"

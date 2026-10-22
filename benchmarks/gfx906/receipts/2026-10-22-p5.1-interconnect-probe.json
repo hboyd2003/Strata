@@ -1,0 +1,33 @@
+{
+  "task": "P5.1 (#26) interconnect probe - RUN AND CLOSED",
+  "date": "2026-10-22",
+  "host": "bishop, 4x MI50 32G (gfx906), ROCm 7.2.0, kernel amdgpu stock",
+  "tool": "tools/gfx906/probe-p2p.cu @ 8007a144, run via tools/gfx906/run-p5.1-probe.sh",
+  "log": "logs/p5.1-probe-20261022-055705.log",
+  "engine_state": "all engines down (script refuses any live engine; SVM crash rule)",
+  "sysfs_link_state": "all four GPUs cur=16.0 GT/s PCIe x16 = max (Gen4 x16, no downclock)",
+  "hip_enumeration_order": ["0=0000:43:00.0", "1=0000:46:00.0", "2=0000:23:00.0", "3=0000:26:00.0"],
+  "complex_grouping_by_ordinal": "0,1 under pci0000:40; 2,3 under pci0000:20 (so ordinal chain 0-1-2-3 crosses complexes exactly once, at 1->2)",
+  "peer_access": "canAccessPeer=1 and EnablePeerAccess ok on ALL 12 ordered pairs",
+  "bandwidth_MiBps": {
+    "same_complex_pairs": {
+      "0<->1": {"peer": 26951, "staged": 24884, "bidir": 44128},
+      "2<->3": {"peer": 26962, "staged": 26584, "bidir": 44791}
+    },
+    "cross_complex_pairs_min_max": {"peer": [7326, 7425], "staged": [25651, 26682], "bidir": [44081, 44847]},
+    "definitions": {
+      "peer": "device->device cudaMemcpyAsync with EnablePeerAccess, unidirectional",
+      "staged": "device->host-pinned(primary ctx)->device, whole pipeline wall-clock",
+      "bidir": "both directions concurrently, aggregate"
+    }
+  },
+  "unreconciled_observation": "cross-complex bidir aggregate (~44000 MiB/s) exceeds what the unidirectional 7300-7425 MiB/s peer path would predict in either direction; not explained, and the design takes the unidirectional numbers as the constraint, not the bidir",
+  "infinity_fabric": "absent, as predicted from sysfs: peer never >> staged; same-complex peer ~= staged (all-PCIe signature)",
+  "design_consequences": {
+    "relay_transport_28": "host-pinned bounce: uniform 25-26.7 GiB/s on every pair, and FASTER than peer-direct cross-complex (7.3 GiB/s); peer-direct buys nothing anywhere - the raw tier keeps device-0-style single-buffer staging, no cross-device VA plumbing",
+    "stage_placement": "free: bounce is uniform; ordinal order already crosses complexes once",
+    "per_token_relay_cost": "GLM 8 KiB / DS4.1 10 KiB per boundary -> microseconds on any measured path; relay bandwidth is not the P5 limiter (cache residency is), consistent with the design doc estimate",
+    "p2p_for_future_kv": "peer mappings ARE available on all pairs if a later phase wants them, but cross-complex peer is 3.6x slower than bouncing"
+  },
+  "not_claimed": "not a speed claim for engine operation (single-op copies, no engine load); burst sizes 128 MiB; nothing about token/s"
+}
