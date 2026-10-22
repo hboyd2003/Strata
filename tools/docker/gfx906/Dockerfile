@@ -78,6 +78,9 @@ ARG ROCM_IMAGE
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv tini \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+# a native (STRATA_PORTABLE=OFF) picture reader is built with OpenMP: the ROCm LLVM's libomp, which the loader does not
+# search; only that library is linked in, not the whole LLVM directory
+RUN ln -sf /opt/rocm/llvm/lib/libomp.so /usr/local/lib/libomp.so && ldconfig
 WORKDIR /opt/strata
 COPY --from=build /src/setup.py /src/strata.py /src/chat.py /src/LICENSE /src/README.md /opt/strata/
 COPY --from=build /src/requirements.txt /src/requirements-build.txt /src/requirements-monitor.txt \
