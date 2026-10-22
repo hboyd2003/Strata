@@ -376,10 +376,64 @@ below the P4.1 threshold.
   P2b/P2c pattern port nearly directly. GLM (`tools/glm/engine/`): KDA state per session first
   (`glm_session.hpp:16-18` already holds S/F per session), shared prefixes last - state
   save/restore at node depth is the same economics as Part 2 of the analysis.
-- `glm_generate`/`ds41_generate` are single-device today; multi-card layer split and any
+- `glm_generate`/`ds41_generate` are single-device today; multi-card layer split is P5 (do P5.2
+  first, then P4b reads its must-not-hardcode device list from the design doc), and any
   replica-scale work (serve/`replicas.py`, whose per-process weights duplicate CPU RAM on a
-  125 GiB box - a shared pinned arena is the same fix as P2a) come after. 512K context lives here,
+  125 GiB box - a shared pinned arena is the same fix as P2a) comes after. 512K context lives here,
   not in P4a's smokes.
+
+## Phase P5 - 4-GPU support for the ported engines (after P4a; tasks #25-#31)
+
+The ported engines are single-device: one ggml backend per process (`im.backend`, 36 touchpoints in
+`tools/glm/glm_dense.cpp`, 26 in `tools/v41/engine/ds41_dense.cpp`; the expert tiers use raw CUDA/HIP
+calls with device 0 implied). The native engine already ships the pattern to follow: `--gpus 0,2`,
+`--layer-split K1[,K2..]|auto`, `--split-device D1[,D2..]` (`docs/MULTI_GPU.md:38-39, 99-100`) with
+per-stage `(cache, stream, device)` resolved by `locate(layer)` (`src/program/generate.cpp:284-285`,
+`src/core/expert_source.cpp`, `src/core/peer_experts.cpp`). Layer split is the natural axis for MoE -
+tensor parallel is not on the roadmap. One engine on four cards also stays inside the one-HIP-engine
+crash rule; 4 replicas do not.
+
+Why split pays here, arithmetic from file sizes (P5.4/P5.5 to witness): GLM's routed experts are
+148.5 GB - one card's ~22 GB free after the dense 7.81 GB + KV caches ~15% of them; four stages
+each cache ONLY their own ~37 GB of experts and can hold ~24-28 GB hot (~65-75%). DS4.1: 154.7 GB
+experts, same shape per stage ~38.7 GB. Aggregate expert bandwidth 4 x ~1 TB/s HBM2. A stage
+boundary costs one hidden-vector copy per token (KBs; PCIe Gen4 x16 ~25 GB/s) - the relay is not
+the problem, cache residency is. P4b's per-session caches land AFTER P5.2 inventories the
+structures so they can carry a device field from day one.
+
+1. **P5.0 (#25) - source map + design (no GPU).** Inventory every device-choosing site in both
+   engines: backend creation/`ggml_backend_alloc_ctx_tensors_from_buft` (`glm_dense.cpp:210, 883,
+   898, 997`; `ds41_dense.cpp:318`), raw allocations/memcpys in the expert tiers and transcode,
+   hipGraph capture, `ggml_backend_cuda_register_host_buffer` (`ds41_dense.cpp:1135-1144` - pinned
+   registrations are per-device), arena/cache ownership. Output `docs/gfx906/P5-MULTI-GPU-DESIGN.md`:
+   the change list, the flag surface (mirror the native names `--gpus/--layer-split/--split-device`),
+   and what P4b must not hardcode.
+2. **P5.1 (#26) - interconnect probe (operator, cards free; maps < 100 MB - a different risk class
+   than an engine, but run in a free window).** Tiny hipcc program: enumerate 4 devices, pairwise
+   `hipDeviceCanAccessPeer`, measured peer-direct vs host-staged copy MB/s. Decides the relay
+   transport (P2P vs pinned ring through host). Infinity Fabric is NOT assumed - MI50 IF needs
+   board support this workstation may not expose.
+3. **P5.2 (#27) - device plumbing (code; builds gate, no runtime claim).** Opt-in
+   `--gpus D1,..` on `glm_generate`/`ds41_generate`: per-stage ggml backend + weight placement,
+   expert tier device guards (set-device around raw calls), per-device pinned-buffer registration,
+   expert-cache arena partitioned per stage. Default (flag absent) = today's code path, byte-identical.
+4. **P5.3 (#28) - activation relay + pipeline (code).** First: synchronous boundary copies on
+   per-stage streams with event handoff (correct, measurable). Only if that measures as a cost:
+   the `--pipeline-windows` analogue (stage N+1 overlaps stage N's next token).
+5. **P5.4 (#29) - split smoke (operator window).** Rerun the P4.2/P4.4 smokes with the split on,
+   ladder 2 cards -> 4. Witnesses: stages built with per-card VRAM as `rocm-smi` shows it; greedy
+   output IDENTICAL to the single-card run (this is the ported engines' G8 - same kernels per
+   layer, exact copies, so equality is the claim to test); tier-fill lines show the per-stage
+   hot fraction the header arithmetic predicts.
+6. **P5.5 (#30) - perf characterization + serve (operator window).** Decode tok/s 1 -> 2 -> 4
+   cards, same day, same configs (P4.3/P4.5 baselines are the control); CPU-service share per
+   stage (the split equivalent of P0.5's waitCPU 32%); prefill side; serve round-trip.
+7. **P5 exit (#31).** Receipt + `XOLOTL-PORT.md` port-log entry + START-HERE.md boundary update;
+   scaling numbers with the regime stated (expert-streaming box, PCIe relay); P4b unblocked.
+
+Exit criterion: a ported engine runs on 2 and 4 MI50s with token-identical greedy output vs its
+single-card run, and the measured scaling is recorded whatever it turns out to be - a sublinear
+result with numbers closes the phase too (the P1.2 pattern).
 
 ## Cross-cutting
 
@@ -404,11 +458,12 @@ below the P4.1 threshold.
 | Write-semantics of shared frames break a rewind path nobody thought of | P2b's rewind-path audit precedes any sharing; exact-parity gate blocks merge |
 | RAM watchdog kills builds/boots mid-phase on the shared 125 GiB box | standing watchdog + schedule heavy boots in incumbent gaps; operator decides |
 | a boot maps past the amdgpu resident-system-memory limit: SVM refusal is NOT a catchable error - it wedged KFD and the IPMI watchdog hard-reset the box 2026-10-20 | one engine at a time (standing rule); P4.1 refuse-thresholds in every witness script (MemAvailable + engine-alive pre-flight); pinned arenas (`--arena-gib`) preferred over SVM paths |
+| P5 relay assumed fast: MI50 Infinity Fabric may be absent on this workstation, making cross-stage copies ride PCIe (~25 GB/s) | P5.1 measures the real transport before any relay code; per-token hidden-vector copies are KBs, so even PCIe relay is small - but the claim is the measurement, not the assumption |
 
 Effort summary: P0 ~1 week (mostly waiting on GPU/RAM windows), G8 ~0, P1 2-4 weeks, P3 3-6 weeks
 (conditional), P2 1-2 months (conditional), P4a ~1-2 operator windows after the no-GPU prep,
 P4b last and gated on P4a.
 The honest current position (2026-10-22): P0 closed, G8 decided, P1 closed with exemptions, P2 and
-P3 NO-GO with numbers - the only open phase is P4a (GLM + DS4.1 first boots), whose no-GPU prep
-(#18 wrappers/config/engram-gate, #19 RAM budget) can start any time and whose hardware steps
-(#20-#23) are single-engine operator windows.
+P3 NO-GO with numbers - the open phases are P4a (GLM + DS4.1 first boots; no-GPU prep #18/#19 can
+start any time, hardware steps #20-#23 are single-engine operator windows) and P5 (4-GPU layer
+split for the ported engines, after P4a; its design step #25 and probe #26 can also start early).
