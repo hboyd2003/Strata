@@ -427,7 +427,15 @@ structures so they can carry a device field from day one.
    hipGraph capture, `ggml_backend_cuda_register_host_buffer` (`ds41_dense.cpp:1135-1144` - pinned
    registrations are per-device), arena/cache ownership. Output `docs/gfx906/P5-MULTI-GPU-DESIGN.md`:
    the change list, the flag surface (mirror the native names `--gpus/--layer-split/--split-device`),
-   and what P4b must not hardcode.
+   and what P4b must not hardcode. **CLOSED 2026-10-22** — `docs/gfx906/P5-MULTI-GPU-DESIGN.md`:
+   topology measured on this box (4× Gen4 x16 at max, all pairs PCIE weight-40/2-hop, NO Infinity
+   Fabric — risk-register assumption confirmed; BDF table in §0); one backend-creation chokepoint per
+   engine (`glm_generate.cpp:208`, `ds41_generate.cpp:282`) and zero `cudaSetDevice` in ported code;
+   36/26 `im.backend` touchpoints line-listed; tier raw-call counts 180/286 device-0-implicit (reuse
+   native `On(dev)` RAII); the two quoted native traps (mmq-context segfault `ds41_moe.cpp:401-403`,
+   wrong-owner cache read `expert_source.cpp`) carry into the design; relay sync-first (8/10 KiB per
+   token); native `--layer-split K --split-device 0,0` single-card bit-exact check adopted as P5's
+   G8-equivalent; hidden dims measured from artifacts (GLM 4096, DS4.1 5120).
 2. **P5.1 (#26) - interconnect probe (operator, cards free; maps < 100 MB - a different risk class
    than an engine, but run in a free window).** Tiny hipcc program: enumerate 4 devices, pairwise
    `hipDeviceCanAccessPeer`, measured peer-direct vs host-staged copy MB/s. Decides the relay

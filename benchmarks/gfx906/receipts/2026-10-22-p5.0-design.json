@@ -1,0 +1,22 @@
+{
+  "task": "P5.0 source map + multi-GPU design (task #25)",
+  "date": "2026-10-22",
+  "model": "n/a - no GPU compute; read-only topology (rocm-smi --showtopo, sysfs) + artifact metadata + source inventory",
+  "correctness_claims": "none - design doc",
+  "performance_claims": "none - topology facts only; bandwidth deferred to #26",
+  "deliverable": "docs/gfx906/P5-MULTI-GPU-DESIGN.md",
+  "measured_this_box": {
+    "topology": "4x MI50 (23:00.0,26:00.0 under pci0000:20; 43:00.0,46:00.0 under pci0000:40); every pair weight 40 / 2 hops / PCIE - no Infinity Fabric between GPUs; all links Gen4 x16 running at max; all NUMA 0",
+    "hidden_dims": {"glm5_next_embedding_length": 4096, "ds41_hidden_size": 5120, "ds41_experts": "384 top-6, moe_intermediate 2304"},
+    "source_map": {"backend_chokepoints": ["glm_generate.cpp:208", "ds41_generate.cpp:282"], "cudaSetDevice_in_ported_code": 0, "im.backend": {"glm_dense.cpp": 36, "ds41_dense.cpp": 26}, "tier_raw_cuda_hits": {"ds4_moe.cpp": 180, "ds41_moe.cpp": 286}, "cudaGraph_sites": {"ds41_moe.cpp": 12, "ds4_moe.cpp": 0}, "per_device_host_buffer_regs": ["ds41_dense.cpp:1135", ":1143", ":1144"]}
+  },
+  "design_decisions": [
+    "layer split (native vocabulary --layer-split/--split-device), NOT tensor parallel",
+    "sync relay first (8 KiB GLM / 10 KiB DS4.1 hidden vector per boundary per token); pipeline only if #28 measures a cost",
+    "--split-device 0,0 single-card bit-exact hand-off (native MULTI_GPU.md:99-100) = P5's G8-equivalent gate",
+    "no flag = today's code path byte-identical (opt-in rule)",
+    "P4b per-session structures must carry (cache, stream, device) per layer - native expert_source.cpp quote documents the wrong-owner-cache-read garbage-output bug",
+    "chunk-mmq may start refused under multi-stage (mmq-vs-ggml-cuda context trap, ds41_moe.cpp:401-403)"
+  ],
+  "not_claimed": "hot-expert fraction 65-75% stays an ESTIMATE until a ported-engine route census (glm --profile + P0.3 instrumentation, task #29)"
+}
