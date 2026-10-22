@@ -15,7 +15,7 @@
 # everywhere), (3) --experts cpu (dense-only GPU; a PASS here does NOT witness the GPU expert path).
 #
 # ONE ENGINE AT A TIME (SVM crash rule): refuses while any engine is alive, or below MIN_AVAIL_GIB
-# (default arena+25 GiB - a placeholder; P4.1 #19 replaces the heuristic with a computed floor).
+# (floor computed per docs/gfx906/P4-RAM-BUDGET.md in P4.1; default arena+25, override MIN_AVAIL_GIB=).
 set -u
 cd "$(dirname "$0")/../.."
 TS=$(date +%Y%m%d-%H%M%S)
