@@ -1,0 +1,36 @@
+{
+  "task": "P4.2 (#20) + P4.4 (#22) RUN 2 2026-10-22 - VMM fix witnessed, pinned tier CLOSED POSITIVE, three new failure points triaged",
+  "date": "2026-10-22",
+  "logs": {
+    "glm": ["logs/p4.2-base-20261022-063849.log", "logs/p4.2-nograph-20261022-063849.log", "logs/p4.2-cpuexp-20261022-063849.log"],
+    "ds41": ["logs/p4.4-base-20261022-064342.log", "logs/p4.4-cpuexp-20261022-064342.log"]
+  },
+  "witnessed_positive": {
+    "vmm_fix": "both engines boot 'VMM: no' (run-1 crashed on the VMM pool)",
+    "pinned_tier_P4_1": "CLOSED POSITIVE: 'arena: pinned (cudaHostRegister PORTABLE ok; ...)' - GLM 60 GiB and DS4.1 64 GiB arenas fully registered; single-engine KFD userptr capacity now witnessed at 64 GiB (2026-10-20 crash was two-engine 49+40)",
+    "engram_gate_first_use": "check_engram_tables.py PASS: L1/L14 weight+scale exact rows*dim (98.3/98.3 GB F8_E4M3 + 3.07 GB F8_E8M0), file >= offset+size (no truncation), 4/4 spot-reads",
+    "ds41_load_path": "dense requant 321 Q8_0 -> q6_K 7.59->5.86 GB; 40 layers loaded 64.4 s (base), 11.2 s warm",
+    "glm_geometry_repeat": "45 layers (34 KDA + 11 MLA), 288 experts top-8, vocab 154880; dense 3.7 s; 2014 slots; arena 5522; load 48.3 s"
+  },
+  "new_failures": [
+    {
+      "where": "GLM base+nograph: 'ds4_moe: c_stage: out of memory' (ds4_moe.cpp:2153) after tier load",
+      "class": "VRAM capacity, DETERMINISTIC",
+      "arithmetic": "chunk-MMQ staging = 2 x (c_half=max(1024 MiB,blob) + 1 MiB) allocated AFTER auto slots took 21.89 of 23.89 GiB free; margin 2.0 left ~1.6 GiB after KV",
+      "fix": "smoke --vram-margin 4.0 (slots 19.89 GiB, staging 2.0 + c_out/c_x ~0.3 + headroom fits)"
+    },
+    {
+      "where": "GLM cpuexp + DS4.1 rungs after a SIGABRT: dense-half cudaMalloc OOM (6798 MiB refused)",
+      "class": "driver VRAM drain after abnormal exit",
+      "fix": "both smokes sleep 10 between rungs (run_step head)"
+    },
+    {
+      "where": "DS4.1 base: 'malloc(): invalid size (unsorted)' (glibc heap-corruption abort) at first prefill batch, right after 'enc-skip: first batch B=14, cut=0'",
+      "class": "CPU-side heap corruption - NOT papered over",
+      "triage": "added --no-enc-skip rung to attribute it; if noenc also dies, corruption is on the common prefill path and next step is an ASAN/MALLOC_CHECK_=3 build of the CPU path",
+      "side_findings": "cpuexp 'tier run refused' printed no reason (ds41_generate.cpp:926/990 fixed, now prints layer/tokens/path); script's --ctx 32768 contradicted the P4.1 auto-ctx verdict and is removed; tier '0 experts in VRAM' at load is vram_lru lazy fill (default true, ds41_generate.cpp:83), NOT a bug"
+    }
+  ],
+  "not_claimed": "still no token output from either ported engine; no correctness or speed claim",
+  "next": "operator window: rerun both smokes (GLM now margin 4.0; DS4.1 gains the noenc rung)"
+}

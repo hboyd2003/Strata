@@ -55,11 +55,16 @@ np.array(ids, dtype=np.int32).tofile(sys.argv[1])
 print(f"prompt ids: {len(ids)} tokens -> {sys.argv[1]}")
 EOF
 
+# no --ctx: P4.1 verdict is the engine's own auto ctx (max(4096, prompt+n+64 rounded to 256),
+# ds41_generate.cpp:286) - passing 32768 contradicted the RAM-budget doc and only grew KV
 ARGS=(-m "$M/V41-GSQ.gguf" --backend cuda --experts gpu
       --engram "$M/engram/l1:$M/engram/l14" --rank "$M/rank.bin"
-      --ids-file "$IDS" -n 128 --ctx 32768 --arena-gib "$ARENA_GIB" --arena-adapt --vram-margin 1.0)
+      --ids-file "$IDS" -n 128 --arena-gib "$ARENA_GIB" --arena-adapt --vram-margin 1.0)
 
 run_step() {
+    # SIGABRT'd rungs release VRAM asynchronously; the run-2 cpuexp rung cudaMalloc'd over a
+    # not-yet-freed card and OOM'd on the 6.8 GiB dense half. Let the driver drain first.
+    sleep 10
     local name=$1; shift
     local log=logs/p4.4-${name}-${TS}.log
     echo "=== p4.4/$name start $(date +%T) (avail ${AVAIL} GiB) ==="
@@ -77,6 +82,8 @@ run_step() {
 # old "${ARGS[@]/--experts gpu/--experts cpu}" matched nothing and the rung silently re-ran base. Append the flag.
 if run_step base bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}"; then
     echo "P4.4 WITNESS: PASS (engram tables served a greedy continuation)"
+elif run_step noenc bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}" --no-enc-skip; then
+    echo "P4.4 WITNESS: PASS-NO-ENC-SKIP - the enc-skip prefill path is the suspect; do not proceed to serve"
 elif run_step cpuexp bash tools/v41/serve/ds41-engine-906.sh "${ARGS[@]}" --experts cpu; then
     echo "P4.4 WITNESS: PASS-CPU-ONLY - the GPU expert path is NOT witnessed; do not proceed to serve"
 else

@@ -45,11 +45,18 @@ print(f"prompt ids: {len(ids)} tokens -> {sys.argv[1]}")
 EOF
 
 MODEL=/ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF/Maya-L/GLM-5.3-Flash-Maya-L-IQ3_S-00001-of-00004.gguf
+# margin 4.0 arithmetic (run-1 OOM, c_stage at ds4_moe.cpp:2153): the chunk-MMQ staging is TWO
+# device halves of c_half=max(1024 MiB, blob) + 1 MiB each = 2.0 GiB, allocated AFTER the auto
+# expert slots; with margin 2.0 the slots left 2.0 - KV 0.37 = ~1.6 GiB and c_stage OOM'd.
+# Margin 4.0: slots 19.89 GiB, free 4.0 - KV 0.37 >= 2.0 staging + c_out/c_x (~0.3) + headroom.
 ARGS=(-m "$MODEL" --backend cuda --experts gpu --ids-file "$IDS" -n 64
       --ctx 32768 --arena-gib "$ARENA_GIB" --arena-skip-resident --prefill-chunk 4096 --chunk-mmq
-      --vram-margin 2.0 --arena-adapt --pcie auto --stop 154820,154827,154829)
+      --vram-margin 4.0 --arena-adapt --pcie auto --stop 154820,154827,154829)
 
 run_step() {
+    # SIGABRT'd rungs free VRAM asynchronously (run-2 cpuexp OOM'd on the dense half over a
+    # not-yet-drained card); let the driver settle between rungs.
+    sleep 10
     local name=$1; shift
     local log=logs/p4.2-${name}-${TS}.log
     echo "=== p4.2/$name start $(date +%T) (avail ${AVAIL} GiB) ==="

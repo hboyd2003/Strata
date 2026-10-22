@@ -923,7 +923,13 @@ int main(int argc, char ** argv) {
                                                               dense.batch_wts() + (size_t) s * top_k,
                                                               dense.batch_fn() + (size_t) s * n_embd,
                                                               brouted.data() + (size_t) s * n_embd);
-                        if (!ok) { ferr = "tier run refused"; return false; }
+                        if (!ok) {
+                            // witnessed 2026-10-22 cpuexp: a refusal with no reason in the log is undebuggable
+                            std::fprintf(stderr, "ds41_generate: tier run refused (layer %lld, %d tokens, %s path)\n",
+                                         (long long) l, pn, rdev ? "device" : "cpu");
+                            ferr = "tier run refused";
+                            return false;
+                        }
                     }
                     t0 = now_ms();
                     fd_tier += t0 - t1;

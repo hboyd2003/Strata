@@ -386,12 +386,30 @@ with a receipt; correctness, state and performance are recorded separately per A
    (34 KDA + 11 MLA - **11, not the 12 the budget doc assumed**), 288 experts top-8, vocab 154880,
    dense half 3.9-7.2 s, 2014 slots, arena 5522 experts, file tier 4560, tier load 35-43 s.
    **RE-RUN NEEDED** in a free window (vLLM must be down).
+   **RUN 2 2026-10-22** (logs `p4.2-*-20261022-063849`): VMM fix witnessed (`VMM: no`) and the
+   **pinned-tier witness CLOSED POSITIVE** - `arena: pinned (cudaHostRegister PORTABLE ok...)` on
+   the 60 GiB arena (single-engine pinned capacity now witnessed at 60-64 GiB; the 2026-10-20 crash
+   was two-engine). New failure, deterministic: `ds4_moe: c_stage: out of memory` - chunk-MMQ staging
+   allocates TWO device halves of `max(1024 MiB, blob)` AFTER auto slots took 21.89 of 23.89 free
+   (margin 2.0); 2.0 GiB staging + KV did not fit the ~1.6 GiB left. Fixed: smoke runs margin 4.0
+   (slots 19.89, staging fits with headroom). cpuexp rung additionally OOM'd on the 6.8 GiB dense
+   half over a not-yet-drained card (prior rung SIGABRT frees VRAM asynchronously) - both smokes now
+   sleep 10 between rungs.
 4. **P4.3 (#21) - GLM serve** (operator-launched): the `--serve` scope + stdin/stdout protocol
    first live run; LoRA (`--lora-exps` on IQ3_S) first exercise; first GLM decode tok/s.
 5. **P4.4 (#22) - DS4.1 engram smoke** (operator-launched): 128 tokens, engram integrity gate
    green first; NO `not the real model` warning; `STRATA_NO_LARGEPAGES=1` (pins the arena at
    ~1.2 GB/s, load ~50 s). Run plain (no `--prune`/`--route-bias`/`--build-mirror` - this box
    lacks the authors' profile/mirror files).
+   **RUN 2 2026-10-22** (logs `p4.4-*-20261022-064342`): the new engram gate passed its first live
+   use (both tables, exact rows×dim, 4/4 spot-reads) and the 64 GiB arena pinned `PORTABLE ok`.
+   `loaded in 64.4 s: 40 layers, ctx 32768` then base crashed CPU-side: `malloc(): invalid size
+   (unsorted)` (heap corruption) at the first prefill batch (`enc-skip: first batch B=14, cut=0`);
+   cpuexp refused the tier run with no reason printed. Dispositions: added a `--no-enc-skip` rung
+   to attribute the corruption; both refuse sites now print layer/token-count/path (rebuilt);
+   `--ctx 32768` removed from the smoke (P4.1 verdict is the engine's auto-4096 - the script had
+   contradicted the budget doc). Heap corruption class: NOT papered over - if the noenc rung also
+   crashes the next triage is an ASAN/MALLOC_CHECK build of ds41 on the CPU path.
 6. **P4.5 (#23) - DS4.1 serve** (operator-launched): exact-serve default (`STRATA_SERVE_STEP_MAX=
    96`), engram live, first DS4.1 decode tok/s + the NVMe read-factor if the file tier is the cap.
 7. **P4a exit (#24)**: XOLOTL-PORT.md port log + P4 verdict; every known-unknown dispositioned;
