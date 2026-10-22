@@ -355,10 +355,22 @@ with a receipt; correctness, state and performance are recorded separately per A
    creates its lock file's parent directory (rc=66 before the engine existed), and `glm_tok.load`
    needs `ST.PRE_PATTERNS.setdefault("glm4", ...)` first - exactly what `serve_glm.py:37` does,
    mirrored in the smoke script.
-2. **P4.1 (#19) - RAM/arena budget** (no GPU). Ledger per model on 125 GiB/no-swap (pinned arena +
-   resident + KV-at-smoke-ctx + scratch + headroom) and the MemAvailable refuse-threshold for the
-   witness scripts. The 2026-10-20 SVM/KFD watchdog reset makes these thresholds safety-critical,
-   not hygiene; smoke at reduced ctx (GLM 32768 drafted; DS4.1's own number computed), NOT 512K.
+2. **P4.1 (#19) - RAM/arena budget** (no GPU) — **CLOSED 2026-10-22**
+   (`docs/gfx906/P4-RAM-BUDGET.md`). Both engines route the host expert cache through
+   `PinnedArena` + `cudaHostRegister` (HIP userptr) — the SAME driver budget class as the
+   2026-10-20 reset (`kfd_svm.c:343` charges USERPTR against the resident-system-memory
+   limit), so the witness `cudaHostRegister ... PORTABLE ok` is grepped in both smoke scripts
+   (degraded pin = tested the fallback, not the pinned tier). Ledgers: GLM steady ≈ 69 GiB
+   (arena 60 + dense 7.3 + ~2 est); DS4.1 steady ≈ 73.5, transient ≈ 81 during the
+   Q8_0→Q6_K requant peak — 3 GiB under the 84 GiB scope cap (authors run the same numbers;
+   if the scope OOM-kills, `ARENA_GIB=60` is a catchable exit, arena already resident).
+   Refuse floors: arena + dense 8 + scratch 3 + 10 margin ⇒ GLM ≥ 81, DS4.1 ≥ 85; script
+   defaults (arena+25 = 85/89) are stricter and stay. Smoke ctx: GLM 32768 explicit; DS4.1
+   auto-4096 (`ds41_generate.cpp:286`). Both engines at once is arithmetically impossible
+   (124 > 125 GiB of arenas). The exact driver limit is NOT readable here (partial /usr/src;
+   only `no_system_mem_limit=N`); witnessed envelope 49 GiB single-engine OK vs 49+40
+   two-engine crash — P4.2 EXTENDS it. 512K (P4b/P5): GLM 6.5 / DS4.1 1.25 GiB VRAM KV,
+   RAM unaffected.
 3. **P4.2 (#20) - GLM T4 direct-engine smoke** (operator-launched). 8 tokens, witnesses: 4-shard
    split geometry read (Xolotl tuned on 3 shards - the boundary arithmetic is untested here), no
    `has no kernel` error (IQ3_S gate/up / IQ4_XS down), no shard-layout error, tokens out.

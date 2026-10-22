@@ -24,6 +24,7 @@ if pgrep -f "engine/strata|vllm|glm_generate|ds41_generate" >/dev/null 2>&1; the
     echo "refusing: another engine is alive - one HIP engine at a time (SVM crash rule)"; exit 3
 fi
 ARENA_GIB=${ARENA_GIB:-60}
+# Floor per docs/gfx906/P4-RAM-BUDGET.md: arena + dense 8 + scratch 3 + 10 margin >= 81; default arena+25 is stricter
 MIN_AVAIL_GIB=${MIN_AVAIL_GIB:-$((ARENA_GIB + 25))}
 AVAIL=$(( $(awk '/MemAvailable/{print $2}' /proc/meminfo) / 1048576 ))
 [ "$AVAIL" -ge "$MIN_AVAIL_GIB" ] || { echo "refusing: ${AVAIL} GiB available < ${MIN_AVAIL_GIB}"; exit 3; }
@@ -55,6 +56,9 @@ run_step() {
     "$@" >"$log" 2>&1
     local rc=$?
     echo "--- tail $log:"; tail -25 "$log"
+    # P4.1 witness (P4-RAM-BUDGET.md): the arena pin must say PORTABLE ok; a degraded pin
+    # means the run tested the unpinned fallback path, not the pinned tier
+    grep -m4 -iE "cudaHostRegister|MemAvailable" "$log" 2>/dev/null | sed 's/^/[arena] /'
     echo "=== p4.2/$name rc=$rc log=$log ==="
     return $rc
 }

@@ -1,0 +1,23 @@
+{
+  "task": "P4.1 RAM/arena budget (task #19)",
+  "date": "2026-10-22",
+  "model": "n/a - no GPU, no model run (read-only source + kernel tree + free)",
+  "correctness_claims": "none - this is a budget computation",
+  "performance_claims": "none",
+  "deliverable": "docs/gfx906/P4-RAM-BUDGET.md (+ smoke-script floors/greps updated)",
+  "key_findings": {
+    "arena_mechanism": "both engines: strata::core::PinnedArena + cudaHostRegister (ds4_moe.cpp:953, ds41_moe.cpp:1488) = HIP userptr, charged against the SAME amdgpu resident-system-memory limit that logged the 2026-10-20 pre-reset SVM refusal (kernel source on box: kfd_svm.c:343 -> amdgpu_amdkfd_reserve_mem_limit(USERPTR))",
+    "registration_degrades_soft": "PinnedArena notes and falls back (sliced -> unregistered) on refusal; smoke scripts now grep 'cudaHostRegister' - PORTABLE ok is the witness that the pinned tier ran",
+    "engine_self_refusal": "MemAvailable < arena + mem_floor_gib(3) -> catchable engine error (ds4_moe.cpp:945, ds41_moe.cpp:1480); max_arena_gib = --arena-gib in both generate mains",
+    "ledgers_gib": {"glm_steady": 69, "ds41_steady": 73.5, "ds41_requant_transient_peak": 81, "scope_cap": 84},
+    "refuse_floors_gib": {"glm": ">= 81 (script default 85)", "ds41": ">= 85 (script default 89)"},
+    "smoke_ctx": {"glm": "32768 explicit", "ds41": "auto = prompt+n+64, floor 4096 (ds41_generate.cpp:286) - KV 0.01 GiB"},
+    "both_engines_at_once": "arithmetically impossible: 60+64 GiB arenas > 125 GiB total (RAM-enforced single-engine, independent of the crash rule)",
+    "driver_limit": "exact formula NOT readable on this box (partial /usr/src tree; sysfs exposes only no_system_mem_limit=N); witnessed envelope: 49 GiB single-engine OK (2026-10-19 boot) vs 49+40 two-engine crash (2026-10-20); P4.2 boot EXTENDS the envelope"
+  },
+  "falsifiable_predictions": [
+    "absence of 'cudaHostRegister ... PORTABLE ok' in a P4.2/P4.4 log => 60-64 GiB single-engine pin exceeds the driver budget (measured ceiling then known)",
+    "steady RSS materially > 69/73.5 GiB => the ~2 GiB estimate rows were low",
+    "scope OOM-kill (137) during DS4.1 load => requant transient > 84 GiB => ARENA_GIB=60 or no requant"
+  ]
+}
