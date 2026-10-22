@@ -297,7 +297,7 @@ tests the server's side with a scripted engine (no GPU).
 
 | Script | What it checks |
 | --- | --- |
-| `tools/batch_test.py` | the same prompts alone (`GEN`) and together in the batch slots (`BGEN`): every slot's greedy tokens equal its solo tokens; prints the aggregate rate. `--batch-groups` in `--extra` tests the pipeline, `--keys "temperature=0.7"` the sampled rows. |
+| `tools/batch_test.py` | the same prompts alone (`GEN`) and together in the batch slots (`BGEN`): every slot's greedy tokens equal its solo tokens; prints the aggregate rate. `--batch-groups` in `--extra` tests the pipeline, `--keys "temperature=0.7"` the sampled rows, `--acceptance` the drafts of a `--batch-mtp` run (see below). |
 | `tools/batch_interleave_test.py` | a long prompt read while two slots decode, a prompt that gives way (`BYIELD`) and goes on, and a next turn continued from its slot: each equal to its solo tokens. |
 | `tools/parking_test.py` | a follow-up to a conversation decodes the same tokens whether its state stayed live or came back from the parking cache (with a layer split: every stage's image). |
 | `tools/early_close_test.py` | a client that stops reading a streamed answer early (alone, and with a second request running) does not leave its tokens to the next request (server). |
@@ -315,11 +315,22 @@ STRATA_KEY=<key> python3 tools/early_close_test.py http://127.0.0.1:8080
 ```
 
 For single-GPU `--batch-mtp`, use a model with `rt/draft_vocab.bin` to exercise admission with a
-shared draft-vocabulary head. This compares both slots' output against solo decoding:
+shared draft-vocabulary head. This compares both slots' output against solo decoding, and with
+`--acceptance` their drafts as well: equal text does not by itself say the slots drafted like solo does, and a
+plain `--batch` lane verifies no proposal at all. The tool reads the tallies the engine already logs - the
+slots' `strata batch: MTP proposals accepted A of O` (summed over drains, `src/program/generate.cpp:10283`)
+and, per solo request, `strata serve: spec depth: accepted/tested` (`:13354`, with `STRATA_SPEC_DEPTH=1`, which
+the flag sets). A slot verifies one proposal per window and a solo window verifies `--spec - 1` of them, so the
+side that means the same thing is the batch tally against the solo windows' FIRST proposal (depth 0); the rest
+of the ladder and the `DONE` tally print for context. It passes when the two rates sit within
+`--acceptance-tol` percentage points (5 by default, uncalibrated - the first run on a card says what the spread
+actually is) and within 2 sigma of what those counts could give by chance. No tally line while `--batch-mtp`
+was asked for is a failure (the engine says why it left it off: `WARNING: --batch-mtp is off: ...`, `:4543`).
+`tools/batch_test.py --parse-check` proves the readers with no engine and no GPU.
 
 ```
 python3 tools/batch_test.py --exe engine/strata --config strata-<model>.json --batch 2 --n 2 --max-new 64 \
-    --extra "--batch-mtp --pcie-frac 0 --adapt-every 1000000"
+    --acceptance --extra "--batch-mtp --pcie-frac 0 --adapt-every 1000000"
 ```
 
 ## Engine protocol (`--serve`)
