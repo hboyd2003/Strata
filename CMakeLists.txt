@@ -1588,6 +1588,23 @@ if(STRATA_NATIVE_EXPERTS)
     if(TARGET CUDA::cuda_driver)   # not in the HIP (gfx906) build, whose CUDA::cudart is a stand-in
       target_link_libraries(strata_mmq PUBLIC CUDA::cuda_driver)
     endif()
+    # gfx906 (STRATA_HIP_GFX906): strata_mmq TUs include ggml-cuda's common.cuh and inline-construct
+    # ggml_backend_cuda_context, so their layout-affecting defines MUST match the ggml-cuda TU's own
+    # (hip-cmake.patch sets GGML_CUDA_NO_VMM/GGML_HIP_NO_VMM; ggml's GGML_CUDA_GRAPHS default adds
+    # GGML_CUDA_USE_GRAPHS). Mismatched defines size `new` with one layout while the inlined
+    # constructor and out-of-line destructor use the other: ggml_backend_cuda_context measured 4336 B
+    # in moe_mmq.cu's view vs 4400 B in ggml-cuda's (the #ifdef USE_CUDA_GRAPH block: cuda_graphs at
+    # offset 3256 + last_graph_eviction_sweep), so every GPU-experts chunk heap-buffer-overflowed at
+    # moe_mmq.cu:361 - ASan witness 2026-10-22 (logs p4.4/p4.2-asan-0831xx); the authors' 'mmq
+    # context segfault' note (ds41_moe.cpp:401) is this class. Verified byte-identical (4400 B,
+    # offsets equal) across both flag sets with -fsyntax-only sizeof/offsetof probes. Keep in step
+    # with hip-cmake.patch, which owns the two NO_VMM names for the ggml build.
+    if(STRATA_HIP_GFX906)
+      target_compile_definitions(strata_mmq PRIVATE GGML_CUDA_NO_VMM GGML_HIP_NO_VMM)
+      if(NOT DEFINED GGML_CUDA_GRAPHS OR GGML_CUDA_GRAPHS)
+        target_compile_definitions(strata_mmq PRIVATE GGML_CUDA_USE_GRAPHS)
+      endif()
+    endif()
     if(STRATA_MMQ_KQUANTS)
       target_compile_definitions(strata_mmq PRIVATE STRATA_MMQ_KQUANTS=1)
     endif()
@@ -1690,6 +1707,12 @@ if(STRATA_NATIVE_EXPERTS)
       PRIVATE "${_strata_gg}/include" "${_strata_gg}/src" "${_strata_mmq}"
       PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_definitions(strata_mmq PRIVATE GGML_USE_HIP=1)
+    # Same layout-consistency defines as the CUDA-branch block above (see the ASan comment there);
+    # this branch builds strata_mmq without the CUDA toolset, so the names apply unconditionally.
+    target_compile_definitions(strata_mmq PRIVATE GGML_CUDA_NO_VMM GGML_HIP_NO_VMM)
+    if(NOT DEFINED GGML_CUDA_GRAPHS OR GGML_CUDA_GRAPHS)
+      target_compile_definitions(strata_mmq PRIVATE GGML_CUDA_USE_GRAPHS)
+    endif()
     if(STRATA_MMQ_KQUANTS)
       target_compile_definitions(strata_mmq PRIVATE STRATA_MMQ_KQUANTS=1)
     endif()

@@ -416,6 +416,15 @@ with a receipt; correctness, state and performance are recorded separately per A
    `--ctx 32768` removed from the smoke (P4.1 verdict is the engine's auto-4096 - the script had
    contradicted the budget doc). Heap corruption class: NOT papered over - if the noenc rung also
    crashes the next triage is an ASAN/MALLOC_CHECK build of ds41 on the CPU path.
+   **ROOT-CAUSED 2026-10-22 (ASan)**: one bug, both engines - `heap-buffer-overflow WRITE of
+   size 1040, 0 bytes after 4336-byte region` at the same instruction (`mmq::Context::Context()`,
+   `moe_mmq.cu:361`). strata_mmq TUs include ggml-cuda's `common.cuh` and inline-construct
+   `ggml_backend_cuda_context` but lacked its layout-affecting defines (`GGML_CUDA_NO_VMM`,
+   `GGML_HIP_NO_VMM`, `GGML_CUDA_USE_GRAPHS`): `new` sized moe_mmq's 4336 B view while the
+   COMDAT-folded ctor and out-of-line dtor use ggml's 4400 B view (probe: 4336 vs 4400,
+   `cuda_graphs` at 3256; with the defines, byte-identical). Fixed in the live CMake branch,
+   gated `STRATA_HIP_GFX906` (CUDA-native byte-unchanged); witness: objdump `movl $0x1130`
+   (=4400) in the rebuilt `ContextC2Ev`. Receipt `2026-10-22-p4-odr-rootcause-fix.json`.
    **RUN 3 2026-10-22** (logs `p4.4-*-20261022-074337`): the `--no-enc-skip` rung ALSO crashed with
    `malloc(): invalid size (unsorted)` before any batch line - **enc-skip exonerated**; the
    corruption is on the common GPU-experts path both engines share. The new refuse-reason print

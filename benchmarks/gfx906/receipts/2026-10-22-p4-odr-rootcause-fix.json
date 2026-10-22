@@ -1,0 +1,20 @@
+{
+  "task": "P4 heap-corruption ROOT-CAUSED and fixed - ODR layout mismatch on ggml_backend_cuda_context (moe_mmq.cu vs ggml-cuda.cu)",
+  "date": "2026-10-22",
+  "asan_witness": {
+    "logs": ["logs/p4.4-asan-20261022-083144.log", "logs/p4.2-asan-20261022-083324.log"],
+    "report": "identical single instruction in BOTH engines: heap-buffer-overflow WRITE of size 1040 '0 bytes after 4336-byte region', memset inside ggml_backend_cuda_context's ctor (common.cuh:1519), called from mmq::Context::Context() (moe_mmq.cu:361) via ds41 gpu_run_chunk:3886 / ds4 gpu_run_chunk:2205",
+    "root_cause": "strata_mmq TUs include ggml-cuda's common.cuh and inline-construct ggml_backend_cuda_context, but were compiled WITHOUT the layout-affecting defines the ggml-cuda TU gets (GGML_CUDA_NO_VMM + GGML_HIP_NO_VMM from hip-cmake.patch; GGML_CUDA_USE_GRAPHS from ggml's GGML_CUDA_GRAPHS default). 'new' sized moe_mmq's view while the inlined ctor / out-of-line dtor (from libggml-cuda.a) used ggml's",
+    "probe": "-fsyntax-only sizeof/offsetof probe under the two real ninja command lines: sizeof 4336 (moe view) vs 4400 (ggml view), cuda_graphs at 3256 only in the graphs view; with the three defines added the views are byte-identical (4400/1072/3256). 4336 is exactly the ASan region size",
+    "linkage_note": "the inline ctor is COMDAT: the linker folds one copy, so the executed ctor/dtor layout came from ggml-cuda.cu.o while the allocation size stayed moe_mmq's",
+    "author_note": "the Xolotl authors' 'mmq context segfault' remark (ds41_moe.cpp:401) is this failure class"
+  },
+  "fix": {
+    "where": "CMakeLists.txt CUDA branch (live for STRATA_HIP_GFX906, which rides STRATA_ENABLE_CUDA): target_compile_definitions(strata_mmq PRIVATE GGML_CUDA_NO_VMM GGML_HIP_NO_VMM [+ GGML_CUDA_USE_GRAPHS unless GGML_CUDA_GRAPHS=OFF]), gated on STRATA_HIP_GFX906 so CUDA-native artifacts are byte-unchanged; mirrored in the PREFILL_MMQ-else branch",
+    "process_lesson": "first edit landed in the dead elseif(STRATA_PREFILL_MMQ) branch - the 8 s no-op build + empty flag gate caught it; CMake edits on this box MUST gate on 'ninja -t commands <obj> | grep -D' AND an object mtime/imm check",
+    "witness": "flag gate 3/3 on moe_mmq.cu.o in BOTH build-906 and build-asan-906; moe_mmq.cu.o rebuilt 08:57; llvm-objdump shows ContextC2Ev now movl $0x1130 (=4400); prod glm has 0 __asan symbols"
+  },
+  "scope": "default CUDA-native path untouched (define block gated on STRATA_HIP_GFX906); gfx906 artifacts change by construction (this IS the bug fix); P0 batch-parity receipts stay valid (host-side allocation sizing only, no kernel change)",
+  "pending": "operator re-run: run-p4-asan.sh (expect NO report, engine proceeds) then run-p4.2-glm-smoke.sh + run-p4.4-ds41-smoke.sh (base rung = first GPU-experts tokens)",
+  "not_claimed": "no GPU-experts witness yet - the fix is verified at layout/asm level and by ASan bracketing, runtime proof is the re-run"
+}
