@@ -184,6 +184,12 @@ One PR per item; each opt-in.
    server the way `logit_bias` already returns HTTP 400 under `--batch` (`docs/LOGIT_BIAS.md`).
    The 400 precedent is cheaper and already users' expectation; sampler support is the feature.
    Tests: `serve/test_parallel.py` case 22 must flip from "ignored" to the chosen behavior.
+   **RESOLVED 2026-10-21 (issue #55, PR #56):** sampler support, applied per row from each slot's
+   own staged history. No penalty request = the old path, byte for byte. Witness on MI50: greedy
+   4/4 and seeded sampled 4/4 IDENTICAL to solo, repetition 1.1 and 1.8
+   (`benchmarks/gfx906/receipts/2026-10-21-p1.1-penalty-batch-parity.json`). The planned "case 22"
+   did not exist in `serve/test_parallel.py` (citation stale) - a new test was added instead
+   (`test_penalties_reach_the_batch_slot`), pinning the server's BGEN forwarding.
 2. **Prefill chunks as window rows** - the last un-batched mainline path is the chunked-prefill
    GEN step (`generate.cpp:6947-7000`, `:5679-5681` pins "BGEN reads as a GEN 1"). Design: admit a
    prompt chunk as a row in the shared verify window (the row machinery, graph buckets, and
