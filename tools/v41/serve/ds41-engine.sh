@@ -8,6 +8,9 @@ if [ "${MEMGUARD_ALLOW_COMFY:-0}" != 1 ] && ss -ltn 2>/dev/null | grep -q ':8188
     echo "ds41-engine: refusing - ComfyUI is running on :8188 (RAM)" >&2; exit 3
 fi
 LOCK="${DS4_LOCK:-$HOME/.quetza-data/conductor/ds4-gpu.lock}"
+# flock opens the lock file but does not create its parent directory - make sure it exists
+# (no-op where the conductor tree already lives, which is every existing deployment)
+mkdir -p "$(dirname "$LOCK")"
 export GGML_NO_BACKTRACE=1
 # 4 KiB pages pin the 60 GiB arena at 1.2 GB/s (load ~50 s); THP pins at ~0.16 GB/s (~4 min)
 export STRATA_NO_LARGEPAGES="${STRATA_NO_LARGEPAGES:-1}"
@@ -64,5 +67,15 @@ export STRATA_PRESTAGE_GIB="${STRATA_PRESTAGE_GIB:-1.5}"
 # pre-merge build dir (build-ds4-gpu) is still found so an old checkout of this script keeps working
 BUILD_DIR="${STRATA_BUILD_DIR:-$PWD/build-xolotl}"
 [ -x "$BUILD_DIR/ds41_generate" ] || [ ! -x "$PWD/build-ds4-gpu/ds41_generate" ] || BUILD_DIR="$PWD/build-ds4-gpu"
-exec flock "$LOCK" systemd-run --user --scope -q --unit="ds41-serve-$$" -p MemoryMax=84G -p MemorySwapMax=0 \
+# 'systemd-run --user' needs a systemd USER manager: desktop sessions have one, a root ssh session
+# without XDG_RUNTIME_DIR does not. Witnessed 2026-10-22 on this fork's gfx906 box: --user exits 1
+# ("Failed to connect to bus"), a --system scope works and its child sees MemoryMax=84G exactly
+# (90194313216 in memory.max); scope keeps the caller's stdin/stdout, so the serve protocol is intact.
+# Probe --user first so existing deployments keep the previous command byte-for-byte.
+SCOPE=--user
+if ! systemd-run --user --scope -q --unit="ds41-probe-$$" true 2>/dev/null; then
+    echo "ds41-engine: no systemd user manager - using the system scope (same MemoryMax=84G, no swap)" >&2
+    SCOPE=--system
+fi
+exec flock "$LOCK" systemd-run "$SCOPE" --scope -q --unit="ds41-serve-$$" -p MemoryMax=84G -p MemorySwapMax=0 \
     "$BUILD_DIR/ds41_generate" "$@"

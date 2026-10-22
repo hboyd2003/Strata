@@ -1,0 +1,46 @@
+{
+  "task": "P4.0 (#18) - bootable wrappers + local DS4.1 config + engram gate",
+  "date": "2026-10-22",
+  "box": "4x MI50 32GB gfx906, 125 GiB RAM no-swap, ROCm 7.2.0, root session (no systemd user bus)",
+  "branch": "gfx906/xolotl-merge",
+  "kind": "prep, NO GPU touched - no boot, no correctness, no performance is claimed here",
+  "blocker_witness": {
+    "pre_fix": "git HEAD glm-engine.sh on this box: 'flock: cannot open lock file /root/.quetza-data/conductor/ds4-gpu.lock: No such file or directory', rc=66 - serve died before the engine started",
+    "systemd_user": "systemd-run --user --scope exits 1 here (Failed to connect to bus); --system --scope exits 0 (witnessed 2026-10-22, twice)",
+    "second_blocker_found_here": "flock opens the lock file but never creates its parent directory - fixed with mkdir -p (no-op on the authors' box where the tree exists)"
+  },
+  "fix_witness": {
+    "method": "stub engine (prints argv + cgroup memory.max + swap.max) through the real wrappers; no GPU binary involved",
+    "glm": "rc=0, 'glm-engine: no systemd user manager - using the system scope', stub ran, memory.max=90194313216 (= 84 GiB exactly), swap.max=0",
+    "ds41": "same: rc=0, probe message, memory.max=90194313216, swap.max=0",
+    "upstream_path": "--user is probed first and used when it works, so desktop deployments keep the previous systemd-run command byte-for-byte"
+  },
+  "engram_gate": {
+    "tool": "tools/gfx906/check_engram_tables.py (mirrors Ds41Engram::open, ds41_engram.cpp:186-235, plus truncation + readability checks the engine omits)",
+    "run": "2026-10-22, exit 0 in 0.34 s",
+    "lines": [
+      "GGUF V41-GSQ.gguf: layers [1, 14], rows [384006168, 384016682], head_dim 256, encoding e4m3_e8m0_32_row264",
+      "OK L1.weight: F8_E4M3 98,305,579,008 B == rows x dim; file 101,377,628,584 B == needed exactly; 4/4 reads",
+      "OK L1.scale: F8_E8M0 3,072,049,344 B == rows x dim / 32; 4/4 reads",
+      "OK L14.weight: F8_E4M3 98,308,270,592 B == rows x dim; file 101,380,404,328 B == needed exactly; 4/4 reads",
+      "OK L14.scale: F8_E8M0 3,072,133,456 B == rows x dim / 32; 4/4 reads",
+      "engram gate: PASS (2 tables x 2 tensors)"
+    ],
+    "note": "both engram dirs carry the complete 4-entry weight_map, so the engine's first-index rule cannot strand a layer regardless of --engram dir order"
+  },
+  "prompt_id_witness": {
+    "glm": "14 tokens, decode(encode(x)) == x exactly (needs ST.PRE_PATTERNS.setdefault('glm4', [GLM4_PATTERN]) before glm_tok.load - exactly what serve_glm.py:37 does; found because strata_tokenizer only knows joyai-llm/qwen35 natively)",
+    "ds41": "14 tokens, exact round-trip, ST.Tokenizer(pre='joyai-llm') as serve_ds41.py:45 constructs it"
+  },
+  "refuse_guard_witness": "both run-p4.2/run-p4.4 scripts exit 3 with 'refusing: another engine is alive' against a stand-in holder (argv0 fake-vllm-holder); gate checked before any id generation or GPU touch",
+  "files": [
+    "tools/glm/serve/glm-engine.sh (systemd-scope auto-probe + lock-dir mkdir)",
+    "tools/v41/serve/ds41-engine.sh (same fix)",
+    "tools/v41/serve/ds41-engine-906.sh (NEW: build-906 + DSpark off until P4.5 witness)",
+    "tools/v41/serve/strata-ds41-906.json (NEW: local paths, plain first-boot args)",
+    "tools/gfx906/check_engram_tables.py (NEW)",
+    "tools/gfx906/run-p4.2-glm-smoke.sh (NEW: operator-launched, guards + ladder)",
+    "tools/gfx906/run-p4.4-ds41-smoke.sh (NEW: operator-launched, engram gate first + ladder)"
+  ],
+  "explicitly_not_claimed": ["any GLM or DS4.1 boot", "engram CONTENT correctness (byte-vs-source is impossible - FP8 shards deleted; this gate proves shape/dtype/size/readability only)", "any tok/s", "serve protocol (first live run is P4.3/P4.5)"]
+}

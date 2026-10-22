@@ -1,0 +1,24 @@
+{
+  "_comment": "THIS box's DS4.1-Flash config (4x MI50 32GB gfx906, 125 GiB RAM, ROCm 7.2.0), written 2026-10-22 BEFORE the first boot - the P4.0 (#18) twin of tools/glm/serve/strata-glm-mayal-gfx906.json. The authors' strata-ds41.json is left alone; THIS is the file P4.5 boots. Deliberate first-boot deltas from the authors' args, each to be re-added only after a green plain boot (change one thing at a time): no --prompt-batch (their 12288 is a 24G-card-tuned default and #19 hasn't sized ours), no --route-bias/--route-bias-file (first serve witness runs the exact path: STRATA_SERVE_STEP_MAX=96 + PASS_BIAS=0 are already the wrapper defaults), no --kv-fp4 (quality-adjacent, not needed to prove boot), DSpark OFF in ds41-engine-906.sh. --ctx 32768 and --arena-gib 64 are the authors' serve numbers as a starting point; P4.1 (#19, docs/gfx906/P4-RAM-BUDGET.md) sizes both against this box from the boot log. 512K is a P4b goal, NOT a first boot.",
+  "exe": "/ai/engines/gfx906/worktrees/xolotl-merge/tools/v41/serve/ds41-engine-906.sh",
+  "args": [
+    "-m", "/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/V41-GSQ.gguf",
+    "--backend", "cuda",
+    "--experts", "gpu",
+    "--engram", "/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l1:/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/engram/l14",
+    "--rank", "/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/rank.bin",
+    "--ctx", "32768",
+    "--stop", "1",
+    "--arena-adapt",
+    "--arena-gib", "64",
+    "--vram-margin", "1.0"
+  ],
+  "cwd": "/ai/engines/gfx906/worktrees/xolotl-merge",
+  "tokenizer": "/ai/models/hf.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored/tokenizer",
+  "model_name": "deepseek-v4.1-flash-gsq",
+  "log": "/tmp/strata-ds41-906.log",
+  "port": 8150,
+  "gpu": 0,
+  "sampling": { "temperature": 1, "top_p": 0.95 },
+  "reasoning_budget_tokens": 32768
+}

@@ -347,6 +347,14 @@ with a receipt; correctness, state and performance are recorded separately per A
    `ds41-engine-906.sh`. The engram integrity gate is `check_engram_tables.py` (header + engine-
    expectation check), NOT `verify_engram.py` - the FP8 source shards were deleted, so the
    byte-vs-source verifier cannot re-run and the tables (95 GiB each) are the sole copy.
+   **SHIPPED 2026-10-22** (receipt `2026-10-22-p4.0-prep-wrappers-engram-gate.json`): red control
+   (pre-fix wrapper rc=66 at flock on this box) and fix witness (stub engine through the real
+   wrappers: rc=0, `memory.max = 90194313216` = 84 GiB exactly, `swap.max = 0`); the engram gate
+   runs PASS in 0.34 s (all 4 tensors exact-size, 16/16 reads); both smoke scripts refuse at rc=3
+   against a stand-in engine holder. A second blocker surfaced and died here too: `flock` never
+   creates its lock file's parent directory (rc=66 before the engine existed), and `glm_tok.load`
+   needs `ST.PRE_PATTERNS.setdefault("glm4", ...)` first - exactly what `serve_glm.py:37` does,
+   mirrored in the smoke script.
 2. **P4.1 (#19) - RAM/arena budget** (no GPU). Ledger per model on 125 GiB/no-swap (pinned arena +
    resident + KV-at-smoke-ctx + scratch + headroom) and the MemAvailable refuse-threshold for the
    witness scripts. The 2026-10-20 SVM/KFD watchdog reset makes these thresholds safety-critical,
