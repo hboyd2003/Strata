@@ -395,6 +395,10 @@ with a receipt; correctness, state and performance are recorded separately per A
    (slots 19.89, staging fits with headroom). cpuexp rung additionally OOM'd on the 6.8 GiB dense
    half over a not-yet-drained card (prior rung SIGABRT frees VRAM asynchronously) - both smokes now
    sleep 10 between rungs.
+   **CLOSED PASS 2026-10-22** (log `p4.2-base-20261022-180307`, after the ODR fix `e13f1555`): base
+   rung (CUDA graphs on, GPU experts) generated 14-token prefill + 64 decode tokens = **2.57 tok/s**
+   (3.6x the CPU-experts rung); experts/token 23.3% VRAM + 22.6% PCIe + 54.1% cpu; VRAM free at end
+   3.28 GiB (margin 4.0 held). Bring-up numbers, one MI50 of four, cold cache - not a perf claim.
    **RUN 3 2026-10-22** (logs `p4.2-*-20261022-073832`): margin 4.0 fixed the c_stage OOM and the
    **cpuexp rung GENERATED TOKENS** - prefill 14 tok + 64 decode at 0.71 tok/s, clean finish
    (PASS-CPU-ONLY ladder: engine, weights, tokenizer, file tier all work end-to-end; GPU expert
@@ -425,6 +429,11 @@ with a receipt; correctness, state and performance are recorded separately per A
    `cuda_graphs` at 3256; with the defines, byte-identical). Fixed in the live CMake branch,
    gated `STRATA_HIP_GFX906` (CUDA-native byte-unchanged); witness: objdump `movl $0x1130`
    (=4400) in the rebuilt `ContextC2Ev`. Receipt `2026-10-22-p4-odr-rootcause-fix.json`.
+   **CLOSED PASS 2026-10-22** (log `p4.4-base-20261022-180447`): engram gate 4/4, then base rung
+   decode **128 tokens in 8.19 s = 15.50 tok/s** with **99.3% VRAM expert hits** (30261 hit / 68 cpu
+   / 151 pcie / 17 file); the vram_lru lazy fill warmed during prefill exactly as P4.1 predicted.
+   Both engines also re-ran clean under ASan (`rc=0`, no report) - the ODR fix removes the
+   corruption at the instrumented level, not just the glibc symptom.
    **RUN 3 2026-10-22** (logs `p4.4-*-20261022-074337`): the `--no-enc-skip` rung ALSO crashed with
    `malloc(): invalid size (unsorted)` before any batch line - **enc-skip exonerated**; the
    corruption is on the common GPU-experts path both engines share. The new refuse-reason print

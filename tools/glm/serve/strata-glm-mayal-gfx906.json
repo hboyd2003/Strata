@@ -1,5 +1,5 @@
 {
-  "_comment": "Draft for THIS box (4x MI50 32GB gfx906, 125 GiB RAM, ROCm 7.2.0), written 2026-10-18 before any GLM boot - see docs/gfx906/GLM-FIRST-BOOT.md. Paths are the /ai/models/hf.co layout; Maya-L 4-shard first file; sizes are first guesses pending the first boot.",
+  "_comment": "Draft for THIS box (4x MI50 32GB gfx906, 125 GiB RAM, ROCm 7.2.0), written 2026-10-18 before any GLM boot - see docs/gfx906/GLM-FIRST-BOOT.md. Paths are the /ai/models/hf.co layout; Maya-L 4-shard first file; sizes are first guesses pending the first boot. 2026-10-22 (post-P4.2): --vram-margin 2.0 -> 4.0 - the chunk-MMQ c_stage staging is TWO device halves of max(1024 MiB, blob) allocated AFTER the auto expert slots, and margin 2.0 OOM'd there in every smoke (logs/p4.2-base-20261022-063849.log); margin 4.0 is the witnessed-green serve/boot number (logs/p4.2-base-20261022-180307.log, rc=0, 2.57 tok/s decode).",
   "exe": "/ai/engines/gfx906/worktrees/xolotl-merge/tools/glm/serve/glm-engine-906.sh",
   "args": [
     "-m", "/ai/models/hf.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF/Maya-L/GLM-5.3-Flash-Maya-L-IQ3_S-00001-of-00004.gguf",
@@ -10,7 +10,7 @@
     "--ctx", "32768",
     "--prefill-chunk", "4096",
     "--chunk-mmq",
-    "--vram-margin", "2.0",
+    "--vram-margin", "4.0",
     "--prune", "/ai/engines/gfx906/worktrees/xolotl-merge/tools/glm/serve/prune-ezct-0.25.txt",
     "--prune-penalty", "0.05",
     "--route-bias", "0.25",

@@ -1,0 +1,19 @@
+{
+  "task": "P4.2 (#20) + P4.4 (#22) CLOSED - first GPU-experts tokens from both ported engines on gfx906",
+  "date": "2026-10-22",
+  "asan_re_check": {
+    "logs": ["logs/p4.4-asan-20261022-175941.log", "logs/p4.2-asan-20261022-180133.log"],
+    "result": "rc=0 BOTH engines under the fixed build, NO AddressSanitizer report (the ODR fix (e13f1555) removes the corruption at the instrumented level, not just the glibc symptom)"
+  },
+  "p4.2_glm_PASS": {
+    "log": "logs/p4.2-base-20261022-180307.log",
+    "witness": "P4.2 WITNESS: PASS (base path - CUDA graphs on, GPU experts); 14-token prefill 16.58 s; decode 64 tokens / 63 passes = 2.57 tok/s (3.6x the 0.71 tok/s CPU-experts rung); experts/token hit 23.3% VRAM + 22.6% PCIe + 54.1% cpu; tier ms/token wall 309 (gpu hits 4.43, pcie 36.0, cpu pool 262.2); arena swaps 74; VRAM free at end 3.28 GiB (margin 4.0 held)",
+    "note": "bring-up numbers on ONE MI50 of four, cold cache; NOT a performance claim"
+  },
+  "p4.4_ds41_PASS": {
+    "log": "logs/p4.4-base-20261022-180447.log",
+    "witness": "P4.4 WITNESS: PASS (engram tables served a greedy continuation); decode 128 tokens in 8.19 s = 15.50 tok/s with experts 30261 hit / 68 cpu / 151 pcie / 17 file = 99.3% VRAM hits; engram gate 4/4 PASS before boot",
+    "note": "vram_lru lazy fill (0 at load) warmed during prefill - the 99.3% is warm-cache steady state at 128 tokens, exactly what the P4.1 budget doc predicted for the 24.1 GiB slot tier"
+  },
+  "serve_prep": "tools/glm/serve/strata-glm-mayal-gfx906.json --vram-margin 2.0 -> 4.0 (same c_stage arithmetic as the smoke OOM; 4.0 is now witnessed green); DS4.1 config unchanged (margin 1.0 matches the green smoke); DSpark OFF confirmed (ds41-engine-906.sh exports STRATA_SERVE_DSPARK empty, the wrapper's ${VAR-default} keeps empty = off)"
+}
