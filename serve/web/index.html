@@ -56,14 +56,6 @@
       <p class="muted small sidebar-foot" id="sidebar-foot"></p>
     </aside>
     <div class="chat-main">
-      <div class="view-bar" id="view-bar" hidden>
-        <div class="view-bar__in">
-          <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-activity"/></svg>
-          <span class="view-bar__text"><span class="card-title" id="view-title">A request</span> <span class="muted small" id="view-sub"></span></span>
-          <span class="spacer"></span>
-          <button type="button" class="st-btn st-btn--secondary" id="view-back">Back to your chat</button>
-        </div>
-      </div>
       <div class="chat-parent" id="chat-parent" hidden></div>
       <div class="chat-scroll" id="chat-scroll">
         <div class="chat" id="chat">
@@ -169,8 +161,8 @@
           <div class="table-wrap" id="req-wrap">
             <table class="st-table">
               <thead><tr><th>Time</th><th>Status</th><th class="num">Prompt</th><th class="num">Reused</th><th class="num">Output</th>
-                <th class="num" title="New prompt tokens per second, excluding reused cache tokens (engine prompt time)">Prefill t/s</th><th class="num">Decode t/s</th><th class="num" title="While writing the answer: the share of the experts looked up that were already in VRAM. Experts the GPU read over PCIe (--pcie-frac) are not counted in it; their share of all routed experts is shown after it (+N% PCIe)">VRAM hit rate</th><th class="num">Duration</th><th><span class="sr-only">Chat</span></th></tr></thead>
-              <tbody id="req-body"><tr><td colspan="10" class="muted">No requests yet</td></tr></tbody>
+                <th class="num" title="New prompt tokens per second, excluding reused cache tokens (engine prompt time)">Prefill t/s</th><th class="num">Decode t/s</th><th class="num" title="While writing the answer: the share of the experts looked up that were already in VRAM. Experts the GPU read over PCIe (--pcie-frac) are not counted in it; their share of all routed experts is shown after it (+N% PCIe)">VRAM hit rate</th><th class="num">Duration</th></tr></thead>
+              <tbody id="req-body"><tr><td colspan="9" class="muted">No requests yet</td></tr></tbody>
             </table>
           </div>
           <p class="muted req-totals" id="req-totals"></p>
@@ -316,6 +308,19 @@
   </div>
 </aside>
 <div class="scrim" id="scrim" hidden></div>
+
+<!-- #332: a recent request read as a chat (the Monitor's request table; "api_monitor" keeps them) -->
+<dialog class="rv" id="rv" aria-labelledby="rv-title">
+  <div class="rv__head">
+    <div class="rv__titles"><span class="card-title" id="rv-title">Request</span><span class="muted small" id="rv-sub"></span></div>
+    <button type="button" class="st-btn st-btn--icon" id="rv-close" aria-label="Close" title="Close (Esc)">
+      <svg class="st-icon"><use href="web/sprite.svg#i-close"/></svg></button>
+  </div>
+  <div class="rv__body">
+    <div class="rv__scroll" id="rv-scroll" tabindex="-1"><div class="chat rv__chat" id="rv-chat"></div></div>
+    <aside class="rv__side" id="rv-side" aria-label="About this request"></aside>
+  </div>
+</dialog>
 <div class="st-toasts" id="toasts" aria-live="polite"></div>
 <script src="web/i18n.js"></script>
 <script src="web/preview.js"></script>
