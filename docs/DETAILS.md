@@ -853,7 +853,9 @@ so a Monitor-tab panel and a Grafana panel read the same value: `strata:live_sta
 `strata:totals_prompt_seconds_total` / `strata:totals_decode_seconds_total`, `strata:last_hit_rate` and
 `strata:last_decode_tok_s` (the last request's), and the hardware - `strata:gpu_util`, `strata:gpu_mem_used_bytes`,
 `strata:gpu_mem_total_bytes`, `strata:gpu_temp_celsius`, `strata:gpu_power_watts` (one sample per card, label
-`gpu`), `strata:cpu`, `strata:ram_used_bytes`, `strata:ram_total_bytes`. A value the server does not have (no GPU
+`gpu`), `strata:cpu`, `strata:ram_used_bytes`, `strata:ram_total_bytes`. On an AMD card the temperature is the hwmon probe the
+config's `"gpu_temp_sensor"` names: `"edge"` (the default), `"junction"` (the hottest spot on the die) or `"mem"` (the
+VRAM); a card without that probe reads edge. NVIDIA cards have one GPU temperature and ignore the key. A value the server does not have (no GPU
 telemetry, an older engine) has no sample rather than a zero.
 
 Ready to use, in `docs/monitoring/`: `prometheus.yml` (a scrape config, the API key as a bearer token),
@@ -1080,7 +1082,7 @@ print(r.choices[0].message.content)
 - **Model settings in the web page (0.1.39, #564).** The About tab's Model settings card shows and changes a few of
   the keys above in `strata-<model>.json`: the `sampling` defaults (temperature, top_p, top_k, min_p),
   `reasoning_budget_tokens`, `fit_max_tokens`, `anthropic_thinking`, `effort_position`, `aliases`, `idle_unload_s`,
-  `lazy_load`, `engine_silence_s`, `api_monitor`, `open_browser` and `--vram-reserve-mib`. An empty field removes the
+  `lazy_load`, `engine_silence_s`, `api_monitor`, `open_browser`, `gpu_temp_sensor` and `--vram-reserve-mib`. An empty field removes the
   key (its default). Every other key of the file stays as it is, the earlier file is kept as
   `strata-<model>.json.bak`, and the model uses the change from its next start. Only Strata's own page can save
   (JSON, the API key when one is set, as for the Chat settings); the network, key, MCP and program keys are not
