@@ -888,6 +888,38 @@ def transcript_of(messages, previous=()) -> dict:
     return {"messages": out[keep:], "omitted": keep}
 
 
+REQUEST_PARAMS = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "repetition_penalty",
+                  "seed", "max_tokens", "max_completion_tokens", "max_output_tokens", "reasoning_effort", "tool_choice")
+
+
+def request_params(req: dict) -> dict:
+    """#332: the settings a request came with, as the client sent them (no messages, no headers) - the "view as chat"
+    popup's facts.  The tools are a count and their names."""
+    p = {k: req[k] for k in REQUEST_PARAMS
+         if isinstance(req.get(k), (int, float, str)) and not isinstance(req.get(k), bool)}
+    thinking = req.get("thinking")                      # Anthropic: {"type": "enabled", "budget_tokens": N}
+    if isinstance(thinking, dict) and isinstance(thinking.get("type"), str):
+        p["thinking"] = thinking["type"]
+        if isinstance(thinking.get("budget_tokens"), int):
+            p["thinking_budget"] = thinking["budget_tokens"]
+    for k in ("output_config", "reasoning"):            # Anthropic's and the Responses API's effort
+        if isinstance(req.get(k), dict) and isinstance(req[k].get("effort"), str):
+            p["effort"] = req[k]["effort"]
+    kw = req.get("chat_template_kwargs")
+    if isinstance(kw, dict) and "enable_thinking" in kw:
+        p["thinking"] = "enabled" if kw["enable_thinking"] else "disabled"
+    choice = req.get("tool_choice")
+    if isinstance(choice, dict):
+        p["tool_choice"] = (choice.get("function") or {}).get("name") or choice.get("name") or choice.get("type")
+    tools = req.get("tools")
+    if isinstance(tools, list) and tools:
+        names = [(t.get("function") if isinstance(t.get("function"), dict) else t).get("name")
+                 for t in tools if isinstance(t, dict)]
+        p["tools"] = len(tools)
+        p["tool_names"] = [n for n in names if isinstance(n, str)][:40]
+    return p
+
+
 def tool_call_view(name, arguments) -> dict:
     """A tool call in a transcript: its name and arguments (as text when they are long)."""
     if not isinstance(arguments, dict):
@@ -4577,6 +4609,7 @@ class Service:
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
+                  "params": request_params(req),
                   "input": raw[:262144], "input_truncated": len(raw) > 262144,
                   "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
                   "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,

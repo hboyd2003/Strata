@@ -66,17 +66,39 @@ main { flex: 1; min-height: 0; display: flex; }
                   border: 1px solid var(--st-line-soft); border-radius: var(--st-r-sm); }
 
 .composer-wrap { flex: none; padding: 0 var(--st-s-6) var(--st-s-6); }
-/* a recent request read as a chat (the Monitor's request table): a bar instead of the composer */
-.view-bar { flex: none; padding: var(--st-s-3) var(--st-s-6); border-bottom: 1px solid var(--st-line-soft); background: var(--st-surface-2); }
-.view-bar[hidden], .composer-wrap[hidden] { display: none; }
-.view-bar__in { max-width: 860px; margin: 0 auto; display: flex; align-items: center; gap: var(--st-s-3); }
-.view-bar__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.view-bar .spacer { flex: 1; }
-.view-bar .st-btn { height: 34px; padding: 0 14px; flex: none; }
-.st-msg--system .thinking { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow-y: auto; }
-.req-view { width: 30px; height: 30px; }
+/* #332: a recent request read as a chat - a popup over the Monitor: the chat on the left, its facts on the right */
+.req-time { display: inline-flex; align-items: center; gap: 4px; }
+.req-view { width: 22px; height: 22px; padding: 0; border-radius: 6px; color: var(--st-accent); }
 .req-view .st-icon { width: 16px; height: 16px; }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.req-view:disabled { color: var(--st-ink-muted); opacity: .4; cursor: default; }
+.req-row--open { cursor: pointer; }
+.req-row--open:hover td { background: var(--st-surface-2); }
+.rv { width: min(1200px, calc(100vw - 32px)); height: calc(100vh - 48px); max-width: none; max-height: none; padding: 0;
+      border: 1px solid var(--st-line); border-radius: var(--st-r-lg); background: var(--st-bg); color: var(--st-ink);
+      box-shadow: var(--st-sh-pop); overflow: hidden; }
+.rv[open] { display: flex; flex-direction: column; }
+.rv::backdrop { background: rgba(15, 23, 42, .45); }
+.rv__head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--st-s-3);
+            padding: 14px 16px 14px 24px; border-bottom: 1px solid var(--st-line); background: var(--st-surface); }
+.rv__titles { display: flex; align-items: baseline; gap: var(--st-s-3); min-width: 0; flex-wrap: wrap; }
+.rv__body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 320px; }
+.rv__scroll { min-height: 0; overflow-y: auto; outline: none; }
+.rv__chat { padding-top: var(--st-s-6); }
+.rv-omitted { margin: 0; text-align: center; }
+.rv__side { min-height: 0; overflow-y: auto; padding: var(--st-s-4) var(--st-s-5) var(--st-s-6); border-left: 1px solid var(--st-line);
+            background: var(--st-surface); }
+.rv-side__title { font-size: var(--st-fs-xs); font-weight: var(--st-fw-bold); text-transform: uppercase; letter-spacing: .06em;
+                  color: var(--st-ink-muted); margin: var(--st-s-4) 0 var(--st-s-2); }
+.rv-side__title:first-child { margin-top: 0; }
+.facts.rv-facts { grid-template-columns: minmax(96px, max-content) 1fr; gap: 6px var(--st-s-3); font-size: var(--st-fs-sm); }
+.facts.rv-facts dd { overflow-wrap: anywhere; }
+.st-msg--system .thinking { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow-y: auto; }
+@media (max-width: 860px) {
+  .rv { width: 100vw; height: 100dvh; border-radius: 0; border: 0; }
+  .rv__body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .rv__side { order: -1; max-height: 32vh; border-left: 0; border-bottom: 1px solid var(--st-line); }
+  .rv__chat { padding-inline: var(--st-s-4); }
+}
 .st-composer { max-width: 860px; margin: 0 auto; }
 .st-composer textarea { max-height: 40vh; }
 .st-btn--send { width: 42px; padding: 0; }
@@ -127,7 +149,7 @@ main { flex: 1; min-height: 0; display: flex; }
 #req-wrap .st-table th,
 #req-wrap .st-table td {
   white-space: nowrap;
-  padding-inline: 8px;
+  padding-inline: 6px;
 }
 .req-head { display: flex; align-items: center; justify-content: space-between; gap: var(--st-s-2); }
 .table-wrap.all { max-height: 420px; overflow-y: auto; }
