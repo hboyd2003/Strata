@@ -79,8 +79,9 @@ PYEOF
   for i in $(seq 1 90); do grep -q "ready: http" "$LOG" 2>/dev/null && break; sleep 2; done
   grep -q "ready: http" "$LOG" || { echo "server never became ready; see $LOG"; kill -9 "$SRV" 2>/dev/null; exit 1; }
   sam 'glm_generate' & SAM=$!
+  MAXT="${3:-256}"   # 3rd arg: max_tokens. 64 = deterministic thinking cut (model thinks ~110 tok > budget 32 -> cancel -> wrap-up -> FIRST MMQ run)
   curl -s --max-time 900 http://127.0.0.1:8147/v1/chat/completions -H 'Content-Type: application/json' \
-    -d '{"model":"glm","messages":[{"role":"user","content":"Say hello in three words."}],"max_tokens":256}' > "$LOG.curl"
+    -d "{\"model\":\"glm\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in three words.\"}],\"max_tokens\":$MAXT}" > "$LOG.curl"
   echo "--- curl -> $LOG.curl ---"
   touch "$LOG.stop"; wait "$SAM" 2>/dev/null
   kill -INT "$SRV" 2>/dev/null
