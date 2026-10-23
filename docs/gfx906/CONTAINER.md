@@ -91,6 +91,10 @@ To move a compose setup from the archived image:
 A short single-MI50 smoke of this image with a 155K-context Swift IQ3_S config (pack built by the v0.1.41 tools) is
 recorded in the [receipt](../../benchmarks/gfx906/receipts/2026-10-22-rocm10.1-image-smoke.json).
 
+Conversation disk parking (`auto_sessions`, see [UPSTREAM-DELTA.md](UPSTREAM-DELTA.md#disk-parking-for-conversations-2026-10-23))
+needs a writable directory beside the read-only mounts, for example `-v ./data/strata/sessions:/sessions` with
+`"slot_save_path": "/sessions"` and `"auto_sessions": true` in the config.
+
 ## Source image distinction
 
 Upstream's own images ([`docker/Dockerfile`](../../docker/Dockerfile), and the root `Dockerfile` for CUDA) use a

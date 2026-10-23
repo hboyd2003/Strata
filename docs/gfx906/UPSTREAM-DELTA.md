@@ -118,6 +118,23 @@ read large prompts at 677 tok/s against 504 for the v0.2.2 image as it was and 6
 switches on; one agent's session took 141.8 s against 185.7 and 156.8 s. Decode did not change measurably. See the
 [receipt](../../benchmarks/gfx906/receipts/2026-10-22-janus-prefill-port.json).
 
+## Disk parking for conversations (2026-10-23)
+
+Two open upstream PRs, cherry-picked with `-x` for a one-slot server whose conversations outgrow the RAM left for
+parking (about 2 GB per 90K-token conversation, with 2-3 GB free above the cache floor beside a 48 GB expert arena):
+
+- [#3565](https://github.com/Niko1221/Strata/pull/3565) (`serve/server.py` only, written on v0.2.2): opt-in
+  `"auto_sessions": true` saves the held conversation to `auto-<key>.bin` under `slot_save_path` when a request from
+  another conversation (keyed by its first user message) arrives, and restores the incoming one from its file. Limits:
+  `auto_sessions_min_tokens` (16000), `auto_sessions_keep` (12), `auto_sessions_max_gb` (100).
+- [#3251](https://github.com/Niko1221/Strata/pull/3251) (engine): RESTORE validates the session file in one pass and
+  copies its K/V into the pools in 16 MiB blocks in a second, instead of holding the whole K/V in RAM; the file
+  format is unchanged.
+
+Both applied without conflicts; #3251's restore handler sits correctly around v0.2.2's `--kv-grow` growth check, and
+every function it calls is declared and defined. Not built and not run yet: `serve/server.py` compiles, nothing else
+was checked.
+
 ## PR #4 current-source comparison (2026-10-17)
 
 Public [PR #4](https://github.com/cassettesgoboom/strata-gfx906/pull/4) remains a draft with head `0fffc4412ebd1ba5e5f880fdabaeb840a1164adc`, based on archived `v0.1.41` commit `fb58e0dbc8399662c0e47c76578c6e878b14f6cf`. It changes 15 files (+1,781/−134) and reports no gfx906 build or exact native-token and persistent-state parity. The reviewed fork main is `f54111839951c0d7f64630064f840b359507fd01`; after `ef91497b71a9ec25a4a30b22695c7d23ffddc89e`, PR #35 changed only the README tag link. Upstream `v0.1.45` and `main` resolve to `477ac13cbe8e582c20484871ce459d20d82df09d`.
