@@ -39,6 +39,8 @@ EDITABLE = [
     ("engine_silence_s", "num>=0", "End a request when the engine says nothing for this long (default 300 s, 0 = wait)"),
     ("api_monitor", "bool", "Keep the last 100 requests' prompts and answers in memory for /api-monitor"),
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
+    ("gpu_temp_sensor", ("enum", ["edge", "junction", "mem"]),
+     "AMD GPU temperature probe the Monitor shows: edge (the default), junction (hottest spot on the die) or mem (VRAM)"),
     ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
 ]
