@@ -69,6 +69,18 @@ main { flex: 1; min-height: 0; display: flex; }
                   border: 1px solid var(--st-line-soft); border-radius: var(--st-r-sm); }
 
 .composer-wrap { flex: none; padding: 0 var(--st-s-6) var(--st-s-6); }
+/* a recent request read as a chat (the Monitor's request table): a bar instead of the composer */
+.view-bar { flex: none; padding: var(--st-s-3) var(--st-s-6); border-bottom: 1px solid var(--st-line-soft); background: var(--st-surface-2); }
+.view-bar[hidden], .composer-wrap[hidden] { display: none; }
+.view-bar__in { max-width: min(100%, 1100px); margin: 0 auto; display: flex; align-items: center; gap: var(--st-s-3); }
+.view-bar__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-bar .spacer { flex: 1; }
+.view-bar .st-btn { height: 34px; padding: 0 14px; flex: none; }
+.st-msg--system .thinking { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow-y: auto; }
+.req-view { width: 30px; height: 30px; }
+.req-view .st-icon { width: 16px; height: 16px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.view--chat[data-viewing] .chat-sidebar { display: none; }
 .st-composer { max-width: min(100%, 1100px); margin: 0 auto; }
 .st-composer textarea { max-height: 40vh; }
 .st-btn--send { width: 42px; padding: 0; }
