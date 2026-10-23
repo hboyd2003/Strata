@@ -1,6 +1,6 @@
 # Known limitations and open validation
 
-- The source at upstream base `296b59d2f73c8f04a805df29c2fa97655adace78` has not been shown here to reproduce the
+- The source at upstream base `011c9e600a93bbc9fd451c563501b5831c32bbca` (v0.2.2) has not been shown here to reproduce the
   published native artifact `ae93901c79771ace15db52942523c25fc46dd6f0d6a3b43698b28e6071c472cb` or OCI index
   `sha256:a7527bd8efe2dcdb0a0a7fd6b96761507ce79f9d585ce1649ce5b91158258a29`.
 - A current-main-equivalent binary passed a short serial dual-MI50 GPU smoke with positive cache reuse and MTP

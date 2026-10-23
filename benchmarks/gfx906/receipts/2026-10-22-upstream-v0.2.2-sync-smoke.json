@@ -1,0 +1,113 @@
+{
+  "schema": "gfx906-upstream-sync-smoke-v1",
+  "date_utc": "2026-10-22",
+  "classification": "short model-backed serial inference smoke; not a performance benchmark or parity test",
+  "source": {
+    "repository": "cassettesgoboom/strata-gfx906",
+    "fork_main_before_sync": "e063ec6cf2d9df86626b5746839f086cffbde78e",
+    "upstream_merged": "011c9e600a93bbc9fd451c563501b5831c32bbca",
+    "upstream_tag": "v0.2.2",
+    "merge_commit": "72ecf452fdfbef8bb690d1e8c2de86f654a9f2ab",
+    "native_sha256": "26877cfcc2da0d2ca54a998341858454431521d033d0e62cba57f2af38bec153",
+    "engine_version_reported": "0.1.47",
+    "server_source_sha256": "90bdd6ee5349fc30eea436823a78cc0ebf5ea87b64d1aeee3ec891d202e62f8e"
+  },
+  "build": {
+    "cmake": "-G Ninja -DSTRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906 -DSTRATA_BUILD_TESTS=ON, clang/clang++ from the ROCm LLVM",
+    "toolchain": "HIP 7.16.26385, AMD clang 24.0.0git",
+    "targets": ["strata", "platform_memory_test", "verify_release_control_test"]
+  },
+  "distribution": {
+    "run_from": "native build on the host with the merge tree's Python server; no container",
+    "new_image_built_or_published": false,
+    "published_image_validated": false
+  },
+  "environment": {
+    "hardware_class": "one AMD Instinct MI50 32 GB, gfx906 (HIP_VISIBLE_DEVICES=0); an integrated wave32 GPU was hidden",
+    "host_ram_gib": 59,
+    "model_assets": "external Qwen3.8 Flash-Next IQ3_S assets with a pack built by the v0.1.41 tools; not distributed",
+    "context_tokens": 8192,
+    "kv": "int8",
+    "expert_cache": "auto (13590 slots, 25.79 GiB VRAM) with data/expert-profile.bin",
+    "speculation": "--spec 4 --spec-min-p 0.5 with the MTP draft layer; --batch-mtp configured but reported off (needs --batch 2 or more)",
+    "scheduler": "serial; no --batch, no --pipeline-windows; AB/CD not present",
+    "model_weights_included": false
+  },
+  "runs": [
+    {
+      "name": "plain",
+      "requests": [
+        {
+          "kind": "initial_generation",
+          "http_status": 200,
+          "native_prompt_reused_tokens": 0,
+          "native_prompt_total_tokens": 52,
+          "native_generated_tokens": 126,
+          "native_decode_tok_s": 53.6,
+          "native_drafts_accepted_offered": [77, 129],
+          "client_first_content_seconds": 1.851,
+          "finish_reason": "stop",
+          "stream_complete": true
+        },
+        {
+          "kind": "same_conversation_followup",
+          "http_status": 200,
+          "native_prompt_reused_tokens": 47,
+          "native_prompt_total_tokens": 141,
+          "native_generated_tokens": 118,
+          "native_decode_tok_s": 56.9,
+          "native_drafts_accepted_offered": [66, 111],
+          "client_first_content_seconds": 2.895,
+          "finish_reason": "stop",
+          "stream_complete": true
+        }
+      ],
+      "decode_expert_cache_hit_rate": 0.984
+    },
+    {
+      "name": "correctness_trace",
+      "environment_overrides": {"STRATA_CORRECTNESS_TRACE": "1", "STRATA_CORRECTNESS_WINDOW_TRACE": "1"},
+      "requests": [
+        {
+          "kind": "initial_generation",
+          "http_status": 200,
+          "native_generated_tokens": 126,
+          "trace_window_records": "contiguous from window 0",
+          "trace_token_ids_total": 126,
+          "trace_mtp_accepted_offered": [77, 129],
+          "leg_complete_record": "finish=stop produced=126"
+        },
+        {
+          "kind": "same_conversation_followup",
+          "http_status": 200,
+          "native_prompt_reused_tokens": 47,
+          "native_generated_tokens": 118,
+          "trace_window_records": "contiguous from window 0",
+          "trace_token_ids_total": 118,
+          "trace_mtp_accepted_offered": [63, 105],
+          "native_drafts_accepted_offered": [66, 111],
+          "note": "the 3 of 6 difference is the two suffix-lookup windows, which the trace excludes from MTP counts by design",
+          "leg_complete_record": "finish=stop produced=118"
+        }
+      ],
+      "greedy_content_identical_to_plain_run": true
+    }
+  ],
+  "result": {
+    "serial_inference_and_conversation_reuse_smoke": "pass",
+    "verify_window_graph_capture": "1 through 6 tokens, no errors",
+    "correctness_trace_accounting": "pass",
+    "clean_shutdown": true,
+    "ab_cd_runtime": "not tested",
+    "batch_or_pipeline_windows": "not tested",
+    "layer_split_or_two_cards": "not tested",
+    "native_token_parity_against_another_build": "not tested",
+    "persistent_recurrent_state_parity": "not tested"
+  },
+  "limitations": [
+    "Two short greedy requests on one card; the run does not establish sustained throughput, batching, AB/CD, layer-split, or two-card behavior.",
+    "The engine warned that 459 MiB of VRAM was free at the second request (below its 512 MiB guidance); the run completed, but a larger --vram-reserve-mib is advised for longer runs at this cache size.",
+    "Identical greedy output with traces on and off shows the trace does not perturb this run; it is not token parity against the archived image or another build.",
+    "The watchdog release path and the overlapped split's hand-off flag were not exercised: no window timed out and no split was configured."
+  ]
+}
