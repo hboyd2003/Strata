@@ -856,6 +856,67 @@ def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) 
             "last_prompt": last.get("prompt_tokens") if last else None}
 
 
+TRANSCRIPT_TEXT_MAX = 65536                         # one message's text (or a call's arguments) in a transcript
+TRANSCRIPT_MAX = 1 << 21                            # a transcript's characters; past it the oldest messages are left out
+
+
+def _clip(text: str, limit: int = TRANSCRIPT_TEXT_MAX) -> str:
+    return text if len(text) <= limit else text[:limit] + f"\n\u2026 ({len(text) - limit:,} more characters not kept)"
+
+
+def transcript_of(messages, previous=()) -> dict:
+    """The Monitor's "view as chat" (with "api_monitor" on): a request's messages as the template saw them, compact -
+    role, text, a count of pictures, reasoning and tool calls; a long text is cut, and past TRANSCRIPT_MAX characters
+    the oldest messages are left out ("omitted").  `previous`: the transcripts kept before it, newest first; the
+    messages it shares with the latest one of the same conversation are that one's objects, so an agent's 100 turns
+    keep its history once rather than 100 times."""
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content, images = m.get("content"), 0
+        if isinstance(content, list):               # the parts form: text items and pictures
+            text = "".join(p.get("text") or "" for p in content
+                           if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
+            images = sum(1 for p in content if isinstance(p, dict) and p.get("type") not in ("text", "input_text"))
+        else:
+            text = content if isinstance(content, str) else ""
+        c = {"role": m.get("role"), "text": _clip(text)}
+        if images:
+            c["images"] = images
+        if m.get("reasoning_content"):
+            c["reasoning"] = _clip(str(m["reasoning_content"]))
+        if m.get("tool_calls"):
+            c["tool_calls"] = [tool_call_view((t.get("function") or t).get("name"),
+                                              (t.get("function") or t).get("arguments"))
+                               for t in m["tool_calls"] if isinstance(t, dict)]
+        out.append(c)
+    for prev in previous:
+        if prev and out and prev[0] == out[0]:      # the same conversation: share what did not change
+            for i in range(min(len(prev), len(out))):
+                if prev[i] != out[i]:
+                    break
+                out[i] = prev[i]
+            break
+    keep, size = len(out), 0
+    while keep > 0:
+        m = out[keep - 1]
+        size += len(m["text"]) + len(m.get("reasoning", "")) + \
+            sum(len(str(t["arguments"])) for t in m.get("tool_calls", ()))
+        if size > TRANSCRIPT_MAX and keep < len(out):
+            break
+        keep -= 1
+    return {"messages": out[keep:], "omitted": keep}
+
+
+def tool_call_view(name, arguments) -> dict:
+    """A tool call in a transcript: its name and arguments (as text when they are long)."""
+    if not isinstance(arguments, dict):
+        arguments = {} if arguments is None else {"arguments": str(arguments)}
+    raw = json.dumps(arguments, ensure_ascii=False)
+    return {"name": name, "arguments": arguments if len(raw) <= TRANSCRIPT_TEXT_MAX else {"arguments": _clip(raw)}}
+
+
 _BTRACE = bool(os.environ.get("STRATA_BATCH_TRACE"))
 
 
@@ -4745,6 +4806,34 @@ class Service:
         self.request_trace.record = record
         return record
 
+    def _note_transcript(self, messages):
+        """#332 "view as chat": this request's messages, kept with its monitor record (nothing when the monitor is
+        off).  A failure never fails the request."""
+        trace = getattr(self.request_trace, "record", None)
+        if trace is None:
+            return
+        try:
+            with self.status_lock:
+                previous = [r["transcript"]["messages"] for r in reversed(self.api_requests)
+                            if r is not trace and r.get("transcript")][:8]
+            transcript = transcript_of(messages, previous)
+            with self.status_lock:
+                trace["transcript"] = transcript
+                trace.setdefault("reply", {"content": "", "reasoning": "", "tool_calls": []})
+        except Exception as e:                      # noqa: BLE001 - the monitor must never fail the request
+            print(f"[strata] api monitor: cannot keep this request's messages: {e}", flush=True)
+
+    def _note_reply(self, trace, ev):
+        """The reply's text, reasoning and tool calls as the engine wrote them (every API, streamed or not)."""
+        with self.status_lock:
+            reply = trace.get("reply")
+            if reply is None:
+                return
+            if ev.kind == "tool_call" and ev.call is not None:
+                reply["tool_calls"] = reply["tool_calls"] + [tool_call_view(ev.call.name, ev.call.arguments)]
+            elif ev.kind in ("content", "reasoning") and ev.text and len(reply[ev.kind]) < 262144:
+                reply[ev.kind] = (reply[ev.kind] + ev.text)[:262144]
+
     def request_records(self, request_id=None):
         with self.status_lock:
             records = list(self.api_requests)
@@ -4754,7 +4843,8 @@ class Service:
                     return None
                 return {k: v for k, v in record.items() if not k.startswith("_")}
             return [{k: v for k, v in r.items()
-                     if k not in ("input", "output", "reasoning", "response") and not k.startswith("_")}
+                     if k not in ("input", "output", "reasoning", "response", "transcript", "reply")
+                     and not k.startswith("_")}
                     | {"wallclock_s": r.get("wallclock_s", round(time.perf_counter() - r["_clock"], 3))}
                     for r in reversed(records)]
 
@@ -4810,7 +4900,7 @@ class Service:
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
-                "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
+                "requests_kept": len(hist), "transcripts": bool(self.api_monitor), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
 
@@ -5012,6 +5102,7 @@ class Service:
                     else:
                         part["source"] = str(image)
         fetched = self._note_unreadable_tool_images(messages, cancel)
+        self._note_transcript(messages)
         ids = encoded_ids = self.encode_prompt(messages, tools, kwargs)
         if force and kwargs.get("enable_thinking", True) is False:
             ids = ids + self.tok.encode(force, parse_special=True)
@@ -5268,9 +5359,18 @@ class Service:
         ka = self.keep_awake
         if ka is not None:
             ka.acquire()
+        trace = getattr(self.request_trace, "record", None)
+        events = self._run(ids, thinking, tools, max_new, sampling, cancel, force, declared_only)
         try:
-            yield from self._run(ids, thinking, tools, max_new, sampling, cancel, force, declared_only)
+            if trace is None:
+                yield from events
+            else:
+                for x in events:
+                    if x[0] == "event":
+                        self._note_reply(trace, x[1])
+                    yield x
         finally:
+            events.close()
             if ka is not None:
                 ka.release()
 
@@ -5703,6 +5803,9 @@ class Service:
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
                             self.history.append({
                                 "id": request_id,
+                                # #332: the monitor record this request's messages and reply are kept in (None: the
+                                # monitor is off, or it has none) - the Monitor's "view as chat"
+                                "record_id": trace["id"] if trace is not None and trace.get("transcript") else None,
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,

@@ -282,6 +282,7 @@ function historyReady() {
 }
 // the action rows under the messages follow the switch, without replacing any message (an answer may be streaming into one)
 function syncActions() {
+  if (viewing) return;                              // a request read as a chat (app.js) has no history actions
   for (const el of $("chat").querySelectorAll(".st-msg")) {
     const i = +el.dataset.i;
     const old = el.querySelector(".history-actions");

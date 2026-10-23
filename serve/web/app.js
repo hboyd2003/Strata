@@ -75,6 +75,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
 let tab = "chat";
 function showTab(name) {
   tab = ["chat", "images", "monitor", "about"].includes(name) ? name : "chat";
+  if (tab !== "chat" && viewing) endView();
   for (const b of document.querySelectorAll(".st-tab")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
   for (const v of ["chat", "images", "monitor", "about"]) $(`view-${v}`).hidden = v !== tab;
   if (tab === "images") $("img-prompt").focus();
@@ -527,7 +528,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   // recent requests
   const body = $("req-body");
   if (!requests.length) {
-    body.innerHTML = `<tr><td colspan="9" class="muted">No requests yet</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="muted">No requests yet</td></tr>`;
   } else {
     const badge = {stop: ["", "Done"], length: ["", "Max tokens"], cancel: ["st-badge--queued", "Stopped"],
                    disconnect: ["st-badge--queued", "Closed"], error: ["st-badge--error", "Error"],
@@ -544,7 +545,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
       const prefillRate = fresh > 0 && r.prompt_ms > 0 ? fresh / (r.prompt_ms / 1000) : null;
       return `<tr><td>${esc(t)}</td><td><span class="st-badge ${cls}">${esc(text)}</span>${proj}</td><td class="num">${fmt(r.prompt_tokens)}</td>
         <td class="num">${fmt(r.reused)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(prefillRate)}</td><td class="num">${fmt(r.decode_tok_s, 1)}</td>
-        <td class="num">${hit}</td><td class="num">${fmt(r.duration_s, 1)} s</td></tr>`;
+        <td class="num">${hit}</td><td class="num">${fmt(r.duration_s, 1)} s</td><td>${viewButton(r)}</td></tr>`;
     }).join("");
   }
   const all = $("req-all");
@@ -597,6 +598,19 @@ document.addEventListener("click", (e) => {
   if (b) copyText(b.dataset.copy, b);
 });
 $("req-all").addEventListener("click", () => { reqShowAll = !reqShowAll; if (lastMetrics) render(lastMetrics); });
+// #332: a request's messages and reply, kept by the API request monitor ("api_monitor": true in the run config)
+function viewButton(r) {
+  if (r.record_id) return `<button class="st-btn st-btn--icon req-view" data-view="${esc(r.id)}" title="Read this request as a chat" aria-label="Read as a chat">${icon("chat")}</button>`;
+  const why = lastMetrics && lastMetrics.transcripts ? "This request's messages were not kept"
+    : "To read requests as a chat, turn on \"api_monitor\" in the run config (it keeps the last 100 requests' messages in memory)";
+  return `<button class="st-btn st-btn--icon req-view" disabled title="${esc(why)}" aria-label="${esc(why)}">${icon("chat")}</button>`;
+}
+$("req-body").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-view]");
+  if (!b || !lastMetrics) return;
+  const row = (lastMetrics.requests || []).find((r) => r.id === b.dataset.view);
+  if (row) await viewRequest(row);
+});
 
 // ------------------------------------------------------------------ MCP servers (GET /mcp)
 // Tools from the MCP servers in the run config: the chat offers them to the model (opt-in per request,
@@ -805,6 +819,13 @@ function msgEl(m, i) {
   const el = document.createElement("div");
   el.className = `st-msg st-msg--${m.role}`;
   el.dataset.i = i;
+  if (m.role === "system") {                       // a request's system prompt (a request read as a chat): folded
+    el.innerHTML = `<details class="st-collapse think"><summary>${icon("settings", "st-icon st-icon--sm")}<span class="think-title"></span>` +
+      `${icon("chevron", "st-icon st-icon--sm st-chev")}</summary><div class="st-collapse__body thinking"></div></details>`;
+    el.querySelector(".think-title").textContent = `System prompt · ${fmt(m.text.length)} characters`;
+    el.querySelector(".thinking").textContent = m.text;
+    return el;
+  }
   if (m.role === "user") {
     if (m.files && m.files.length) {
       const wrap = document.createElement("div");
@@ -833,7 +854,7 @@ function msgEl(m, i) {
     el.appendChild(b);
     const meta = document.createElement("div");
     meta.className = "st-msg__meta";
-    meta.textContent = `${tr("chat.you", "You")} · ${timeStr(m.time)}`;
+    meta.textContent = m.time ? `${m.who || tr("chat.you", "You")} · ${timeStr(m.time)}` : m.who || tr("chat.you", "You");
     el.appendChild(meta);
   } else {
     el.innerHTML = `<details class="st-collapse think" hidden><summary>${icon("thinking", "st-icon st-icon--sm")}<span class="think-title"></span>` +
@@ -842,7 +863,7 @@ function msgEl(m, i) {
       `<button class="st-btn st-btn--icon" data-msg-copy aria-label="${esc(tr("chat.copyAnswer", "Copy the answer"))}" title="${esc(tr("chat.copy", "Copy"))}">${icon("copy")}</button></div>`;
     updateAssistant(el, m, false);
   }
-  const actions = msgActions(m, i);                 // edit / regenerate / rewind (chats-ui.js), when switched on
+  const actions = viewing ? null : msgActions(m, i);   // edit / regenerate / rewind (chats-ui.js), when switched on; none on a request read as a chat
   if (actions) el.appendChild(actions);
   return el;
 }
@@ -850,7 +871,8 @@ function msgEl(m, i) {
 // the result as the model read it.  Its body is built only while open: a result can be 20,000 characters.
 const TOOL_STATE = {writing: ["st-badge--reading", () => tr("tool.writing", "Writing")], running: ["st-badge--generating", () => tr("tool.running", "Running")],
                     done: ["", () => tr("tool.done", "Done")], error: ["st-badge--error", () => tr("tool.error", "Error")],
-                    skipped: ["st-badge--queued", () => tr("tool.skipped", "Not run")]};
+                    skipped: ["st-badge--queued", () => tr("tool.skipped", "Not run")],
+                    called: ["", () => tr("tool.called", "Called")]};
 function toolHtml(t, k) {
   const [cls, labelOf] = TOOL_STATE[t.state] || ["", () => t.state];
   const label = labelOf();
@@ -962,15 +984,88 @@ function updateAssistant(el, m, streaming) {
   el.querySelector("[data-msg-copy]").hidden = streaming || !m.text;
 }
 function renderChat() {
-  const chat = $("chat");
+  const chat = $("chat"), list = shown();
   chat.querySelectorAll(".st-msg").forEach((e) => e.remove());
-  $("chat-empty").hidden = messages.length > 0;
-  messages.forEach((m, i) => chat.appendChild(msgEl(m, i)));
+  $("chat-empty").hidden = list.length > 0;
+  list.forEach((m, i) => chat.appendChild(msgEl(m, i)));
   renderSidebar();
   renderParent();
   renderUndoBar();
   scrollDown(true);
 }
+
+// ------------------------------------------------------------------ a recent request read as a chat
+// The Monitor's request table opens a request in this view, read-only: its messages as the model saw them and the
+// reply it wrote.  The user's own chat stays as it was (not saved over) and comes back with "Back to your chat".
+let viewing = null;                   // {messages, row}
+const shown = () => (viewing ? viewing.messages : messages);
+function transcriptMessages(rec, row) {
+  const out = [], t = rec.transcript || {messages: [], omitted: 0};
+  let calls = [];                                  // the calls still waiting for a result, in order
+  const toolOf = (c, at) => ({name: c.name, tool: c.name, arguments: c.arguments, at, state: "called"});
+  for (const m of t.messages) {
+    if (m.role === "system") out.push({role: "system", text: m.text || ""});
+    else if (m.role === "user") out.push({role: "user", who: "User", text: m.text || "", files: [],
+                                          images: Array.from({length: m.images || 0}, () => ({name: "image"}))});
+    else if (m.role === "assistant") {
+      const text = m.text || "";
+      const a = {role: "assistant", text, reasoning: m.reasoning || "", tools: (m.tool_calls || []).map((c) => toolOf(c, text.length))};
+      calls = [...a.tools];
+      out.push(a);
+    } else if (m.role === "tool") {
+      const result = (m.text || "") + (m.images ? ` [${m.images} image${m.images > 1 ? "s" : ""}]` : "");
+      let c = calls.shift();
+      if (!c) {                                    // a result with no call before it: shown on its own
+        c = {name: "tool result", tool: "tool result", arguments: null, at: 0};
+        out.push({role: "assistant", text: "", reasoning: "", tools: [c]});
+      }
+      Object.assign(c, {result, ok: true, chars: result.length, state: "done"});
+    }
+  }
+  const r = rec.reply || {};
+  const text = r.content != null ? r.content : rec.output || "";
+  const tps = row.decode_tok_s ? ` at ${fmt(row.decode_tok_s, 1)} tok/s` : "";
+  const finish = {stop: "", length: " · max tokens", cancel: " · stopped", disconnect: " · client closed", error: " · error"}[row.finish] ?? ` · ${row.finish}`;
+  out.push({role: "assistant", text, reasoning: r.reasoning != null ? r.reasoning : rec.reasoning || "",
+            tools: (r.tool_calls || []).map((c) => toolOf(c, text.length)),
+            error: rec.error && rec.error.message ? rec.error.message : null,
+            meta: `This request's reply · ${fmt(row.output_tokens)} tokens${tps}${finish}`});
+  return {messages: out, omitted: t.omitted || 0};
+}
+async function viewRequest(row) {
+  if (busy) { toast("warn", "Still writing", "Your chat is writing an answer: stop it or let it finish first."); return; }
+  let rec;
+  try {
+    const r = await fetch(`api/requests?id=${encodeURIComponent(row.record_id)}`, {headers: headers()});
+    if (r.status === 404) { toast("warn", "No longer kept", "The API request monitor keeps the last 100 requests."); return; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    rec = await r.json();
+  } catch (e) {
+    toast("error", "Cannot read this request", String(e.message || e));
+    return;
+  }
+  const t = transcriptMessages(rec, row);
+  viewing = {messages: t.messages, row};
+  const when = new Date(row.time * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  $("view-title").textContent = `Request at ${when}`;
+  $("view-sub").textContent = [`POST ${rec.path}`, rec.model, `${fmt(row.prompt_tokens)} prompt tokens`,
+    t.omitted ? `${fmt(t.omitted)} earlier messages not kept` : null].filter(Boolean).join(" · ");
+  $("view-bar").hidden = false;
+  $("view-chat").dataset.viewing = "true";
+  document.querySelector("#view-chat .composer-wrap").hidden = true;
+  showTab("chat");
+  renderChat();
+  stickToBottom = false;                           // read from the top
+  $("chat-scroll").scrollTop = 0;
+}
+function endView() {
+  viewing = null;
+  $("view-bar").hidden = true;
+  delete $("view-chat").dataset.viewing;
+  document.querySelector("#view-chat .composer-wrap").hidden = false;
+  renderChat();
+}
+$("view-back").onclick = () => { endView(); $("input").focus(); };
 // Follow the answer while the reader has not left (#4014). Asking "am I within 120 px of the bottom?" on every frame pulled
 // the view back after every wheel notch (a notch is about 100 px), so scrolling up during a long answer only worked by
 // dragging the scrollbar. Now the reader's own input lets go (wheel up, a finger or a key moving up, the scrollbar), and a
@@ -1027,12 +1122,12 @@ $("chat").addEventListener("click", (e) => {
     return;
   }
   const mc = e.target.closest("[data-msg-copy]");
-  if (mc) { const i = +mc.closest(".st-msg").dataset.i; copyText(messages[i].text, mc); return; }
+  if (mc) { const i = +mc.closest(".st-msg").dataset.i; copyText(shown()[i].text, mc); return; }
   // a tool block: its open state lives in the message (the answer is rebuilt while it streams), so the click sets it
   const sum = e.target.closest(".tool-call > summary");
   if (sum) {
     e.preventDefault();
-    const el = sum.closest(".st-msg"), m = messages[+el.dataset.i], t = m && m.tools && m.tools[+sum.parentElement.dataset.tool];
+    const el = sum.closest(".st-msg"), m = shown()[+el.dataset.i], t = m && m.tools && m.tools[+sum.parentElement.dataset.tool];
     if (!t) return;
     t.open = !t.open;
     updateAssistant(el, m, !!busy && busy.msg === m);
@@ -1044,7 +1139,7 @@ $("chat").addEventListener("toggle", (e) => {
   if (d._auto) { d._auto = false; return; }          // our own open/close, not the user's
   d.dataset.touched = "1";
   const body = d.querySelector(".thinking");
-  if (d.open && body.dataset.pending) { body.textContent = messages[+d.closest(".st-msg").dataset.i].reasoning; delete body.dataset.pending; }
+  if (d.open && body.dataset.pending) { body.textContent = shown()[+d.closest(".st-msg").dataset.i].reasoning; delete body.dataset.pending; }
 }, true);
 
 function apiMessages() {
@@ -1519,7 +1614,7 @@ $("s-apply").onclick = async () => {
   if (settings.whileBusy === "wait" && pending) releasePending();    // "wait" parks nothing: a waiting message goes back to the box
   setBusy(!!busy);
   for (const el of $("chat").querySelectorAll(".st-msg--assistant")) {
-    const m = messages[+el.dataset.i];
+    const m = shown()[+el.dataset.i];
     updateAssistant(el, m, !!busy && busy.msg === m);  // the element send() holds stays the same while an answer streams
   }
   const share = checked("s-share");
