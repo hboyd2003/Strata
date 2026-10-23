@@ -4879,7 +4879,8 @@ class Service:
                                                     "prefill_tok_s_mean": self._prefill_tok_s_mean()},
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
                                        gpu_indices=getattr(self, "gpu_indices", None),
-                                       amd=getattr(self, "backend", None) == "hip")
+                                       amd=getattr(self, "backend", None) == "hip",
+                                       temp_sensor=getattr(self, "gpu_temp_sensor", None) or "edge")
             if getattr(self, "engine", None) is not None and hasattr(self.engine, "gpu_busy"):
                 # #1317: the quick frozen-engine check does not end an engine whose GPU is busy (a long prompt chunk on a
                 # slow card keeps the GPU at work while the host thread sleeps)
@@ -9463,6 +9464,11 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.terminal_configured_split = (layer_split_value(cfg) if a.engine == "strata" and layer_split_of(cfg)
                                      else None)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
+    temp_sensor = cfg.get("gpu_temp_sensor") or "edge"  # the AMD card's temperature probe on the Monitor
+    if temp_sensor not in ("edge", "junction", "mem"):
+        raise SystemExit("[strata] config \"gpu_temp_sensor\" must be \"edge\", \"junction\" or \"mem\", "
+                         f"not {temp_sensor!r}")
+    svc.gpu_temp_sensor = temp_sensor
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
