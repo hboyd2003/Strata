@@ -925,12 +925,13 @@ bool file_tier_unbuffered(const std::vector<std::string>& paths, uint64_t arena_
     // #1194: the experts read from the files are a skewed set: a cache holding a twentieth of them (at least 1.5 GiB)
     // serves most of the repeats, and beat the unbuffered reads at every room measured (it reads 2 to 7 times less from
     // the drive).  `avail` already has what this process and the cgroup hold taken off, so 1 GiB is left for the rest.
-    // Upstream #1752 (KevinX8, 1d6fd9f): on gfx906, ROCm queues can be suspended while reclaim works around the
-    // HMM-tracked arena; keep the older full-read room rule there by default. The Linux override permits comparing or
-    // reverting either rule.
+    // #1752 (KevinX8): ROCm queues are suspended while the kernel reclaims around the process's HMM-tracked arena
+    // (#1691) on an MI50 (gfx906): the cached reads churn the page cache and reclaim unmaps the arena, so the gfx906
+    // backend keeps the old room >= read_bytes rule.  Other HIP cards (gfx1201 measured: not affected) keep the new
+    // rule; STRATA_FILE_CACHE_OLD_RULE=1 / 0 forces the old rule on / off on any Linux build.  The selection lives in
+    // file_cache_keeps_for_tier so platform_memory_test covers it without a GPU runtime.
     const char* old_rule_env = std::getenv("STRATA_FILE_CACHE_OLD_RULE");
-    bool old_rule = strata::platform::file_cache_old_rule_default();   // (also read by the #3237 drive probe below)
-    if (old_rule_env != nullptr && old_rule_env[0] != '\0') old_rule = old_rule_env[0] != '0';
+    const bool old_rule = strata::platform::file_cache_old_rule(old_rule_env);
     const bool keepable = strata::platform::file_cache_keeps_for_tier(avail, arena_bytes, read_bytes, old_rule_env);
     char msg[256];
     std::snprintf(msg, sizeof msg, "%.1f GiB available, %.1f GiB of it still to be taken by the RAM copy, %.1f GiB "
