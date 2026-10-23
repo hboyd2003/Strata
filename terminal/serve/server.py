@@ -182,6 +182,7 @@ from serve.server_parts.engines import (  # noqa: F401  (moved unchanged, file s
     PARALLEL_MAX,
     QueueCancelled,
     QueueWaitExpired,
+    REQUEST_PARAMS,
     SPLIT_MAX_LANES,
     ServerStopping,
     SessionRefused,
@@ -242,6 +243,7 @@ from serve.server_parts.engines import (  # noqa: F401  (moved unchanged, file s
     pool_cores_args,
     profile_shape,
     read_engine_stage_log,
+    request_params,
     sh_stream_warning,
     start_exit_note,
     start_failure_hint,
@@ -5368,6 +5370,7 @@ class Service:
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
+                  "params": request_params(req),
                   "input": raw[:262144], "input_truncated": len(raw) > 262144,
                   "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
                   "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,
