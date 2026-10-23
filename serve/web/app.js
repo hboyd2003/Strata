@@ -75,7 +75,6 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
 let tab = "chat";
 function showTab(name) {
   tab = ["chat", "images", "monitor", "about"].includes(name) ? name : "chat";
-  if (tab !== "chat" && viewing) endView();
   for (const b of document.querySelectorAll(".st-tab")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
   for (const v of ["chat", "images", "monitor", "about"]) $(`view-${v}`).hidden = v !== tab;
   if (tab === "images") $("img-prompt").focus();
@@ -528,14 +527,13 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   // recent requests
   const body = $("req-body");
   if (!requests.length) {
-    body.innerHTML = `<tr><td colspan="10" class="muted">No requests yet</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="muted">No requests yet</td></tr>`;
   } else {
     const badge = {stop: ["", "Done"], length: ["", "Max tokens"], cancel: ["st-badge--queued", "Stopped"],
                    disconnect: ["st-badge--queued", "Closed"], error: ["st-badge--error", "Error"],
                    timeout: ["st-badge--queued", "Timeout"]};
     body.innerHTML = requests.slice(0, reqShowAll ? requests.length : 12).map((r) => {
       const [cls, text] = badge[r.finish] || ["", r.finish || "–"];
-      const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
       const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="experimental speed projection ${r.projection ? "on" : "off"}">${r.projection ? "ESP" : "stock"}</span>`;
       // #588: the VRAM share; the PCIe share (--pcie-frac) beside it when there is one
       const hit = r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%` +
@@ -543,9 +541,9 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
       // Reused tokens are not prefetched again. Match the Monitor's existing Prefill metric.
       const fresh = r.prompt_tokens == null ? null : Math.max(0, r.prompt_tokens - (r.reused || 0));
       const prefillRate = fresh > 0 && r.prompt_ms > 0 ? fresh / (r.prompt_ms / 1000) : null;
-      return `<tr><td>${esc(t)}</td><td><span class="st-badge ${cls}">${esc(text)}</span>${proj}</td><td class="num">${fmt(r.prompt_tokens)}</td>
+      return `<tr${r.record_id ? ' class="req-row--open"' : ""}><td>${timeCell(r)}</td><td><span class="st-badge ${cls}">${esc(text)}</span>${proj}</td><td class="num">${fmt(r.prompt_tokens)}</td>
         <td class="num">${fmt(r.reused)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(prefillRate)}</td><td class="num">${fmt(r.decode_tok_s, 1)}</td>
-        <td class="num">${hit}</td><td class="num">${fmt(r.duration_s, 1)} s</td><td>${viewButton(r)}</td></tr>`;
+        <td class="num">${hit}</td><td class="num">${fmt(r.duration_s, 1)} s</td></tr>`;
     }).join("");
   }
   const all = $("req-all");
@@ -598,19 +596,155 @@ document.addEventListener("click", (e) => {
   if (b) copyText(b.dataset.copy, b);
 });
 $("req-all").addEventListener("click", () => { reqShowAll = !reqShowAll; if (lastMetrics) render(lastMetrics); });
-// #332: a request's messages and reply, kept by the API request monitor ("api_monitor": true in the run config)
-function viewButton(r) {
-  if (r.record_id) return `<button class="st-btn st-btn--icon req-view" data-view="${esc(r.id)}" title="Read this request as a chat" aria-label="Read as a chat">${icon("chat")}</button>`;
+// #332: a recent request read as a chat, in a popup over the Monitor: its messages as the model saw them, the reply
+// it wrote, and what this server measured.  The API request monitor keeps them ("api_monitor": true in the run config).
+function timeCell(r) {
+  const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  if (r.record_id) return `<span class="req-time"><button class="st-btn st-btn--icon req-view" data-view="${esc(r.id)}" title="Read this request as a chat" aria-label="Read as a chat">${icon("chat")}</button>${esc(t)}</span>`;
   const why = lastMetrics && lastMetrics.transcripts ? "This request's messages were not kept"
     : "To read requests as a chat, turn on \"api_monitor\" in the run config (it keeps the last 100 requests' messages in memory)";
-  return `<button class="st-btn st-btn--icon req-view" disabled title="${esc(why)}" aria-label="${esc(why)}">${icon("chat")}</button>`;
+  return `<span class="req-time"><button class="st-btn st-btn--icon req-view" disabled title="${esc(why)}" aria-label="${esc(why)}">${icon("chat")}</button>${esc(t)}</span>`;
 }
-$("req-body").addEventListener("click", async (e) => {
-  const b = e.target.closest("[data-view]");
+$("req-body").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr");
+  const b = tr && tr.querySelector("[data-view]");
   if (!b || !lastMetrics) return;
   const row = (lastMetrics.requests || []).find((r) => r.id === b.dataset.view);
-  if (row) await viewRequest(row);
+  if (row) openRequest(row);
 });
+let rv = null;                        // the request in the popup: {messages}
+chatEvents($("rv-chat"), () => (rv ? rv.messages : []), () => null);
+const FINISH = {stop: "Done", length: "Max tokens", cancel: "Stopped", disconnect: "Client closed", error: "Error"};
+function transcriptMessages(rec, row) {
+  const out = [], t = rec.transcript || {messages: [], omitted: 0};
+  let calls = [];                                  // the calls still waiting for a result, in order
+  const toolOf = (c, at) => ({name: c.name, tool: c.name, arguments: c.arguments, at, state: "called"});
+  for (const m of t.messages) {
+    const text = m.text || "";
+    if (m.role === "system") {
+      if (text) out.push({role: "system", text});
+    } else if (m.role === "user") {
+      if (text || m.images) out.push({role: "user", who: "User", text, files: [],
+                                      images: Array.from({length: m.images || 0}, () => ({name: "image"}))});
+    } else if (m.role === "assistant") {
+      const a = {role: "assistant", text, reasoning: m.reasoning || "", tools: (m.tool_calls || []).map((c) => toolOf(c, text.length))};
+      calls = [...a.tools];
+      if (!text && !a.tools.length) {
+        if (!a.reasoning) continue;                // nothing to show
+        a.note = "Thought, but wrote no answer";
+      }
+      out.push(a);
+    } else if (m.role === "tool") {
+      const result = text + (m.images ? ` [${m.images} image${m.images > 1 ? "s" : ""}]` : "");
+      let c = calls.shift();
+      if (!c) {                                    // a result with no call before it: shown on its own
+        c = {name: "tool result", tool: "tool result", arguments: null, at: 0};
+        out.push({role: "assistant", text: "", reasoning: "", tools: [c]});
+      }
+      Object.assign(c, {result, ok: true, chars: result.length, state: "done"});
+    }
+  }
+  const r = rec.reply || {};
+  const text = r.content != null ? r.content : rec.output || "";
+  const reply = {role: "assistant", text, reasoning: r.reasoning != null ? r.reasoning : rec.reasoning || "",
+                 tools: (r.tool_calls || []).map((c) => toolOf(c, text.length)),
+                 error: rec.error && rec.error.message ? rec.error.message : null,
+                 meta: `The reply · ${fmt(row.output_tokens)} tokens${row.decode_tok_s ? ` at ${fmt(row.decode_tok_s, 1)} tok/s` : ""}`};
+  if (!text && !reply.tools.length && !reply.error) {
+    const read = row.prompt_read != null && row.prompt_total ? ` after reading ${fmt(row.prompt_read)} of ${fmt(row.prompt_total)} prompt tokens` : "";
+    reply.note = row.finish === "cancel" || row.finish === "disconnect"
+      ? `No reply: the client closed the request${read}.`
+      : reply.reasoning ? "Thought, but wrote no answer." : "No reply text.";
+  }
+  out.push(reply);
+  return {messages: out, omitted: t.omitted || 0};
+}
+function requestFacts(rec, row) {
+  const s = (v, d = 1) => (v == null ? null : `${fmt(v, d)} s`);
+  const pct = (v) => (v == null ? null : `${fmt(100 * v, 1)}%`);
+  const fresh = row.prompt_tokens == null ? null : Math.max(0, row.prompt_tokens - (row.reused || 0));
+  const p = rec.params || {};
+  const sampling = ["temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "repetition_penalty", "seed"]
+    .filter((k) => p[k] != null).map((k) => `${k} ${p[k]}`).join(", ");
+  const maxTok = p.max_tokens ?? p.max_completion_tokens ?? p.max_output_tokens;
+  const thinking = [p.reasoning_effort, p.effort, p.thinking, p.thinking_budget ? `budget ${fmt(p.thinking_budget)}` : null].filter((x) => x != null && x !== "").join(", ");
+  const drafts = row.drafts_offered ? `${fmt(row.drafts_accepted)} of ${fmt(row.drafts_offered)} accepted (${fmt((100 * row.drafts_accepted) / row.drafts_offered)}%)` : null;
+  const prefill = fresh > 0 && row.prompt_ms > 0 ? `${fmt(fresh / (row.prompt_ms / 1000))} tok/s` : null;
+  return [
+    ["Request", [
+      ["Status", `${FINISH[row.finish] || row.finish || "–"}${rec.http_status && rec.http_status !== 200 ? ` (HTTP ${rec.http_status})` : ""}`],
+      ["API", `POST ${rec.path}${rec.stream ? " · streamed" : ""}`],
+      ["Model", rec.model],
+      ["Started", new Date(row.time * 1000).toLocaleString()],
+      ["Response format", rec.response_format],
+      ["Max tokens", maxTok == null ? null : maxTok > 0 ? fmt(maxTok) : "no cap"],
+      ["Thinking", thinking || null],
+      ["Sampling", sampling || null],
+      ["Tools offered", p.tools ? `${fmt(p.tools)}${p.tool_names && p.tool_names.length ? `: ${p.tool_names.join(", ")}${p.tools > p.tool_names.length ? ", …" : ""}` : ""}` : null],
+      ["Tool choice", p.tool_choice],
+    ]],
+    ["Prompt", [
+      ["Tokens", row.prompt_total != null ? fmt(row.prompt_total) : fmt(row.prompt_tokens)],
+      ["Reused from cache", row.reused != null ? `${fmt(row.reused)}${row.prompt_total ? ` (${fmt((100 * row.reused) / row.prompt_total)}%)` : ""}` : null],
+      ["Read", row.prompt_read != null ? fmt(row.prompt_read) : fresh != null ? fmt(fresh) : null],
+      ["Read time", s(row.prompt_ms != null ? row.prompt_ms / 1000 : null)],
+      ["Prefill speed", prefill],
+      ["Messages", `${fmt((rec.transcript || {messages: []}).messages.length)}${rec.transcript && rec.transcript.omitted ? ` (${fmt(rec.transcript.omitted)} earlier not kept)` : ""}`],
+    ]],
+    ["Reply", [
+      ["Tokens", fmt(row.output_tokens)],
+      ["Decode speed", row.decode_tok_s ? `${fmt(row.decode_tok_s, 1)} tok/s` : null],
+      ["Decode time", s(row.decode_ms ? row.decode_ms / 1000 : null)],
+      ["MTP drafts", drafts],
+      ["VRAM hit rate", row.hit_rate == null ? null : `${pct(row.hit_rate)}${row.pcie_share ? ` (+${pct(row.pcie_share)} PCIe)` : ""}`],
+      ["Thinking recoveries", row.reasoning_recoveries ? fmt(row.reasoning_recoveries) : null],
+    ]],
+    ["Time", [
+      ["Waited in queue", s(rec.queue_s, 2)],
+      ["Model load", rec.load_s ? s(rec.load_s) : null],
+      ["First token", s(rec.first_token_s ?? row.first_engine_token_s, 2)],
+      ["Total", s(rec.wallclock_s ?? row.duration_s)],
+    ]],
+  ];
+}
+async function openRequest(row) {
+  let rec;
+  try {
+    const r = await fetch(`api/requests?id=${encodeURIComponent(row.record_id)}`, {headers: headers()});
+    if (r.status === 404) { toast("warn", "No longer kept", "The API request monitor keeps the last 100 requests."); return; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    rec = await r.json();
+  } catch (e) {
+    toast("error", "Cannot read this request", String(e.message || e));
+    return;
+  }
+  const t = transcriptMessages(rec, row);
+  rv = {messages: t.messages};
+  const when = new Date(row.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  $("rv-title").textContent = `Request at ${when}`;
+  $("rv-sub").textContent = [`${fmt(row.prompt_total ?? row.prompt_tokens)} prompt tokens`, `${fmt(row.output_tokens)} written`,
+                             FINISH[row.finish] || row.finish].filter(Boolean).join(" · ");
+  const chat = $("rv-chat");
+  chat.replaceChildren(...(t.omitted ? [Object.assign(document.createElement("p"), {className: "muted small rv-omitted",
+    textContent: `${fmt(t.omitted)} earlier messages were not kept.`})] : []), ...t.messages.map((m, i) => msgEl(m, i, true)));
+  const side = $("rv-side");
+  side.replaceChildren();
+  for (const [title, rows] of requestFacts(rec, row)) {
+    const h = document.createElement("div");
+    h.className = "rv-side__title";
+    h.textContent = title;
+    const dl = document.createElement("dl");
+    dl.className = "facts rv-facts";
+    facts(dl, rows);
+    if (dl.childElementCount) side.append(h, dl);
+  }
+  if (!$("rv").open) $("rv").showModal();
+  $("rv-scroll").scrollTop = 0;
+  $("rv-scroll").focus();                          // the arrow keys scroll the chat; no focus ring on the close button
+}
+$("rv-close").onclick = () => $("rv").close();
+$("rv").addEventListener("click", (e) => { if (e.target === $("rv")) $("rv").close(); });   // the backdrop
+$("rv").addEventListener("close", () => { rv = null; $("rv-chat").replaceChildren(); });
 
 // ------------------------------------------------------------------ MCP servers (GET /mcp)
 // Tools from the MCP servers in the run config: the chat offers them to the model (opt-in per request,
@@ -815,7 +949,7 @@ let busy = null;                      // {controller, msg, cut, cutAfterTool}
 let pending = null;                   // a message parked while an answer is written: {text, images, files, mode}
 function timeStr(t) { return new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
 
-function msgEl(m, i) {
+function msgEl(m, i, readOnly) {
   const el = document.createElement("div");
   el.className = `st-msg st-msg--${m.role}`;
   el.dataset.i = i;
@@ -863,7 +997,7 @@ function msgEl(m, i) {
       `<button class="st-btn st-btn--icon" data-msg-copy aria-label="${esc(tr("chat.copyAnswer", "Copy the answer"))}" title="${esc(tr("chat.copy", "Copy"))}">${icon("copy")}</button></div>`;
     updateAssistant(el, m, false);
   }
-  const actions = viewing ? null : msgActions(m, i);   // edit / regenerate / rewind (chats-ui.js), when switched on; none on a request read as a chat
+  const actions = readOnly ? null : msgActions(m, i);   // edit / regenerate / rewind (chats-ui.js), when switched on; none in the request popup
   if (actions) el.appendChild(actions);
   return el;
 }
@@ -972,6 +1106,9 @@ function updateAssistant(el, m, streaming) {
   if (m.error) {
     bubble.innerHTML = `<div class="msg-error"></div>`;
     bubble.firstChild.textContent = m.error;
+  } else if (m.note && !m.text && !(m.tools && m.tools.length)) {
+    bubble.innerHTML = `<span class="muted"></span>`;
+    bubble.firstChild.textContent = m.note;
   } else if (!m.text && streaming && !(m.tools && m.tools.length)) {
     bubble.innerHTML = m.reasoning ? `<span class="muted cursor">Writing</span>` : `<span class="cursor"></span>`;
   } else {
@@ -984,88 +1121,16 @@ function updateAssistant(el, m, streaming) {
   el.querySelector("[data-msg-copy]").hidden = streaming || !m.text;
 }
 function renderChat() {
-  const chat = $("chat"), list = shown();
+  const chat = $("chat");
   chat.querySelectorAll(".st-msg").forEach((e) => e.remove());
-  $("chat-empty").hidden = list.length > 0;
-  list.forEach((m, i) => chat.appendChild(msgEl(m, i)));
+  $("chat-empty").hidden = messages.length > 0;
+  messages.forEach((m, i) => chat.appendChild(msgEl(m, i)));
   renderSidebar();
   renderParent();
   renderUndoBar();
   scrollDown(true);
 }
 
-// ------------------------------------------------------------------ a recent request read as a chat
-// The Monitor's request table opens a request in this view, read-only: its messages as the model saw them and the
-// reply it wrote.  The user's own chat stays as it was (not saved over) and comes back with "Back to your chat".
-let viewing = null;                   // {messages, row}
-const shown = () => (viewing ? viewing.messages : messages);
-function transcriptMessages(rec, row) {
-  const out = [], t = rec.transcript || {messages: [], omitted: 0};
-  let calls = [];                                  // the calls still waiting for a result, in order
-  const toolOf = (c, at) => ({name: c.name, tool: c.name, arguments: c.arguments, at, state: "called"});
-  for (const m of t.messages) {
-    if (m.role === "system") out.push({role: "system", text: m.text || ""});
-    else if (m.role === "user") out.push({role: "user", who: "User", text: m.text || "", files: [],
-                                          images: Array.from({length: m.images || 0}, () => ({name: "image"}))});
-    else if (m.role === "assistant") {
-      const text = m.text || "";
-      const a = {role: "assistant", text, reasoning: m.reasoning || "", tools: (m.tool_calls || []).map((c) => toolOf(c, text.length))};
-      calls = [...a.tools];
-      out.push(a);
-    } else if (m.role === "tool") {
-      const result = (m.text || "") + (m.images ? ` [${m.images} image${m.images > 1 ? "s" : ""}]` : "");
-      let c = calls.shift();
-      if (!c) {                                    // a result with no call before it: shown on its own
-        c = {name: "tool result", tool: "tool result", arguments: null, at: 0};
-        out.push({role: "assistant", text: "", reasoning: "", tools: [c]});
-      }
-      Object.assign(c, {result, ok: true, chars: result.length, state: "done"});
-    }
-  }
-  const r = rec.reply || {};
-  const text = r.content != null ? r.content : rec.output || "";
-  const tps = row.decode_tok_s ? ` at ${fmt(row.decode_tok_s, 1)} tok/s` : "";
-  const finish = {stop: "", length: " · max tokens", cancel: " · stopped", disconnect: " · client closed", error: " · error"}[row.finish] ?? ` · ${row.finish}`;
-  out.push({role: "assistant", text, reasoning: r.reasoning != null ? r.reasoning : rec.reasoning || "",
-            tools: (r.tool_calls || []).map((c) => toolOf(c, text.length)),
-            error: rec.error && rec.error.message ? rec.error.message : null,
-            meta: `This request's reply · ${fmt(row.output_tokens)} tokens${tps}${finish}`});
-  return {messages: out, omitted: t.omitted || 0};
-}
-async function viewRequest(row) {
-  if (busy) { toast("warn", "Still writing", "Your chat is writing an answer: stop it or let it finish first."); return; }
-  let rec;
-  try {
-    const r = await fetch(`api/requests?id=${encodeURIComponent(row.record_id)}`, {headers: headers()});
-    if (r.status === 404) { toast("warn", "No longer kept", "The API request monitor keeps the last 100 requests."); return; }
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    rec = await r.json();
-  } catch (e) {
-    toast("error", "Cannot read this request", String(e.message || e));
-    return;
-  }
-  const t = transcriptMessages(rec, row);
-  viewing = {messages: t.messages, row};
-  const when = new Date(row.time * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit", second: "2-digit"});
-  $("view-title").textContent = `Request at ${when}`;
-  $("view-sub").textContent = [`POST ${rec.path}`, rec.model, `${fmt(row.prompt_tokens)} prompt tokens`,
-    t.omitted ? `${fmt(t.omitted)} earlier messages not kept` : null].filter(Boolean).join(" · ");
-  $("view-bar").hidden = false;
-  $("view-chat").dataset.viewing = "true";
-  document.querySelector("#view-chat .composer-wrap").hidden = true;
-  showTab("chat");
-  renderChat();
-  stickToBottom = false;                           // read from the top
-  $("chat-scroll").scrollTop = 0;
-}
-function endView() {
-  viewing = null;
-  $("view-bar").hidden = true;
-  delete $("view-chat").dataset.viewing;
-  document.querySelector("#view-chat .composer-wrap").hidden = false;
-  renderChat();
-}
-$("view-back").onclick = () => { endView(); $("input").focus(); };
 // Follow the answer while the reader has not left (#4014). Asking "am I within 120 px of the bottom?" on every frame pulled
 // the view back after every wheel notch (a notch is about 100 px), so scrolling up during a long answer only worked by
 // dragging the scrollbar. Now the reader's own input lets go (wheel up, a finger or a key moving up, the scrollbar), and a
@@ -1097,50 +1162,56 @@ function scrollDown(force) {
   }, {passive: true});
 })();
 
-$("chat").addEventListener("click", (e) => {
-  const cc = e.target.closest("[data-code-copy]");
-  if (cc) { copyText(cc.closest(".st-code").querySelector("pre").textContent, cc); return; }
-  // an svg/html block: flip between its code and its sandboxed preview. Closing the preview also turns scripts off.
-  const pv = e.target.closest("[data-preview-toggle]");
-  if (pv) {
-    const box = pv.closest(".st-code");
-    const on = box.dataset.preview === "true";
-    if (on) delete box.dataset.preview; else box.dataset.preview = "true";
-    pv.setAttribute("aria-pressed", String(!on));
-    pv.setAttribute("aria-label", on ? pv.dataset.previewLabel : tr("preview.showCode", "Show the code"));
-    const fr = box.querySelector("iframe");
-    if (on) fillPreview(fr, false, true);
-    else if (!fr.dataset.opened) fillPreview(fr, false);
-    return;
-  }
-  const rs = e.target.closest("[data-preview-scripts]");
-  if (rs) {
-    const fr = rs.closest(".st-code").querySelector("iframe");
-    const run = fr.dataset.scripts !== "1";
-    if (run && !confirm(tr("preview.confirm", "Run this code with scripts?\n\nIt runs in your browser, cut off from this chat and from the network, but it can still freeze the tab, and it is code the model wrote.\n\nOnly this block, and only until you close the preview."))) return;
-    fillPreview(fr, run);
-    return;
-  }
-  const mc = e.target.closest("[data-msg-copy]");
-  if (mc) { const i = +mc.closest(".st-msg").dataset.i; copyText(shown()[i].text, mc); return; }
-  // a tool block: its open state lives in the message (the answer is rebuilt while it streams), so the click sets it
-  const sum = e.target.closest(".tool-call > summary");
-  if (sum) {
-    e.preventDefault();
-    const el = sum.closest(".st-msg"), m = shown()[+el.dataset.i], t = m && m.tools && m.tools[+sum.parentElement.dataset.tool];
-    if (!t) return;
-    t.open = !t.open;
-    updateAssistant(el, m, !!busy && busy.msg === m);
-  }
-});
-$("chat").addEventListener("toggle", (e) => {
-  const d = e.target;
-  if (d.tagName !== "DETAILS" || !d.classList.contains("think")) return;
-  if (d._auto) { d._auto = false; return; }          // our own open/close, not the user's
-  d.dataset.touched = "1";
-  const body = d.querySelector(".thinking");
-  if (d.open && body.dataset.pending) { body.textContent = shown()[+d.closest(".st-msg").dataset.i].reasoning; delete body.dataset.pending; }
-}, true);
+
+// the clicks in a list of messages - the chat's, or a request's in the popup: `list` gives its messages, `live` the one
+// being written (if any)
+function chatEvents(box, list, live) {
+  box.addEventListener("click", (e) => {
+    const cc = e.target.closest("[data-code-copy]");
+    if (cc) { copyText(cc.closest(".st-code").querySelector("pre").textContent, cc); return; }
+    // an svg/html block: flip between its code and its sandboxed preview. Closing the preview also turns scripts off.
+    const pv = e.target.closest("[data-preview-toggle]");
+    if (pv) {
+      const box = pv.closest(".st-code");
+      const on = box.dataset.preview === "true";
+      if (on) delete box.dataset.preview; else box.dataset.preview = "true";
+      pv.setAttribute("aria-pressed", String(!on));
+      pv.setAttribute("aria-label", on ? pv.dataset.previewLabel : tr("preview.showCode", "Show the code"));
+      const fr = box.querySelector("iframe");
+      if (on) fillPreview(fr, false, true);
+      else if (!fr.dataset.opened) fillPreview(fr, false);
+      return;
+    }
+    const rs = e.target.closest("[data-preview-scripts]");
+    if (rs) {
+      const fr = rs.closest(".st-code").querySelector("iframe");
+      const run = fr.dataset.scripts !== "1";
+      if (run && !confirm(tr("preview.confirm", "Run this code with scripts?\n\nIt runs in your browser, cut off from this chat and from the network, but it can still freeze the tab, and it is code the model wrote.\n\nOnly this block, and only until you close the preview."))) return;
+      fillPreview(fr, run);
+      return;
+    }
+    const mc = e.target.closest("[data-msg-copy]");
+    if (mc) { const i = +mc.closest(".st-msg").dataset.i; copyText(list()[i].text, mc); return; }
+    // a tool block: its open state lives in the message (the answer is rebuilt while it streams), so the click sets it
+    const sum = e.target.closest(".tool-call > summary");
+    if (sum) {
+      e.preventDefault();
+      const el = sum.closest(".st-msg"), m = list()[+el.dataset.i], t = m && m.tools && m.tools[+sum.parentElement.dataset.tool];
+      if (!t) return;
+      t.open = !t.open;
+      updateAssistant(el, m, live() === m);
+    }
+  });
+  box.addEventListener("toggle", (e) => {
+    const d = e.target;
+    if (d.tagName !== "DETAILS" || !d.classList.contains("think")) return;
+    if (d._auto) { d._auto = false; return; }          // our own open/close, not the user's
+    d.dataset.touched = "1";
+    const body = d.querySelector(".thinking");
+    if (d.open && body.dataset.pending) { body.textContent = list()[+d.closest(".st-msg").dataset.i].reasoning; delete body.dataset.pending; }
+  }, true);
+}
+chatEvents($("chat"), () => messages, () => busy && busy.msg);
 
 function apiMessages() {
   const out = [];
@@ -1614,7 +1685,7 @@ $("s-apply").onclick = async () => {
   if (settings.whileBusy === "wait" && pending) releasePending();    // "wait" parks nothing: a waiting message goes back to the box
   setBusy(!!busy);
   for (const el of $("chat").querySelectorAll(".st-msg--assistant")) {
-    const m = shown()[+el.dataset.i];
+    const m = messages[+el.dataset.i];
     updateAssistant(el, m, !!busy && busy.msg === m);  // the element send() holds stays the same while an answer streams
   }
   const share = checked("s-share");
