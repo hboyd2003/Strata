@@ -1,0 +1,97 @@
+{
+  "schema": "gfx906-image-smoke-v1",
+  "date_utc": "2026-10-22",
+  "classification": "short model-backed serial inference smoke of a locally built image; not a performance benchmark or parity test",
+  "source": {
+    "repository": "cassettesgoboom/strata-gfx906",
+    "source_commit": "e7650b223658fb7ec5eb71b9cc3eb12f43ca181b",
+    "dockerfile": "docker/gfx906/Dockerfile (added in the commit that adds this receipt; the engine sources are those of the source commit)",
+    "engine_version_reported": "0.1.47",
+    "native_sha256": "5bc5d7317d0830798e1a94cee6e79e67f2e6e2baec5bb204f2e21124f99f37f9",
+    "vision_cpu_sha256": "b1f18b3a6f96386e9853941b0cbaefdeb6695a7f2f9ff329a08ad1142cd7b86c",
+    "vision_hip_sha256": "edb70e98bb0b417bb328caa04bcfc783a577969f1de7d6520f276e1a18d7cad0",
+    "server_source_sha256": "90bdd6ee5349fc30eea436823a78cc0ebf5ea87b64d1aeee3ec891d202e62f8e"
+  },
+  "image": {
+    "base": "docker.io/mixa3607/rocm-gfx906:10.1-complete@sha256:b1d72163863a56b6b2bf498d159c1dc17627f8751aed6c8b8de2ebe9882972b4",
+    "base_rocm_build": "10.1.0-gfx906+20261018172427 (HIP 7.16.26385, AMD clang 24.0.0git)",
+    "local_image_id": "sha256:c5c2c6db804bd338e4ac88e93fcfa753a91382a107ce958ed4d59333263d8ecd",
+    "size_gb": 10.53,
+    "engine_build": "STRATA_HIP_GFX906=ON, CMAKE_HIP_ARCHITECTURES=gfx906, STRATA_PORTABLE=ON, Release, no extra HIP flags",
+    "published": false
+  },
+  "build_checks": {
+    "every_binary_libraries_resolve": true,
+    "imports": "serve.server, serve.prometheus, textual, torch 2.9.1+cpu, transformers, safetensors",
+    "help_runs": ["tools/iq_pack.py", "tools/mtp_fetch.py", "tools/mtp_pack.py", "tools/mtp_rt.py", "tools/nvfp4_local_pack.py", "setup.py", "tools/gfx906.py"]
+  },
+  "environment": {
+    "hardware_class": "one AMD Instinct MI50 32 GB, gfx906; the host also has an integrated wave32 Radeon",
+    "model_assets": "external Swift Qwen3.8 Flash-Next IQ3_S assets with a pack and MTP files built by the v0.1.41 tools; not distributed",
+    "config": "the operator's production server config, unchanged except lib_dirs: --max-context 155648, --kv int8, --spec 4 with the MTP draft layer, --batch-mtp (reported off: no --batch), --vision with the CPU picture reader, conversation cache 3072 MiB / 4 slots",
+    "mounts": "/models, /data and /config read-only",
+    "scheduler": "serial; AB/CD not present"
+  },
+  "runs": [
+    {
+      "name": "all GPUs visible",
+      "result": "engine refused to start (exit 2): it saw the integrated wave32 GPU beside the MI50 (upstream #1728) and asked for HIP_VISIBLE_DEVICES"
+    },
+    {
+      "name": "HIP_VISIBLE_DEVICES=0",
+      "server_ready_seconds": 27,
+      "expert_cache": "12451 slots, 23.63 GiB VRAM",
+      "requests": [
+        {
+          "kind": "initial_generation",
+          "http_status": 200,
+          "native_prompt_reused_tokens": 0,
+          "native_prompt_total_tokens": 52,
+          "native_generated_tokens": 130,
+          "native_decode_tok_s": 52.9,
+          "native_drafts_accepted_offered": [80, 132],
+          "client_first_content_seconds": 1.894,
+          "finish_reason": "stop"
+        },
+        {
+          "kind": "same_conversation_followup",
+          "http_status": 200,
+          "native_prompt_reused_tokens": 47,
+          "native_prompt_total_tokens": 145,
+          "native_generated_tokens": 120,
+          "native_decode_tok_s": 56.3,
+          "native_drafts_accepted_offered": [70, 128],
+          "client_first_content_seconds": 2.984,
+          "finish_reason": "stop"
+        },
+        {
+          "kind": "image_question",
+          "http_status": 200,
+          "input": "generated 128x128 PNG, left half red, right half blue",
+          "prompt_tokens": 71,
+          "completion_tokens": 110,
+          "answer_correct": true,
+          "finish_reason": "stop"
+        }
+      ],
+      "container_health": "healthy",
+      "docker_stop": "clean, 4 s, exit code 0"
+    }
+  ],
+  "result": {
+    "image_build": "pass",
+    "serial_inference_conversation_reuse_and_cpu_vision_smoke": "pass",
+    "gpu_vision_reader": "built and its libraries resolve; not exercised (the config selects the CPU reader)",
+    "prep_service_tools": "present and --help runs; a full pack or MTP preparation was not run",
+    "batch_slots": "not tested",
+    "ab_cd_runtime": "not present",
+    "native_token_parity": "not tested",
+    "persistent_recurrent_state_parity": "not tested"
+  },
+  "limitations": [
+    "Three short greedy requests on one card; sustained throughput, long contexts near 155K, batch slots and two-card splits were not exercised.",
+    "Outputs differ slightly from the native, non-portable build's smoke (130 vs 126 tokens on the first request) with a different expert-cache size; the engine notes that GPU-cached experts round differently from CPU ones. This is not a parity comparison.",
+    "The engine reported 586 MiB of VRAM free with everything loaded; a larger --vram-reserve-mib is advised for long runs.",
+    "The image was built and run locally and was not published or pulled from a registry."
+  ]
+}
