@@ -30,10 +30,10 @@ sam() { # sample "<secs> <vram_bytes>" lines for the engine pid until it is gone
   local pat="$1" t0 pid b
   t0=$(date +%s)
   while [ ! -e "$LOG.stop" ]; do
-    pid=$(pgrep -f "$pat" | head -1)
+    pid=$(pgrep -x "$pat" | head -1)   # -x by exe NAME: the wrapper/systemd scope reshuffles argv, -f missed it
     if [ -n "$pid" ]; then
-      b=$(rocm-smi --showpids 2>/dev/null | awk -v p="$pid" '$1==p{print $4; exit}')
-      echo "$(( $(date +%s) - t0 )) ${b:-0}" >> "$VLOG"
+      b=$(rocm-smi --showpids 2>/dev/null | awk -v p="$pid" '$1==p{gsub(/[^0-9]/,"",$4); print $4; exit}')
+      echo "$(( $(date +%s) - t0 )) ${b:--1}" >> "$VLOG"
     fi
     sleep 5
   done
@@ -53,28 +53,43 @@ if [ "$MODE" = direct ]; then
     --lora "$LORA" --lora-exps \
     --ids-file "$IDS" -n 200 > "$LOG" 2>&1 &
   ENG=$!
-  sam "$SAM_PAT" & SAM=$!
+  sam 'glm_generate' & SAM=$!
   wait "$ENG"; RC=$?
   touch "$LOG.stop"; wait "$SAM" 2>/dev/null
   echo "--- direct rc=$RC (134/1 = the serve death class; 0 = survive: then serve-only trigger) ---"
 else
   echo "--- serve: server + the crashing curl (thinking budget cuts at 128 -> cancel -> wrap-up) ---"
-  SAM_PAT='glm_generate --serve'
+  CFG=tools/glm/serve/strata-glm-mayal-gfx906.json
+  if [ -n "${2:-}" ]; then   # optional 2nd arg: --vram-margin override (temp config, original untouched)
+    CFG="logs/p4.3-cfg-margin$2-$STAMP.json"
+    python3 - "$2" "$CFG" <<'PYEOF'
+import json, sys
+margin, out = sys.argv[1], sys.argv[2]
+cfg = json.load(open("tools/glm/serve/strata-glm-mayal-gfx906.json"))
+a = cfg["args"]; i = a.index("--vram-margin") + 1
+a[i] = margin
+cfg["_comment"] = (cfg.get("_comment", "") + f"  TEMP (#32 vram-watch): --vram-margin {margin}.")
+json.dump(cfg, open(out, "w"), indent=2)
+PYEOF
+    echo "--- margin override $2 -> $CFG ---"
+  fi
   STRATA_NO_LARGEPAGES=1 python3 -m serve.server --engine strata \
-    --config tools/glm/serve/strata-glm-mayal-gfx906.json --port 8147 > "$LOG" 2>&1 &
+    --config "$CFG" --port 8147 > "$LOG" 2>&1 &
   SRV=$!
   for i in $(seq 1 90); do grep -q "ready: http" "$LOG" 2>/dev/null && break; sleep 2; done
-  grep -q "ready: http" "$LOG" || { echo "server never became ready; see $LOG"; kill -INT "$SRV" 2>/dev/null; exit 1; }
-  sam "$SAM_PAT" & SAM=$!
+  grep -q "ready: http" "$LOG" || { echo "server never became ready; see $LOG"; kill -9 "$SRV" 2>/dev/null; exit 1; }
+  sam 'glm_generate' & SAM=$!
   curl -s --max-time 900 http://127.0.0.1:8147/v1/chat/completions -H 'Content-Type: application/json' \
     -d '{"model":"glm","messages":[{"role":"user","content":"Say hello in three words."}],"max_tokens":256}' > "$LOG.curl"
   echo "--- curl -> $LOG.curl ---"
   touch "$LOG.stop"; wait "$SAM" 2>/dev/null
-  kill -INT "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+  kill -INT "$SRV" 2>/dev/null
+  for i in $(seq 1 15); do kill -0 "$SRV" 2>/dev/null || break; sleep 1; done
+  kill -9 "$SRV" 2>/dev/null   # engine already exited on its own; SIGKILL to the idle server touches no GPU state
 fi
 
 echo "--- VRAM curve (secs, GiB) ---"
-awk '{printf "%6s s  %8.3f GiB\n", $1, $2/1073741824}' "$VLOG"
+awk '{printf "%6s s  %8.3f GiB\n", $1, ($2<0?0:$2)/1073741824}' "$VLOG"
 echo "--- engine tail ---"
 if [ "$MODE" = direct ]; then tail -6 "$LOG"; else tail -6 /tmp/strata-glm-mayal-906.log; fi
 echo "DONE log=$LOG vram=$VLOG"
