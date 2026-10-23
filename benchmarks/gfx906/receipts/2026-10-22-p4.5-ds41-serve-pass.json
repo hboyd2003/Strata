@@ -1,0 +1,13 @@
+{
+  "task": "P4.5 (#23) CLOSED - DS4.1-Flash answers through the OpenAI-compatible API on gfx906",
+  "date": "2026-10-22",
+  "witness": {
+    "entry": "tools/v41/serve/serve_ds41.py --engine strata --config tools/v41/serve/strata-ds41-906.json (the shim; plain serve.server renders the comment-only chat_template to an empty prompt - ds41_generate.cpp:1125 refuses, documented d27331de)",
+    "request": "POST /v1/chat/completions 'What is 17*23?' max_tokens=256",
+    "response": "content='17 × 23 = **391**.' reasoning streamed, finish_reason=stop",
+    "usage": "prompt 37 tok in 5.91 s (6.3 tok/s, cold); decode 28 tok in 1.81 s = 15.5 tok/s",
+    "cross_check": "serve decode 15.5 tok/s equals the P4.4 smoke decode 15.50 tok/s (p4.4-base-20261022-180447) - serve layer adds no measurable decode overhead at B=1"
+  },
+  "status_lines": "correctness: arithmetic answer correct on first serve request | state: engram tables + 99.3%-hit VRAM expert tier served through the resident server | perf: bring-up numbers, one MI50 of four, no drafts (DSpark off), no images - NOT a performance claim",
+  "remaining_p4a": "P4.3 final witness (GLM completion with non-null content, max_tokens=256) then #24 exit"
+}

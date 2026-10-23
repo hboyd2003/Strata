@@ -445,6 +445,11 @@ with a receipt; correctness, state and performance are recorded separately per A
    later malloc's abort).
 6. **P4.5 (#23) - DS4.1 serve** (operator-launched): exact-serve default (`STRATA_SERVE_STEP_MAX=
    96`), engram live, first DS4.1 decode tok/s + the NVMe read-factor if the file tier is the cap.
+   **CLOSED PASS 2026-10-22**: through the `serve_ds41.py` shim (plain `serve.server` renders the
+   comment-only chat template to an empty prompt - engine refuses loudly, `d27331de`), first request
+   answered **391** with `finish_reason=stop`, decode **15.5 tok/s** in serve = the P4.4 smoke number
+   exactly (serve layer adds no measurable B=1 decode overhead); prompt 6.3 tok/s cold.
+   Receipt `2026-10-22-p4.5-ds41-serve-pass.json`.
 7. **P4a exit (#24)**: XOLOTL-PORT.md port log + P4 verdict; every known-unknown dispositioned;
    START-HERE.md validation boundary updated; parity-vs-authors (250 prefill / 17-30 decode tok/s
    on 4090+90 GB) stated as a LATER, separate claim - this box is a different machine.
