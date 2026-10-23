@@ -321,6 +321,7 @@ class RequestAsChat(unittest.TestCase):
                                  [("system", "Be brief."), ("user", "hi")])
                 self.assertEqual((rec["reply"]["reasoning"].strip(), rec["reply"]["content"].strip()),
                                  ("Thought.", "Hello."))
+                self.assertEqual(rec["params"], {})
             with urllib.request.urlopen(base + "/api/requests", timeout=10) as r:   # the list stays light
                 self.assertNotIn("transcript", json.loads(r.read())["requests"][0])
         finally:
@@ -330,10 +331,21 @@ class RequestAsChat(unittest.TestCase):
     def test_the_button_is_on_the_page(self):
         web = Path(__file__).parent / "web"
         html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
-        for el in ("view-bar", "view-title", "view-back"):
+        for el in ("rv", "rv-title", "rv-chat", "rv-side", "rv-close"):
             self.assertIn(f'id="{el}"', html)
-        self.assertIn("viewButton(r)", js)
+        self.assertIn("timeCell(r)", js)
+        self.assertIn("req-view", js)
         self.assertIn("api/requests?id=", js)
+        self.assertIn('id="i-close"', (web / "sprite.svg").read_text(encoding="utf-8"))
+
+    def test_request_params(self):
+        from serve.server import request_params
+        p = request_params({"messages": [], "temperature": 0.7, "stream": True, "max_tokens": 512,
+                            "thinking": {"type": "enabled", "budget_tokens": 4000}, "output_config": {"effort": "high"},
+                            "tools": [{"type": "function", "function": {"name": "read"}}, {"name": "bash"}],
+                            "tool_choice": {"type": "function", "function": {"name": "read"}}})
+        self.assertEqual(p, {"temperature": 0.7, "max_tokens": 512, "thinking": "enabled", "thinking_budget": 4000,
+                             "effort": "high", "tool_choice": "read", "tools": 2, "tool_names": ["read", "bash"]})
 
 if __name__ == "__main__":
     unittest.main()
