@@ -90,6 +90,13 @@ int file_cache_keeps_cases() {
                     got == c.keeps ? "" : "   <-- WRONG");
         fail |= got != c.keeps;
     }
+    // the rule the #3237 drive probe checks follows the same default and override
+    using strata::platform::file_cache_old_rule;
+    const bool rule_ok = file_cache_old_rule(nullptr) == strata::platform::file_cache_old_rule_default() &&
+                         file_cache_old_rule("") == strata::platform::file_cache_old_rule_default() &&
+                         !file_cache_old_rule("0") && file_cache_old_rule("1");
+    std::printf("file_cache_old_rule default and overrides -> %s\n", rule_ok ? "ok" : "WRONG");
+    fail |= !rule_ok;
     return fail;
 }
 }  // namespace

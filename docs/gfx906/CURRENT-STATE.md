@@ -131,8 +131,11 @@ not add GPU or parity validation.
   copied build source had no Git metadata; the tested binary is identified by its PR #26 source association and
   hash, but an exact post-merge whole-tree build identity is unproven.
   See the [sanitized receipt](../../benchmarks/gfx906/receipts/2026-10-17-pr26-serial-smoke.json).
-- **Current upstream release and branch:** the latest official release is v0.1.45, and its tag and current
-  upstream `main` resolve to `477ac13cbe8e582c20484871ce459d20d82df09d`. The dated feature map in
+- **Upstream sync (2026-10-22):** fork `main` merged upstream `v0.2.2` (`011c9e600a93bbc9fd451c563501b5831c32bbca`);
+  see [UPSTREAM-DELTA.md](UPSTREAM-DELTA.md#upstream-sync-to-v022-2026-10-22) for the resolutions and the CPU and
+  compile checks, and a short serial single-MI50 smoke of the merged build; batching, AB/CD, and parity were not tested.
+- **Earlier upstream checkpoint:** at the 2026-10-17 review the latest official release was v0.1.45, and its tag and
+  upstream `main` resolved to `477ac13cbe8e582c20484871ce459d20d82df09d`. The dated feature map in
   [UPSTREAM-DELTA.md](UPSTREAM-DELTA.md) records the gfx906, K8/V4, and serial batch-MTP source history. A
   pre-merge source-equivalent build has a short serial GPU smoke.
   At the earlier 2026-10-17 checkpoint (SHA `73e01b3a5f1c577899e3f668e7e913759a1f7455`), no build or GPU smoke
