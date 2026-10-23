@@ -341,7 +341,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   // recent requests
   const body = $("req-body");
   if (!requests.length) {
-    body.innerHTML = `<tr><td colspan="9" class="muted">No requests yet</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="muted">No requests yet</td></tr>`;
   } else {
     const badge = {stop: ["", "Done"], length: ["", "Max tokens"], cancel: ["st-badge--queued", "Stopped"],
                    disconnect: ["st-badge--queued", "Closed"], error: ["st-badge--error", "Error"]};
@@ -354,9 +354,10 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
       // Reused tokens are not prefetched again. Match the Monitor's existing Prefill metric.
       const fresh = r.prompt_tokens == null ? null : Math.max(0, r.prompt_tokens - (r.reused || 0));
       const prefillRate = fresh > 0 && r.prompt_ms > 0 ? fresh / (r.prompt_ms / 1000) : null;
-      return `<tr${r.record_id ? ' class="req-row--open"' : ""}><td>${timeCell(r)}</td><td><span class="st-badge ${cls}">${esc(text)}</span>${proj}</td><td class="num">${fmt(r.prompt_tokens)}</td>
+      const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+      return `<tr${r.record_id ? ' class="req-row--open"' : ""}><td>${esc(t)}</td><td><span class="st-badge ${cls}">${esc(text)}</span>${proj}</td><td class="num">${fmt(r.prompt_tokens)}</td>
         <td class="num">${fmt(r.reused)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(prefillRate)}</td><td class="num">${fmt(r.decode_tok_s, 1)}</td>
-        <td class="num">${hit}</td><td class="num">${fmt(r.duration_s, 1)} s</td></tr>`;
+        <td class="num">${hit}</td><td class="num">${fmt(r.duration_s, 1)} s</td><td class="req-view-cell">${viewButton(r)}</td></tr>`;
     }).join("");
   }
   const all = $("req-all");
@@ -411,12 +412,11 @@ document.addEventListener("click", (e) => {
 $("req-all").addEventListener("click", () => { reqShowAll = !reqShowAll; if (lastMetrics) render(lastMetrics); });
 // #332: a recent request read as a chat, in a popup over the Monitor: its messages as the model saw them, the reply
 // it wrote, and what this server measured.  The API request monitor keeps them ("api_monitor": true in the run config).
-function timeCell(r) {
-  const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-  if (r.record_id) return `<span class="req-time"><button class="st-btn st-btn--icon req-view" data-view="${esc(r.id)}" title="Read this request as a chat" aria-label="Read as a chat">${icon("chat")}</button>${esc(t)}</span>`;
+function viewButton(r) {
+  if (r.record_id) return `<button class="st-btn st-btn--icon req-view" data-view="${esc(r.id)}" title="Read this request as a chat" aria-label="Read as a chat">${icon("chat")}</button>`;
   const why = lastMetrics && lastMetrics.transcripts ? "This request's messages were not kept"
     : "To read requests as a chat, turn on \"api_monitor\" in the run config (it keeps the last 100 requests' messages in memory)";
-  return `<span class="req-time"><button class="st-btn st-btn--icon req-view" disabled title="${esc(why)}" aria-label="${esc(why)}">${icon("chat")}</button>${esc(t)}</span>`;
+  return `<button class="st-btn st-btn--icon req-view" disabled title="${esc(why)}" aria-label="${esc(why)}">${icon("chat")}</button>`;
 }
 $("req-body").addEventListener("click", (e) => {
   const tr = e.target.closest("tr");
