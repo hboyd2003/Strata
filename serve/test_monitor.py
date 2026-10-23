@@ -333,7 +333,7 @@ class RequestAsChat(unittest.TestCase):
         html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
         for el in ("rv", "rv-title", "rv-chat", "rv-side", "rv-close"):
             self.assertIn(f'id="{el}"', html)
-        self.assertIn("timeCell(r)", js)
+        self.assertIn("viewButton(r)", js)
         self.assertIn("req-view", js)
         self.assertIn("api/requests?id=", js)
         self.assertIn('id="i-close"', (web / "sprite.svg").read_text(encoding="utf-8"))
