@@ -132,8 +132,11 @@ parking (about 2 GB per 90K-token conversation, with 2-3 GB free above the cache
   format is unchanged.
 
 Both applied without conflicts; #3251's restore handler sits correctly around v0.2.2's `--kv-grow` growth check, and
-every function it calls is declared and defined. Not built and not run yet: `serve/server.py` compiles, nothing else
-was checked.
+every function it calls is declared and defined. Built into the gfx906 image and run on one MI50 with three coding
+agents at once on one slot (turns 0-3 of three `agent_turns_bench` sessions, up to 64-80K tokens each): with
+`auto_sessions` the 12 turns took 409 s against 517 s, with 1 full re-read (50K tokens) against 3 (166K); saves took
+0.18-0.52 s, restores 0.5-1.0 s. The re-read that remained was a restore refused by the RAM floor (549 MiB plus
+the 2,560 MiB floor needed, 2,881 MiB available): a smaller in-RAM conversation cache leaves the disk path room.
 
 ## PR #4 current-source comparison (2026-10-17)
 
