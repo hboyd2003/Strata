@@ -81,7 +81,7 @@ jobs:
       - name: CPU-only tests
         run: python tools/gfx906.py test-cpu
       - name: Install pinned service test dependencies
-        run: python -m pip install 'jinja2==3.1.6' 'markupsafe==3.0.3'
+        run: python -m pip install 'jinja2==3.1.6' 'markupsafe==3.0.3' 'regex==2026.9.10'
       - name: Native request correlation contract
         run: python -m unittest serve.test_native_trace serve.test_replicas
       - name: Native trace ID parser contract
