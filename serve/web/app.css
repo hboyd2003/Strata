@@ -70,7 +70,8 @@ main { flex: 1; min-height: 0; display: flex; }
 
 .composer-wrap { flex: none; padding: 0 var(--st-s-6) var(--st-s-6); }
 /* #332: a recent request read as a chat - a popup over the Monitor: the chat on the left, its facts on the right */
-.req-time { display: inline-flex; align-items: center; gap: 4px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+#req-wrap .st-table .req-view-cell { padding-inline: 2px; width: 26px; }
 .req-view { width: 22px; height: 22px; padding: 0; border-radius: 6px; color: var(--st-accent); }
 .req-view .st-icon { width: 16px; height: 16px; }
 .req-view:disabled { color: var(--st-ink-muted); opacity: .4; cursor: default; }
