@@ -4520,7 +4520,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // gather, slot_gu / slot_d bytes apart), the other product's stay GGUF for MMQ, and the resident
                         // experts stay GGUF.  The main path only: the peer paths above keep MMQ, and so does a direct
                         // layer (CUDA's pointer tables; none on gfx906).
-                        const bool rp_ok = use_mmq && lay.native && !direct && !lay.fmt[(size_t) l].tail_off && rp::enabled();
+                        const bool rp_ok = use_mmq && lay.native && !direct && !wmma_l && !lay.fmt[(size_t) l].tail_off && rp::enabled();
                         const bool rp_gu = rp_ok && rp::supported(mmq_gt, 1280, N);
                         const bool rp_d = rp_ok && rp::supported(mmq_dt, N, 640);
                         const bool rp_main = rp_gu || rp_d;
