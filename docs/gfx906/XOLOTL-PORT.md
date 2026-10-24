@@ -257,3 +257,94 @@ there is no swap.
 `NOT STRATA_HIP_GFX906`), link the dense half against `ggml` + `ggml-cuda` + `ggml-base` as one resolution set
 (the fork's existing pattern, root CMakeLists ~line 494), then runtime validation T0-T5 of
 `docs/gfx906/GLM-FIRST-BOOT.md`. Compilation is a build gate, not a correctness or speed result.
+
+## Port log - P4a EXIT 2026-10-23: both ported engines boot and answer on one MI50
+
+Phase P4a (GLM-5.3-Flash and DeepSeek-V4.1-Flash, first boot and first answer on this box) is
+closed. The correctness, state-parity, performance and boundary claims below stay separate, and
+each names the receipt or log it came from.
+
+### Build and merge trail (no runtime claim in this section)
+
+- Merge at `f366d550`; gfx906 build fixes at `d43935cc` (`STRATA_DENSE` default ON->OFF, the
+  `v41`/`glm` CUDA targets gated, `moe_mmq.cu` inline fallback under HIP); HIP shim at `35cef805`.
+- `libggml-cuda.a` as HIP: 74 MB, 144 of 144 translation units, 8 m 01 s (section above). Both
+  engines un-gated for HIP at `322599c3`: `glm_generate` 81 MB, `ds41_generate` 77 MB. Full
+  incremental HIP sweep, 77 targets, exit 0.
+- `ctest` on this build: 51 tests, and the failures are exactly the four pre-existing baseline
+  ones (`split_lend`, `mmvq_il`, `verify_parity`, `ple_parity`). The comparison build is
+  `/ai/engines/gfx906/worktrees/baseline-main` at `e063ec6c`.
+- P4.0 / P4.1 (`1af4a425`, `0fb56187`, then `3671549e`): bootable wrappers for both engines, plus an
+  engram table gate (`tools/gfx906/check_engram_tables.py`) that checks the safetensors header
+  against what the engine expects instead of re-deriving the tables. The RAM/arena budget was
+  pinned and the pinned tier came back positive: `arena: pinned (cudaHostRegister PORTABLE ok)` in
+  both engines - GLM 60 GiB and DS4.1 64 GiB arenas fully registered
+  (`benchmarks/gfx906/receipts/2026-10-22-p4-run2-pinned-ok-new-fails.json`, log
+  `logs/p4.4-base-20261022-180447.log` line 10).
+
+### Two faults that had to be root-caused to get a single token
+
+1. ROCm 7.2 reports virtual-memory support that the driver then refuses. The switch that works is
+   `GGML_HIP_NO_VMM`, not `GGML_CUDA_NO_VMM`, because `common.cuh:264` honours only the HIP-specific
+   name under HIP (`benchmarks/gfx906/receipts/2026-10-22-p4.2-run1-vmm-fail.json`).
+2. A heap-buffer-overflow WRITE of 1040 bytes, caught identically in both engines by an
+   AddressSanitizer build, root-caused as an one-definition-rule layout mismatch on
+   `ggml_backend_cuda_context`: 4336 bytes as `strata_mmq` sees it against 4400 as `ggml-cuda.cu`
+   sees it. Fixed at `e13f1555` by adding the three missing defines to the `strata_mmq` compile in
+   the live CMake branch, gated on `STRATA_HIP_GFX906` so the default CUDA-native artifacts stay
+   byte-unchanged (`benchmarks/gfx906/receipts/2026-10-22-p4-odr-rootcause-fix.json`).
+
+### CORRECTNESS - what is proven, and what is not
+
+Proven on this hardware: both ported engines produce coherent tokens on gfx906 with experts on the
+GPU (`benchmarks/gfx906/receipts/2026-10-22-p4.2-p4.4-first-gpu-tokens.json`, `9ce2a434`;
+logs `logs/p4.2-base-20261022-180307.log`, `logs/p4.4-base-20261022-180447.log`), and DS4.1-Flash
+answers an arithmetic question correctly through the OpenAI-compatible API - 17 times 23 as 391,
+with finish_reason `stop` (receipt `2026-10-22-p4.5-ds41-serve-pass.json`, `fa4af2ba`). GLM
+through serve answered `Hello there, friend!`
+(`logs/p4.3-vram-serve-20261023-083129.log.curl`, `199100f7`).
+
+Not proven: token equality with the authors' reference build. Never measured on this box, and no
+parity harness was run against their logits. One serve rule worth keeping (recorded at `d27331de`):
+the DS4.1 serve entry MUST be `tools/v41/serve/serve_ds41.py`, because that tokenizer dir's chat
+template is a comment-only stub, so the plain `serve.server` renders an empty prompt and the engine
+refuses with `ERR empty prompt` at `ds41_generate.cpp:1125`. `tools/glm/serve/serve_glm.py` is the
+analogous authors' shim and the recommended production entry for GLM.
+
+### STATE PARITY - no claim
+
+Not tested against the authors' build in either direction. Session-state equality for these two
+engines is open, exactly as token and state parity are open for the mainline path in the
+fork's `docs/gfx906/KNOWN-LIMITATIONS.md`.
+
+### PERFORMANCE - bring-up rates on one MI50, each with its artifact
+
+- GLM decode 2.57 tok/s in the direct smoke (`logs/p4.2-base-20261022-180307.log`); 3.69 and 3.38
+  tok/s in serve, so 2.57 to 3.69 across the witnesses
+  (`benchmarks/gfx906/receipts/2026-10-23-p4.3-vram-mechanism-solved.json`).
+- DS4.1 decode 15.50 tok/s in the direct smoke (`logs/p4.4-base-20261022-180447.log`) and 15.5 tok/s
+  in serve (`benchmarks/gfx906/receipts/2026-10-22-p4.5-ds41-serve-pass.json`) - the same number, so
+  the serve layer adds no measurable decode overhead at batch 1.
+- No cross-engine and no cross-hardware comparison is claimed, and none of these rates says
+  anything about the fork's mainline model.
+
+### BOUNDARY of everything above
+
+One MI50 32 GB per session - the ported engines are single-device, and all four cards together is
+phase P5 layer-split. No draft models (DSpark off), no image input, engram tables present and
+gated, context 32768 in these runs, ROCm 7.2.0, and the four pre-existing `ctest` failures carried
+from baseline. The P4.3 serve number is a workaround, not the fix: `--vram-margin 5.0` costs 1.0
+GiB of expert slots (19.89 down to 18.89) to survive the 2.57 GiB first-chunk-MMQ burst; the proper
+fix, allocating the MMQ set at load, is recorded as not shipped
+(`docs/gfx906/P4.3-serve-stop-analysis.md`, `docs/gfx906/P4-RAM-BUDGET.md`).
+
+### Open items after P4a
+
+1. Why the engine itself reported `length` at 55 of 64 tokens after the wrap-up prefill: the
+   finish_reason half of the P4.3 analysis is unresolved. The server's stop list holding two Qwen
+   literals instead of this model's ids 154820 / 154827 / 154829
+   (`serve/server.py:3220-3221`) is the documented serve-side blemish. Neither is an engine defect.
+2. Pre-allocate the MMQ scratch set with `c_stage` at load, so the first chunk-MMQ execution is not
+   a surprise 2.57 GiB request (`tools/ds4/ds4_moe.cpp:2153`, `:2190-2206`).
+3. Token and state parity against the authors' reference build.
+4. Phase P5: driving four MI50 for these engines (layer split), per `docs/gfx906/P5-MULTI-GPU-DESIGN.md`.

@@ -46,6 +46,29 @@ post-merge main at the 2026-10-17 checkpoint (audited checkpoint SHA
 opt-in delta is not integrated into current main, and token/state parity remains open. Use exact source and artifact
 identities in any new report. Historical throughput measurements are not evidence for the present source.
 
+### Ported engines: GLM-5.3-Flash and DeepSeek-V4.1-Flash (phase P4a, closed 2026-10-23)
+
+Proven on this box, on one MI50 32 GB per session, ROCm 7.2.0, context 32768, engram tables present
+and gated, so far: both ported engines boot and produce coherent tokens with experts on the GPU
+([receipt](../../benchmarks/gfx906/receipts/2026-10-22-p4.2-p4.4-first-gpu-tokens.json)), DS4.1-Flash
+answers an arithmetic question correctly through the OpenAI-compatible API with `finish_reason stop`
+([receipt](../../benchmarks/gfx906/receipts/2026-10-22-p4.5-ds41-serve-pass.json)); GLM answers
+through serve ([receipt](../../benchmarks/gfx906/receipts/2026-10-23-p4.3-vram-mechanism-solved.json)).
+The fork's ctest set on this build is 51 tests with exactly the four pre-existing baseline
+failures (split_lend, mmvq_il, verify_parity, ple_parity) against a baseline build of main at
+e063ec6c.
+
+Not proven, and not to be written as if it were: token equality with the authors' reference build
+(never measured here), and state parity, which is not tested against the authors at all - no claim.
+The decode rates are bring-up numbers on one MI50 of four (GLM 2.57 to 3.69 tok/s, DS4.1 15.50 tok/s,
+serve adding no measurable overhead at batch 1) and are not throughput or cross-engine claims. No
+draft models (DSpark off), no image input. The engines are single-device: four cards together is
+phase P5 layer-split. GLM serve runs on the `--vram-margin 5.0` workaround, which costs 1.0 GiB of
+expert slots; the proper fix is recorded as not shipped. Full log, with the two open items (why the
+engine reported `length` at 55 of 64 tokens after a wrap-up prefill, and the serve stop-id gap
+analysed in [P4.3-serve-stop-analysis.md](P4.3-serve-stop-analysis.md)):
+[XOLOTL-PORT.md](XOLOTL-PORT.md).
+
 ## Checked-in CLI
 
 The checked-in gfx906 command entry point is [`tools/gfx906.py`](../../tools/gfx906.py). Run
