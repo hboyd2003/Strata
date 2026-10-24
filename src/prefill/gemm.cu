@@ -1,8 +1,16 @@
 // src/prefill/gemm.cu - see include/strata/prefill/gemm.hpp.
 #include "strata/prefill/gemm.hpp"
+#include <map>
+#include <string>
 #include "strata/kernels/dequant_bf16.hpp"
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+// Gemm::native_mmq (opt-in STRATA_DENSE_MMQ=1): the dense projections through llama.cpp's int8 MMQ.  The wave32 HIP
+// build has it with STRATA_PREFILL_MMQ; the gfx906 build always compiles the MMQ sources (strata_mmq).
+#if (defined(STRATA_PREFILL_MMQ) || defined(STRATA_HIP_GFX906)) && defined(__HIPCC__)
+#define STRATA_GEMM_DENSE_MMQ 1
+#endif
+#if defined(STRATA_GEMM_DENSE_MMQ)
 #include "strata/prefill/moe_mmq.hpp"
+#include "strata/prefill/rp_moe.hpp"
 #endif
 
 #ifdef STRATA_USE_HIP
@@ -628,9 +636,11 @@ const uint16_t* Gemm::unpad_x(const uint16_t* X, int64_t T, int64_t K, int64_t l
 }
 
 Gemm::~Gemm() {
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#if defined(STRATA_GEMM_DENSE_MMQ)
     delete static_cast<strata::prefill::mmq::Context*>(mmq_ctx_);
     if (mmq_buf_) cudaFree(mmq_buf_);
+    delete static_cast<strata::prefill::rp::Context*>(rp_ctx_);
+    if (rp_w_) cudaFree(rp_w_);
 #endif
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     delete static_cast<HipLtState*>(hipblaslt_state_);
@@ -1201,7 +1211,7 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
     STRATA_ABSORB_HIPBLAS_STICKY("cublasGemmEx f16");
 }
 
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#if defined(STRATA_GEMM_DENSE_MMQ)
 bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int64_t T, int64_t N, int64_t K,
                       int64_t ldy) {
     namespace mmq = strata::prefill::mmq;
@@ -1210,7 +1220,7 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
         const char* e = std::getenv("STRATA_DENSE_MMQ");
         return e && e[0] == '1';
     }();
-    if (!enabled || mmq_failed_ || !mmq::built() || !mmq::fits(type, N)) return false;
+    if (!enabled || !dense_mmq_on_ || mmq_failed_ || !mmq::built() || !mmq::fits(type, N)) return false;
     // K must be a multiple of 256: llama.cpp's MMQ loads the weights in 256-value K chunks, and the
     // chunk past a partial row reads past the row (the next row's bytes - or, for the last weight
     // row, bytes past the tensor, which no caller guarantees to be zeros). The MoE path is safe
@@ -1237,11 +1247,39 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
         mmq::iota((int32_t*) ((uint8_t*) mmq_buf_ + ident_off), kRows, stream_);
         std::fprintf(stderr, "prefill gemm: dense MMQ on (STRATA_DENSE_MMQ=1)\n");
     }
+    // STRATA_DENSE_MMQ_PROFILE=1 (debug): each call timed (events + a sync), summed per type and shape
+    static const bool prof = std::getenv("STRATA_DENSE_MMQ_PROFILE") != nullptr;
+    cudaEvent_t pe0 = nullptr, pe1 = nullptr;
+    if (prof) { cudaEventCreate(&pe0); cudaEventCreate(&pe1); cudaEventRecord(pe0, (cudaStream_t) stream_); }
     void* xq = mmq_buf_;
     const int32_t* ident = (const int32_t*) ((uint8_t*) mmq_buf_ + ident_off);
     int32_t* bounds = (int32_t*) ((uint8_t*) mmq_buf_ + bounds_off);
     float* xf = (float*) scratch_;
     auto* ctx = static_cast<mmq::Context*>(mmq_ctx_);
+    // STRATA_DENSE_RP=1: an IQ4_NL weight repacked once into rp_w_ for mx's repacked GEMM (the same products as MMQ,
+    // bitwise); ~0.1 ms of a ~9 ms 4096-token product, and no resident copy
+    namespace rp = strata::prefill::rp;
+    const bool use_rp = rp::dense_enabled() && rp::dense_supported(type, N, K);
+    size_t rp_bytes = 0;
+    if (use_rp) {
+        rp_bytes = rp::matrix_bytes(type, N, K);
+        if (rp_bytes > rp_w_bytes_) {
+            if (rp_w_) cudaFree(rp_w_);
+            if (cudaMalloc(&rp_w_, rp_bytes) != cudaSuccess) {
+                cudaGetLastError();
+                rp_w_ = nullptr;
+                rp_w_bytes_ = 0;
+                mmq_failed_ = true;
+                return false;
+            }
+            rp_w_bytes_ = rp_bytes;
+        }
+        if (!rp_ctx_) {
+            rp_ctx_ = new rp::Context();
+            std::fprintf(stderr, "prefill gemm: dense projections through the repacked GEMM (STRATA_DENSE_RP=1)\n");
+        }
+        rp::repack(type, W, mmq::matrix_bytes(type, N, K), rp_w_, rp_bytes, N, K, 1, stream_);
+    }
 
     for (int64_t r0 = 0; r0 < T; r0 += R) {
         const int64_t rows = (T - r0 < R) ? T - r0 : R;
@@ -1262,7 +1300,33 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
         p.max_rows = rows;
         p.dst = Y + r0 * ldy;
         p.ld_dst = ldy;
-        ctx->run(p, stream_);
+        if (use_rp) {
+            p.w = rp_w_;
+            p.expert_bytes = rp_bytes;
+            static_cast<rp::Context*>(rp_ctx_)->run(p, stream_);
+        } else {
+            ctx->run(p, stream_);
+        }
+    }
+    if (prof) {
+        cudaEventRecord(pe1, (cudaStream_t) stream_);
+        cudaEventSynchronize(pe1);
+        float ms = 0.0f;
+        cudaEventElapsedTime(&ms, pe0, pe1);
+        cudaEventDestroy(pe0);
+        cudaEventDestroy(pe1);
+        struct Acc { double ms = 0; long n = 0; int64_t rows = 0; };
+        static std::map<std::string, Acc> acc;
+        static long calls = 0;
+        char key[96];
+        std::snprintf(key, sizeof key, "type %d [%lld -> %lld]%s", type, (long long) K, (long long) N,
+                      strata::prefill::rp::dense_enabled() && strata::prefill::rp::dense_supported(type, N, K) ? " rp" : "");
+        Acc& a = acc[key];
+        a.ms += ms; ++a.n; a.rows += T;
+        if (++calls % 400 == 0)
+            for (const auto& [k, v] : acc)
+                std::fprintf(stderr, "dense mmq profile: %-34s %6ld calls, %7lld rows/call, %8.3f ms/call, %9.1f ms\n",
+                             k.c_str(), v.n, (long long) (v.rows / v.n), v.ms / v.n, v.ms);
     }
     return true;
 }
@@ -1343,7 +1407,7 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
                              "copied unpadded (no device memory)\n", (long long) ldx, (long long) K);
         std::exit(1);
     }
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#if defined(STRATA_GEMM_DENSE_MMQ)
     if (beta == 0.0f && (ldx == 0 || ldx == K) && native_mmq(X, ggml_type, W_blocks, Y, T, N, K, ldy)) return;
 #endif
     if (N * K > scratch_elems_) {

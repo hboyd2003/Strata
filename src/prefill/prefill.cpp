@@ -44,6 +44,7 @@
 #include "strata/prefill/moe_fused.hpp"
 #include "strata/prefill/moe_fused_iq.hpp"
 #include "strata/prefill/moe_mmq.hpp"
+#include "strata/prefill/rp_moe.hpp"
 #include "strata/core/peer_experts.hpp"
 #include "strata/prefill/kernels.hpp"
 
@@ -922,6 +923,12 @@ struct Prefill::Impl {
     float* row_sd = nullptr;          // NVFP4 in MMQ: each Dm row's s_down, applied by the combine as it reads the row
     std::vector<int32_t> bounds_host;
     std::unique_ptr<mmq::Context> mmq_ctx;
+    std::unique_ptr<rp::Context> rp_ctx;   // STRATA_PF_RP=1: the repacked IQ4_NL GEMM (gfx906)
+    // STRATA_PF_RP_CHECK=1 (debug): each repacked group also gathered as GGUF and run through MMQ, the outputs compared
+    uint8_t *rpc_gu = nullptr, *rpc_d = nullptr;
+    float* rpc_out = nullptr;
+    size_t rpc_out_cap = 0;
+    long long rpc_groups = 0, rpc_bad = 0;
     std::vector<int32_t> ids_host, slot_host, src_host, cnt, off;
     // set_cpu_pool: a small chunk's CPU experts. The layer's MoE input (T x N, from `mixed`), the rows the pool writes
     // (Dm's tail, in Dm's row order), ones for row_sd (the CPU's rows carry s_down already), all pinned; and the
@@ -1216,6 +1223,9 @@ const MmqPlan& mmq_plan() {
             p.any = true;
             p.gu_max = std::max(p.gu_max, mmq::matrix_bytes(gt, 1280, N));
             p.d_max = std::max(p.d_max, mmq::matrix_bytes(dt, N, 640));
+            if (rp::sized() && rp::supported(gt, 1280, N))   // its group slots, repacked (each product on its own)
+                p.gu_max = std::max(p.gu_max, rp::matrix_bytes(gt, 1280, N));
+            if (rp::sized() && rp::supported(dt, N, 640)) p.d_max = std::max(p.d_max, rp::matrix_bytes(dt, N, 640));
         }
         // STRATA_MMQ_DIRECT=1: a native layer's resident experts are read in place when the pointer-table MMQ covers
         // both products, gate/up reads nothing past its matrix, the down over-read fits the slot guard, and the blob
@@ -2463,9 +2473,29 @@ ColdTrace g_cold;
 bool native_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y, int64_t T, const std::string& name,
                  std::string& err, int64_t ldy = 0, int64_t ldx = 0) {
     if (!w->native_data) { err = "prefill: " + name + " has no native GGUF blocks (run with --native)"; return false; }
+    // STRATA_DENSE_MMQ_SKIP=a,b,...: projections whose name holds one of these stay on the FP16 path under
+    // STRATA_DENSE_MMQ=1.  Default attn_k.,attn_v.: the K/V the decode reads, written from int8-rounded activations,
+    // cost the MTP drafts' acceptance (32K, IQ3_S: 72.7% -> 69.2%, decode -6%); on FP16 it is back (72.7%) for ~0.4%
+    // of the prompt gain, and the prompt logits' KL to the FP16 path halves.  STRATA_DENSE_MMQ_SKIP= (empty): none.
+    static const std::vector<std::string> skip = [] {
+        std::vector<std::string> v;
+        const char* e = std::getenv("STRATA_DENSE_MMQ_SKIP");
+        if (!e) return std::vector<std::string>{"attn_k.", "attn_v."};
+        if (e)
+            for (std::string s = e; !s.empty();) {
+                const size_t c = s.find(',');
+                if (c != 0) v.push_back(s.substr(0, c));
+                s = c == std::string::npos ? std::string() : s.substr(c + 1);
+            }
+        return v;
+    }();
+    bool off = false;
+    for (const auto& k : skip) off = off || name.find(k) != std::string::npos;
+    if (off) gm.set_dense_mmq(false);
     const bool ct = g_cold.begin();
     gm.native(X, w->native_type, w->native_data, Y, T, w->ne1, w->ne0, ldy, 0.0f, ldx);
     if (ct) g_cold.end("native", name, T, w->ne1, w->ne0);
+    if (off) gm.set_dense_mmq(true);
     return true;
 }
 bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y, int64_t T, const std::string& name,
@@ -4484,6 +4514,42 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // group's pointer tables give MMQ each expert's own address (group position q), the others are
                         // gathered at compact positions c = 0..ns-1 of the group buffers, as before (same bytes)
                         const bool direct = use_mmq && lay.native && m.cache && mmq_plan().direct[(size_t) l] && !wmma_l;
+                        // STRATA_PF_RP=1 (gfx906, rp_moe.hpp): a gate/up (rp_gu) or down (rp_d) product of a supported type
+                        // takes mx-llama.cpp's repacked GEMM, each on its own (IQ4_NL; the GSQ-RCO IQ3_S file's IQ3_XXS /
+                        // IQ2_S / IQ3_S gate/up decoded to int8 rows by the gather); its group slots hold the repacked layout (written by the
+                        // gather, slot_gu / slot_d bytes apart), the other product's stay GGUF for MMQ, and the resident
+                        // experts stay GGUF.  The main path only: the peer paths above keep MMQ, and so does a direct
+                        // layer (CUDA's pointer tables; none on gfx906).
+                        const bool rp_ok = use_mmq && lay.native && !direct && !lay.fmt[(size_t) l].tail_off && rp::enabled();
+                        const bool rp_gu = rp_ok && rp::supported(mmq_gt, 1280, N);
+                        const bool rp_d = rp_ok && rp::supported(mmq_dt, N, 640);
+                        const bool rp_main = rp_gu || rp_d;
+                        const size_t slot_gu = rp_gu ? rp::matrix_bytes(mmq_gt, 1280, N) : mmq_gub;
+                        const size_t slot_d = rp_d ? rp::matrix_bytes(mmq_dt, N, 640) : mmq_db;
+                        static const bool rp_check = std::getenv("STRATA_PF_RP_CHECK") != nullptr;
+                        if (rp_main && rp_check && !m.rpc_gu) {   // the largest slots of any layer (gate/up types vary)
+                            cudaMalloc((void**) &m.rpc_gu, MMQ_GROUP * mmq_plan().gu_max + MMQ_TAIL);
+                            cudaMalloc((void**) &m.rpc_d, MMQ_GROUP * mmq_plan().d_max + MMQ_TAIL);
+                        }
+                        // compare `nr` rows of `ld` floats: the repacked product's (dev_rp) and MMQ's (dev_mmq)
+                        auto rp_compare = [&](const char* what, const float* dev_rp, const float* dev_mmq, int64_t nr_, int64_t ld,
+                                              int ngx_, int64_t maxr_, size_t gidx) {
+                            cudaStreamSynchronize(m.cs);
+                            std::vector<float> a((size_t) (nr_ * ld)), b(a.size());
+                            cudaMemcpy(a.data(), dev_rp, a.size() * 4, cudaMemcpyDeviceToHost);
+                            cudaMemcpy(b.data(), dev_mmq, b.size() * 4, cudaMemcpyDeviceToHost);
+                            size_t bad = 0, first = 0; double amax = 0, dmax = 0;
+                            for (size_t i = 0; i < a.size(); ++i) {
+                                amax = std::max(amax, (double) std::fabs(b[i]));
+                                if (std::memcmp(&a[i], &b[i], 4) != 0) { if (!bad) first = i; ++bad; dmax = std::max(dmax, (double) std::fabs(a[i] - b[i])); }
+                            }
+                            ++m.rpc_groups;
+                            if (bad && m.rpc_bad++ < 40)
+                                std::fprintf(stderr, "rp check: layer %lld group %zu %s: ngx %d rows %lld maxr %lld - %zu of %zu differ, "
+                                             "max |d| %.3g of max %.3g, first row %zu col %zu: rp %.6g mmq %.6g\n", (long long) l, gidx, what,
+                                             ngx_, (long long) nr_, (long long) maxr_, bad, a.size(), dmax, amax, first / (size_t) ld,
+                                             first % (size_t) ld, a[first], b[first]);
+                        };
                         mmq::WeightTab tgu, td;
                         mmq::GuardTab gd;
                         int ns = 0;
@@ -4498,7 +4564,26 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 pt.mark(kPfDequant, cs);
                             }
                             // NVFP4: each expert's scales go next to its group slot in the same launch
-                            if (!mmq::gather_native_group(gg, f.up_off, mmq_gub / 2, f.down_off, mmq_db, m.grp_gu, mmq_gub,
+                            if (rp_main && rp_check && !mmq::gather_native_group(gg, f.up_off, mmq_gub / 2, f.down_off, mmq_db, m.rpc_gu,
+                                                                                  mmq_gub, m.rpc_d, mmq_db, m.cs, 0, nullptr, zero))
+                                for (int i = gg.first; i < gg.n; ++i)
+                                    mmq::gather_native(gg.blob[i], gg.blob[i] + f.up_off, mmq_gub / 2, gg.blob[i] + f.down_off, mmq_db,
+                                                       m.rpc_gu + i * mmq_gub, m.rpc_d + i * mmq_db, m.cs, nullptr, nullptr,
+                                                       i + 1 == gg.n ? zero : 0);
+                            if (rp_main) {
+                                // the GGUF part (if any) through the plain group gather, then the repacked part(s)
+                                if (!rp_gu || !rp_d) {
+                                    const size_t ga = rp_gu ? 0 : mmq_gub / 2, gd = rp_d ? 0 : mmq_db;
+                                    if (!mmq::gather_native_group(gg, f.up_off, ga, f.down_off, gd, m.grp_gu, slot_gu, m.grp_d,
+                                                                  slot_d, m.cs, 0, nullptr, zero))
+                                        for (int i = gg.first; i < gg.n; ++i)
+                                            mmq::gather_native(gg.blob[i], gg.blob[i] + f.up_off, ga, gg.blob[i] + f.down_off, gd,
+                                                               m.grp_gu + i * slot_gu, m.grp_d + i * slot_d, m.cs, nullptr,
+                                                               nullptr, i + 1 == gg.n ? zero : 0);
+                                }
+                                rp::gather_group(gg, mmq_gt, f.up_off, f.down_off, N, 640, rp_gu ? m.grp_gu : nullptr, slot_gu,
+                                                 rp_d ? m.grp_d : nullptr, slot_d, m.cs);
+                            } else if (!mmq::gather_native_group(gg, f.up_off, mmq_gub / 2, f.down_off, mmq_db, m.grp_gu, mmq_gub,
                                                           m.grp_d, mmq_db, m.cs, f.tail_off,
                                                           f.tail_off ? m.grp_tail : nullptr, zero)) {
                                 for (int i = gg.first; i < gg.n; ++i) {   // not 16-byte aligned: one at a time
@@ -4566,6 +4651,22 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     if (!last_of_group) return true;
                                     flush(MMQ_TAIL);
                                     gg = mmq::GatherGroup{};
+                                } else if (rp_main) {
+                                    const auto& f = lay.fmt[(size_t) l];
+                                    mmq::GatherGroup one;
+                                    one.blob[q] = blob_dev;
+                                    one.first = (int) q;
+                                    one.n = (int) q + 1;
+                                    if (!rp_gu || !rp_d)
+                                        mmq::gather_native(blob_dev, blob_dev + f.up_off, rp_gu ? 0 : mmq_gub / 2, blob_dev + f.down_off,
+                                                           rp_d ? 0 : mmq_db, m.grp_gu + q * slot_gu, m.grp_d + q * slot_d, m.cs,
+                                                           nullptr, nullptr, last_of_group ? MMQ_TAIL : 0);
+                                    rp::gather_group(one, mmq_gt, f.up_off, f.down_off, N, 640, rp_gu ? m.grp_gu : nullptr, slot_gu,
+                                                     rp_d ? m.grp_d : nullptr, slot_d, m.cs);
+                                    if (rp_check)
+                                        mmq::gather_native(blob_dev, blob_dev + f.up_off, mmq_gub / 2, blob_dev + f.down_off, mmq_db,
+                                                           m.rpc_gu + q * mmq_gub, m.rpc_d + q * mmq_db, m.cs, nullptr, nullptr,
+                                                           last_of_group ? MMQ_TAIL : 0);
                                 } else if (lay.native) {
                                     const auto& f = lay.fmt[(size_t) l];
                                     // NVFP4: this expert's scales go next to its group slot in the same launch
@@ -4613,12 +4714,25 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                                     ns ? m.grp_d + (size_t) ns * mmq_db : nullptr, MMQ_TAIL, m.cs);
                                 }
                                 mmq::Product gu;
-                                gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
+                                gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = slot_gu;
                                 gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
                                 gu.total_rows = T * K; gu.max_rows = maxr; gu.dst = m.GU; gu.ld_dst = 1280;
                                 gu.y_scale = mmq::fp4_activations(mmq_gt) ? m.Xscale : nullptr;
                                 if (direct) gu.tab = &tgu;
-                                m.mmq_ctx->run(gu, m.cs);
+                                if (rp_main && !m.rp_ctx) m.rp_ctx = std::make_unique<rp::Context>();
+                                if (rp_gu) m.rp_ctx->run(gu, m.cs);
+                                else m.mmq_ctx->run(gu, m.cs);
+                                if (rp_gu && rp_check) {
+                                    if ((size_t) (nr * 1280) > m.rpc_out_cap) {
+                                        if (m.rpc_out) cudaFree(m.rpc_out);
+                                        m.rpc_out_cap = (size_t) (nr * N) > (size_t) (nr * 1280) ? (size_t) (nr * N) : (size_t) (nr * 1280);
+                                        cudaMalloc((void**) &m.rpc_out, m.rpc_out_cap * 4);
+                                    }
+                                    mmq::Product c = gu;
+                                    c.w = m.rpc_gu; c.expert_bytes = mmq_gub; c.dst = m.rpc_out - r0 * 1280;
+                                    m.mmq_ctx->run(c, m.cs);
+                                    rp_compare("gate/up", m.GU + r0 * 1280, m.rpc_out, nr, 1280, ngx, maxr, g);
+                                }
                                 if (lay.native && lay.fmt[(size_t) l].tail_off)   // gate/up scales applied as read
                                     mmq::swiglu_scaled(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, m.bounds_dev + j0, ngx,
                                                        m.grp_tail, r0, m.cs);
@@ -4629,13 +4743,27 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 pt.mark(kPfGemmD, cs);
                                 mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs, m.Hscale);
                                 mmq::Product dn;
-                                dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
+                                dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = slot_d;
                                 dn.n = ngx; dn.xq = m.Hq; dn.bounds = m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1);
                                 dn.ids = m.ids_identity; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = m.Dm + r0 * N;
                                 dn.ld_dst = N;
                                 dn.y_scale = mmq::fp4_activations(mmq_dt) ? m.Hscale : nullptr;
                                 if (direct) dn.tab = &td;
-                                m.mmq_ctx->run(dn, m.cs);
+                                if (rp_d) m.rp_ctx->run(dn, m.cs);
+                                else m.mmq_ctx->run(dn, m.cs);
+                                if (rp_d && rp_check) {
+                                    if ((size_t) (nr * N) > m.rpc_out_cap) {
+                                        if (m.rpc_out) cudaFree(m.rpc_out);
+                                        m.rpc_out_cap = (size_t) (nr * N);
+                                        cudaMalloc((void**) &m.rpc_out, m.rpc_out_cap * 4);
+                                    }
+                                    mmq::Product c = dn;
+                                    c.w = m.rpc_d; c.expert_bytes = mmq_db; c.dst = m.rpc_out;
+                                    m.mmq_ctx->run(c, m.cs);
+                                    rp_compare("down", m.Dm + r0 * N, m.rpc_out, nr, N, ngx, maxr, g);
+                                    if (m.rpc_groups % 2000 == 0)
+                                        std::fprintf(stderr, "rp check: %lld products compared, %lld differ\n", m.rpc_groups, m.rpc_bad);
+                                }
                                 if (lay.native && lay.fmt[(size_t) l].tail_off)   // s_down: applied by the combine
                                     mmq::down_row_scales(m.row_sd + r0, dn.bounds, ngx, m.grp_tail, nr, m.cs);
                                 if (direct) {
