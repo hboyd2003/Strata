@@ -1,0 +1,54 @@
+{
+  "phase": "P4.3",
+  "date": "2026-10-23",
+  "title": "#32 mechanism solved: the first chunk-MMQ execution of a serve session needs a 2.57 GiB burst that margin 4.0 does not leave",
+  "status": "CLOSED - mechanism + arithmetic + witnessed survival at margin 5.0",
+  "hardware": "1x AMD MI50 32 GB (GPU 0) of 4, Threadripper Pro 3975WX, 125 GiB DDR4-3200, ROCm 7.2.0",
+  "model": "GLM-5.3-Flash Maya-L IQ3_S (4-shard), LoRA adapters, prune-ezct 0.25, route-bias 0.25, ctx 32768",
+  "box": "gfx906 (MI50). The ported engines are single-device: one MI50 per session. All 4 cards used together is phase P5 layer-split, not P4.",
+  "root_cause": {
+    "summary": "A serve session that gets its thinking budget cancelled takes a short follow-up prefill. That follow-up is the FIRST chunk-MMQ execution of the session: the opening prefill is routed exact (MMQ path bypassed) and B=1 decode never enters it. The first MMQ run allocates the whole scratch set at once.",
+    "burst_components": {
+      "c_stage": "2 device halves of max(1024 MiB, blob) + 1 MiB each = 2.002 GiB (tools/ds4/ds4_moe.cpp:2153)",
+      "mmq_scratch_set": "m_gu 256 MiB + m_h 128 MiB + m_g/m_u/m_d 36.02 MiB each + m_bnd + m_iota, plus the m_xd side (tools/ds4/ds4_moe.cpp:2190-2206)",
+      "total_measured": "device VRAM held went 28.447 GiB to 31.017 GiB = +2.57 GiB at the wrap-up prefill",
+      "total_computed": "about 2.49 GiB from the component sum"
+    },
+    "why_margin_4_dies": "at margin 4.0 the steady-state layout leaves ~2.51 GiB free, so the last allocation in the chain is refused: m_xd, 0x2404800 bytes = 37767168 B, exactly one q8 buffer at cap 16384 (mmq::q8_bytes(16384, 2048))",
+    "correction": "an earlier note recorded the refused size as 37775360 bytes; the log line is 0x2404800 = 37767168 bytes (0x2406800 would be 37775360). The arithmetic identity holds with the corrected number.",
+    "not_the_cause": [
+      "leak (VRAM flat over a 200-token direct run)",
+      "the cancel itself",
+      "session reuse",
+      "use-after-free (ASan build showed the same alloc refusal)"
+    ]
+  },
+  "witnesses": {
+    "failure_4x": "logs/p4.3-margin4-failures-20261023.log (copied from /tmp/strata-glm-mayal-906.log before it aged out): five m_xd out-of-memory refusals at lines 40, 61, 82, 131 and the AddressSanitizer line 104, which names the size as 0x2404800 = 37767168 bytes",
+    "survival_5.0": {
+      "boot": "2026-10-23 08:31:38 local, margin 5.0 override, log /tmp/strata-glm-mayal-906.log",
+      "request": "max_tokens 64, thinking budget 32, model reasoned past the budget so the cut fired",
+      "engine_segments": "32 tokens then cancel; reuse prefill lcp 50 hist 50 snap 18 prompt 67 reused 50; then 6 tokens and a natural stop",
+      "http": "logs/p4.3-vram-serve-20261023-083129.log.curl - content begins Hello there, friend!, reasoning_content complete, completion_tokens 55 of 64, predicted_per_second 3.5; no m_xd refusal. The engine's own line: done: 55 tokens in 20 s (3.6 tok/s) (length, cancel=False), expert cache 27.0% hit",
+      "curve": "logs/p4.3-vram-serve-20261023-083129.log.vram - the engine held 28.036 GiB at load, 28.435 after the thinking segment, 28.447 at the cap, then 31.017 GiB at the wrap-up prefill: a +2.57 GiB burst in the predicted place, computed at 2.49 GiB",
+      "slots_cost": "auto expert slots 19.89 GiB at margin 4.0 vs 18.89 GiB at margin 5.0 - the margin is real VRAM taken from caching"
+    },
+    "control_no_wrapup": "logs/p4.3-vram-serve-20261023-071037.log.vram - margin 5.0, a 128-token request that filled its thinking budget without a cancel, so no wrap-up prefill: VRAM 28.019, 28.403, 28.447 and FLAT for the remaining seven samples. The burst tracks the wrap-up, not time or token count"
+  },
+  "serve_decode_rate": {
+    "glm_serve": "3.69 and 3.38 tok/s (two witnesses)",
+    "glm_smoke": "2.57 to 3.63 tok/s",
+    "ds41_serve": "15.5 tok/s, identical to its smoke 15.50"
+  },
+  "fix": {
+    "shipped_now": "the validated serve workaround is --vram-margin 5.0. tools/glm/serve/strata-glm-mayal-gfx906.json now carries it with the reason in the _comment.",
+    "proper_fix_not_yet_built": "allocate the MMQ scratch set together with c_stage at load, or shrink the set, so the first MMQ execution is not a surprise 2.57 GiB request. This is an engine-side change in tools/ds4/ds4_moe.cpp and is not in this commit.",
+    "blast_radius": "any opt-in serve of the ported engines whose first MMQ execution is deferred; a direct run that never enters the MMQ path is unaffected, which is why the 200-token direct witness looked healthy"
+  },
+  "separate_defect_recorded": {
+    "file": "docs/gfx906/P4.3-serve-stop-analysis.md",
+    "symptom_A": "REVIEWED, WEAKER THAN FIRST STATED. The server did report finish_reason length, but so did the engine itself on the same request (done: 55 tokens ... (length, cancel=False)), so the server was faithful to the engine here, not wrong. What is still true from source: the plain serve.server entry builds its stop list from two Qwen literals (serve/server.py:3220-3221) and never sees this model's ids 154820, 154827, 154829, so a stop that the engine does report would still not be recognised server-side. The open question is why the engine called length at 55 of 64 tokens after a wrap-up instead of stop. docs/gfx906/P4.3-serve-stop-analysis.md section 3 states the stronger version and needs that correction.",
+    "symptom_B": "COSMETIC, confirmed in the durable artifact: content is the complete answer followed by the literal 6-character user-turn marker, so the marker text is visible to the client. Same missing stop-id registration; fix with the same change rather than trimming the tail.",
+    "note": "EOS_IDS (serve/server.py:732) took no part in this request; it is a second instance of the same wrong-for-GLM assumption, on the batch path. serve/server.py was NOT edited; the doc holds the proposal."
+  }
+}
