@@ -42,8 +42,11 @@ RUN python3 -c "import setup; print(setup.get_llama_cpp())"
 ARG CMAKE_HIP_FLAGS=
 ARG STRATA_PORTABLE=OFF
 ARG ENGINE_TOOLS="strata-concurrent strata-dequant strata-device strata-gguf strata-load strata-overlap strata-plan strata-q36ref"
+# ON: also the DeepSeek-V4.1 engine, strata-dsv41 (docs/DEEPSEEK41.md), into /usr/local/bin beside the Qwen engine
+ARG STRATA_DSV41=OFF
 RUN set -e; \
-    cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
+    if [ "$STRATA_DSV41" = ON ]; then ENGINE_TOOLS="$ENGINE_TOOLS strata-dsv41"; fi; \
+    cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTRATA_BUILD_DSV41=${STRATA_DSV41} \
         -DSTRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
         -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE} -DSTRATA_GGML_DIR=/src/third_party/llama.cpp; \
@@ -63,6 +66,7 @@ RUN set -e; \
 RUN set -e; \
     mkdir -p /out/bin; \
     cp build/strata /out/bin/; \
+    if [ "$STRATA_DSV41" = ON ]; then ENGINE_TOOLS="$ENGINE_TOOLS strata-dsv41"; fi; \
     for t in $ENGINE_TOOLS; do cp "build/$t" /out/bin/; done; \
     cp build-vision/bin/strata-vision /out/bin/strata-vision; \
     cp build-vision-hip/bin/strata-vision-hip /out/bin/; \
