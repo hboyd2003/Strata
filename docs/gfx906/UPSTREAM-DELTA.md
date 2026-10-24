@@ -45,6 +45,99 @@ single next source gate is to integrate this lifecycle and recovery behavior in 
 then use a pinned current-main build for isolated serial-versus-AB/CD GPU checks of ordered native token IDs and window-end state
 hashes. Keep AB/CD opt-in until those runtime checks pass.
 
+## Upstream sync to v0.2.2 (2026-10-22)
+
+Fork `main` [`e063ec6cf2d9`](https://github.com/cassettesgoboom/strata-gfx906/commit/e063ec6cf2d9df86626b5746839f086cffbde78e)
+was 1,445 commits behind upstream `main` [`011c9e600a93`](https://github.com/Niko1221/Strata/commit/011c9e600a93bbc9fd451c563501b5831c32bbca)
+(tag `v0.2.2`, 2026-10-21); the previous merge base was `296b59d2f73c8f04a805df29c2fa97655adace78`. The sync is an
+ordinary merge commit, so both histories are preserved. Conflict resolutions:
+
+- **#1752 file-tier rule:** upstream now carries the gfx906 old-rule default itself. Behavior is unchanged from PR #52;
+  the fork keeps its testable `file_cache_keeps_for_tier` helper, adds `file_cache_old_rule` for upstream's #3237
+  drive probe (which runs only under the hot-read rule), and keeps upstream's `file_tier_prefers_direct` and its tests.
+- **NVFP4 W4A4 on gfx906:** upstream #3172 builds `strata_mmq_w4a4` with `GGML_USE_HIP` as a "not available" stub.
+  The fork's `if(NOT STRATA_HIP_GFX906)` exclusion is dropped in favor of the upstream equivalent.
+- **Verifier window state:** the fork's `WindowContext` keeps row count, tokens, slots, positions and batch flag.
+  Its `poll` sub-record is removed: upstream made the batch poll state atomic (`b_running_`, `b_k_`, `b_last_`) for
+  `batch_serve` on a separate thread (#31, `STRATA_PIPED_CONCURRENT`), and those upstream members are used as-is.
+- **Watchdog release control:** upstream added the overlapped split's hand-off wait (`hflag_in_h_`) to the flags
+  `release_gpu_waits` raises. `VerifyReleaseControl::bind` takes it as an optional fourth flag, so the registered
+  release path raises it too; `verify_release_control_test` covers it.
+- **Correctness traces:** native trace IDs in `serve/` and `generate.cpp` are merged with upstream's queue deadlines,
+  request telemetry and merged prompt windows. A merged first window reports `mtp_offered=0`, since its rows are prompt
+  tokens, not drafts.
+- **CI:** the gfx906 CPU workflow installs `regex==2026.9.10`, which upstream's `serve/server.py` now imports.
+
+Validation of the merge tree (2026-10-22, local):
+
+- Passed: `python tools/gfx906.py test-cpu` (78 tests); `python -m unittest serve.test_native_trace serve.test_replicas`
+  (29); every `serve/test_*.py` (939, 15 skipped); the workflow's five standalone C++20 contracts; the synthetic-fixture
+  rejection check; `platform_memory_test --policy-only` built with and without `STRATA_HIP_GFX906`.
+- Passed: a CPU-only CMake build with `STRATA_BUILD_TESTS=ON` and its CTest suite, except `expert_parity` and
+  `pool_test`, which need a model pack (`pack/full/experts.bin`) that was not present.
+- Passed (compile only): `STRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906`, HIP 7.16 / AMD clang 24, targets
+  `strata`, `platform_memory_test` and `verify_release_control_test`; `strata --families` lists `qwen4exp`.
+- Passed (one MI50, serial): a short model-backed smoke of that build with the merge tree's server: two greedy chat
+  requests with MTP speculation, conversation-cache reuse on the follow-up, verify graphs captured for 1-6 tokens, and
+  a clean shutdown. With `STRATA_CORRECTNESS_TRACE=1` and `STRATA_CORRECTNESS_WINDOW_TRACE=1` the window records add
+  up to the tokens produced and the greedy output is unchanged. See the
+  [sanitized receipt](../../benchmarks/gfx906/receipts/2026-10-22-upstream-v0.2.2-sync-smoke.json).
+- Not run: batching, pipeline windows, layer split or two cards, AB/CD, token/state parity against another build,
+  or sustained performance. The open gates above are unchanged.
+
+## janus-reith prefill port (2026-10-22)
+
+[janus-reith/strata-gfx906](https://github.com/janus-reith/strata-gfx906) `b0f440d8` (upstream v0.1.45 plus 16 commits)
+speeds up gfx906 prompt reading. Its gfx906 commits are cherry-picked with `-x` (author and original commit kept) onto
+the v0.2.2 sync:
+
+- `STRATA_PF_RP`: the prompt's MoE expert products through a repacked int8 GEMM adapted from
+  [mx-llama.cpp](https://github.com/mxxm-t/mx-llama.cpp) (MIT, vendored in `src/prefill/rp/` with its licence): IQ4_NL
+  experts, and IQ3_XXS / IQ3_S gate/up (IQ2_S with `STRATA_PF_RP_IQ3=2`), per product.
+- `STRATA_DENSE_MMQ` on the gfx906 build with `STRATA_DENSE_MMQ_SKIP` (default `attn_k.,attn_v.`: K and V stay FP16 for
+  the drafts' acceptance), and `STRATA_DENSE_RP`: dense Q8_0 / Q6_K / Q5_K / IQ4_XS / IQ4_NL through the repacked GEMM
+  (Q4_K stays on MMQ). `dense_mmq_bench` and `rp_expert_bench` measure and check them.
+- IQ4_NL gate/up experts on gfx906, the opt-in server option `system_to_user`, and the five prompt switches on by
+  default in the gfx906 build (`=0` turns one off).
+
+Resolved against v0.2.2: the gate/up format list keeps upstream's trellis formats and adds IQ4_NL; the kernel side of
+janus's sub-16-row fix was already upstream, the launch side is ported; the repack decisions take upstream's new
+`!wmma_l` guard; the dense skip list wraps upstream's cold-start trace. Not taken: janus's `d00a1018` (reverted: upstream
+#3271 links `moe_f16_kq.cu` as a stub, the same behaviour), his Dockerfile and the workflow publishing his image, and his
+README banner (the docs here describe the port instead). The two fixes of this fork that janus carried are already here.
+
+Checked on one MI50 (native build, HIP 7.16): `native_grouped_parity` 0 failures (IQ4_NL gate/up included),
+`rp_expert_bench` 0 failures (the repacked IQ4_NL products bitwise equal to MMQ, 23-81% faster per product),
+`dense_mmq_bench` (int8 dense products 46-74% faster than the FP16 path at 4096 tokens; IQ4_XS repack bitwise equal to
+MMQ, the Q6_K / Q5_K repack equal to it in error against an FP64 reference but summed in another order), every
+`serve/test_*.py`, and `tools/gfx906.py test-cpu`.
+
+In the engine, `STRATA_PF_RP_CHECK=1` compared 2,000 repacked products against MMQ on a 15,000-token prompt of a Swift
+IQ3_S model: 0 differ. On a coding-agent workload with one slot and a 262K context, the port's image (native build)
+read large prompts at 677 tok/s against 504 for the v0.2.2 image as it was and 621-624 with upstream's three prompt
+switches on; one agent's session took 141.8 s against 185.7 and 156.8 s. Decode did not change measurably. See the
+[receipt](../../benchmarks/gfx906/receipts/2026-10-22-janus-prefill-port.json).
+
+## Disk parking for conversations (2026-10-23)
+
+Two open upstream PRs, cherry-picked with `-x` for a one-slot server whose conversations outgrow the RAM left for
+parking (about 2 GB per 90K-token conversation, with 2-3 GB free above the cache floor beside a 48 GB expert arena):
+
+- [#3565](https://github.com/Niko1221/Strata/pull/3565) (`serve/server.py` only, written on v0.2.2): opt-in
+  `"auto_sessions": true` saves the held conversation to `auto-<key>.bin` under `slot_save_path` when a request from
+  another conversation (keyed by its first user message) arrives, and restores the incoming one from its file. Limits:
+  `auto_sessions_min_tokens` (16000), `auto_sessions_keep` (12), `auto_sessions_max_gb` (100).
+- [#3251](https://github.com/Niko1221/Strata/pull/3251) (engine): RESTORE validates the session file in one pass and
+  copies its K/V into the pools in 16 MiB blocks in a second, instead of holding the whole K/V in RAM; the file
+  format is unchanged.
+
+Both applied without conflicts; #3251's restore handler sits correctly around v0.2.2's `--kv-grow` growth check, and
+every function it calls is declared and defined. Built into the gfx906 image and run on one MI50 with three coding
+agents at once on one slot (turns 0-3 of three `agent_turns_bench` sessions, up to 64-80K tokens each): with
+`auto_sessions` the 12 turns took 409 s against 517 s, with 1 full re-read (50K tokens) against 3 (166K); saves took
+0.18-0.52 s, restores 0.5-1.0 s. The re-read that remained was a restore refused by the RAM floor (549 MiB plus
+the 2,560 MiB floor needed, 2,881 MiB available): a smaller in-RAM conversation cache leaves the disk path room.
+
 ## PR #4 current-source comparison (2026-10-17)
 
 Public [PR #4](https://github.com/cassettesgoboom/strata-gfx906/pull/4) remains a draft with head `0fffc4412ebd1ba5e5f880fdabaeb840a1164adc`, based on archived `v0.1.41` commit `fb58e0dbc8399662c0e47c76578c6e878b14f6cf`. It changes 15 files (+1,781/−134) and reports no gfx906 build or exact native-token and persistent-state parity. The reviewed fork main is `f54111839951c0d7f64630064f840b359507fd01`; after `ef91497b71a9ec25a4a30b22695c7d23ffddc89e`, PR #35 changed only the README tag link. Upstream `v0.1.45` and `main` resolve to `477ac13cbe8e582c20484871ce459d20d82df09d`.
