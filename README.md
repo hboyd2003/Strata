@@ -1,9 +1,9 @@
 # Strata for AMD Instinct MI50 / MI60
 
-**Source version: Strata v0.2.0-beta+ / `e88ee39d`** (upstream/main at fetch time, 12 commits past the
-v0.2.0-beta tag; merged into `gfx906` on 2026-10-19; engine version string stays 0.1.45.3). A build check
-on T5810 is still owed for this round and must be recorded in [docs/GFX906.md](docs/GFX906.md) before any
-deploy claim.
+**Source version: Strata v0.2.4.2+ / `7dd5cf18`** (upstream/main at fetch time, 6 commits past the
+`v0.2.4.2` tag `dfa3f402`; merged into `gfx906` on 2026-10-24; engine version string is now `0.1.49.2`,
+upstream's `MIN_ENGINE` is `(0, 1, 46)`). A build check on T5810 is still owed for this round and must be
+recorded in [docs/GFX906.md](docs/GFX906.md) before any deploy claim.
 **Deployed, not yet running:** on owner instruction ("deploy, I restart myself") the **v0.1.45** text
 engine was installed on 2026-10-17 23:15 UTC with `install -m 0755` while 8082 kept running:
 `build-text-rocm10/strata` is now **`1ba389de…`**. The running processes (server 1786203, vision
@@ -367,7 +367,7 @@ kernel-level switches. Do not turn them on for the live MI50 service without a n
 
 ## Project background
 
-This repository tracks upstream Strata through **v0.2.0-beta+ / `e88ee39d`** while maintaining its own gfx906
+This repository tracks upstream Strata through **v0.2.4.2+ / `7dd5cf18`** while maintaining its own gfx906
 compatibility and optimization work. The upstream project still excludes wave64; this fork's purpose is
 to keep MI50 / MI60 usable as upstream evolves. It is not the upstream project's general NVIDIA/CUDA
 release. Upstream source: [Niko1221/Strata](https://github.com/Niko1221/Strata). For architecture details,
