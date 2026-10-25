@@ -302,6 +302,21 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
     const cudaStream_t st = (cudaStream_t) stream;
     static const bool rows = [] { const char* v = std::getenv("STRATA_MMVF_ROWS"); return v && v[0] == '1'; }();
     if (rows && n_out >= 64 && n_tok <= 8) {   // (the opt-in rows kernels hold 8 columns: a wider window takes the switch below)
+#if defined(STRATA_HIP_GFX906)
+        // Exact router T2: omit only the two inactive columns of the existing NT=4 rows kernel.
+        // Live output pair/FMA/XOR32 order is unchanged. Other shapes, strides and TSUM keep baseline.
+        if (n_tok == 2 && n_in == 2560 && n_out == 512 && ldx == n_in && ldy == n_out) {
+            static const bool exact_t2 = [] { const char* v = std::getenv("STRATA_GFX906_ROUTER_T2_EXACT"); return v && v[0] == '1' && v[1] == 0; }();
+            static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+            if (exact_t2 && !ts) {
+                bf16_f32_mmvf_rows_kernel<256, 2, 4><<<128, 256, 0, st>>>(x, ldx, w, y, ldy, 2560, 512, 2);
+                const cudaError_t result = cudaGetLastError();
+                if (result != cudaSuccess)
+                    throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf router T2 exact launch: ") + cudaGetErrorString(result));
+                return;
+            }
+        }
+#endif
         const int ni = (int) n_in, no = (int) n_out;
         switch (mmvf_block_size(n_in)) {
             case 32: launch_rows<32>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
@@ -364,6 +379,21 @@ void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
         (reinterpret_cast<uintptr_t>(y) & 3u) != 0)
         throw std::invalid_argument("bf16_gemv_fp32_mmvf: null or misaligned pointer");
     const cudaStream_t st = (cudaStream_t) stream;
+#if defined(STRATA_HIP_GFX906)
+    // Opt-in exact router T1 shape. Reuse the existing four-output-row kernel:
+    // each output keeps the same pair sequence, two ordered FMAs, and XOR32 reductions.
+    // Respect disabling row reuse or selecting the alternate TSUM arithmetic path.
+    static const bool rows = [] { const char* v = std::getenv("STRATA_MMVF_ROWS"); return v && v[0] == '1'; }();
+    static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+    static const bool router_t1_rows = [] { const char* v = std::getenv("STRATA_GFX906_ROUTER_T1_ROWS"); return v && v[0] == '1' && v[1] == 0; }();
+    if (router_t1_rows && rows && !ts && n_in == 2560 && n_out == 512) {
+        bf16_f32_mmvf_rows_kernel<256, 1, 4><<<128, 256, 0, st>>>(x, n_in, w, y, n_out, 2560, 512, 1);
+        const cudaError_t result = cudaGetLastError();
+        if (result != cudaSuccess)
+            throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf router T1 rows launch: ") + cudaGetErrorString(result));
+        return;
+    }
+#endif
 #define STRATA_MMVF_CASE(N) case N: \
     bf16_f32_mmvf_kernel<N><<<(unsigned) n_out, N, 0, st>>>(x, w, y, (int) n_in); break
     switch (mmvf_block_size(n_in)) {
