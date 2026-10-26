@@ -220,6 +220,8 @@ struct SessionReadLimits {
     std::vector<std::array<uint64_t, 5>> max_kv_bytes;
     // the RAM PREFLIGHT: asked once the header and identity match and before any payload allocation, with what the
     // parse holds at its peak (session_read_peak_bytes); false refuses the file.  Not a reservation.
+    // The streaming read asks again as its metadata grows: the blocks, then the blocks plus each array the file
+    // declares, priced before that array is allocated (the last answer covers the whole parse).
     std::function<bool(uint64_t need_bytes, std::string& why)> admit;
     SessionProgress progress;
 };
@@ -259,8 +261,9 @@ bool session_file_read_streamed(const std::string& path, const SessionFileIdenti
 bool session_file_apply_streamed(const std::string& path, const SessionFileIdentity& id, const SessionKvBlock& sink,
                                  const std::vector<std::array<uint64_t, 5>>& kv_part_bytes, std::string& error,
                                  SessionStatus* status = nullptr);
-// The RAM preflight of the streaming read of a `file_bytes` file: the two block buffers, the small vectors and the
-// running-state metadata the limits admit; the K/V itself stays on disk.
+// The WORST CASE of the streaming read of a `file_bytes` file: the two block buffers, the small vectors and the
+// running-state metadata the limits admit; the K/V itself stays on disk.  The read itself no longer asks for this -
+// it prices the metadata the file declares, which is a fraction of it - so this is an upper bound on what it asks.
 uint64_t session_read_stream_peak_bytes(uint64_t file_bytes, const SessionReadLimits& limits);
 
 // The folder the free-space preflight asks about for `path`, by the rules of Windows or of POSIX (exposed so both can
