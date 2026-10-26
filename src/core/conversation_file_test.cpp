@@ -527,8 +527,8 @@ int main() {
         SessionReadLimits lim;
         lim.max_tokens = 1000; lim.max_checkpoints = 2; lim.max_kv_layers = 3;
         lim.max_state_bytes = {4099, 77, 301, 64, 8};
-        uint64_t asked = 0;
-        lim.admit = [&](uint64_t need, std::string&) { asked = need; return true; };
+        uint64_t asked = 0, first = 0, calls = 0;
+        lim.admit = [&](uint64_t need, std::string&) { if (!calls++) first = need; asked = std::max(asked, need); return true; };
         SavedConversation meta;
         std::vector<std::array<uint64_t, 5>> sizes;
         size_t n = 0;
@@ -541,9 +541,24 @@ int main() {
             for (size_t p2 = 0; p2 < 5; ++p2) sizes_ok = sizes_ok && sizes[i][p2] == bufs[p2]->size();
         }
         check(sizes_ok, "streamed: the read pass reports every K/V part size");
-        check(asked == session_read_stream_peak_bytes(image.size(), lim) &&
+        check(asked <= session_read_stream_peak_bytes(image.size(), lim) &&
               asked < session_read_peak_bytes(image.size()),
               "streamed: the preflight prices the blocks and the metadata, not the snapshot");
+        check(calls > 1 && first < asked,
+              "streamed: the blocks are asked first, then the metadata as the file declares it");
+        {   // the price is exact: one byte less refuses (memory, before the array is allocated), the value itself passes
+            SessionReadLimits tight = lim;
+            const uint64_t limit = asked;
+            tight.admit = [&](uint64_t need, std::string& why) { why = "no RAM"; return need <= limit - 1; };
+            SavedConversation m2;
+            SessionStatus st3;
+            size_t n3 = 0;
+            check(!session_file_read_streamed(good.string(), id, m2, n3, error, tight, nullptr, &st3) &&
+                  st3.error == SessionError::memory, "streamed: one byte under the metadata's price is refused");
+            tight.admit = [&](uint64_t need, std::string&) { return need <= limit; };
+            check(session_file_read_streamed(good.string(), id, m2, n3, error, tight, nullptr, &st3),
+                  "streamed: the metadata's price itself is admitted");
+        }
         check(meta.kv.size() == original.kv.size(), "streamed: keeps the K/V layer headers");
         bool headers_ok = true, no_bytes = true;
         for (size_t i = 0; i < meta.kv.size(); ++i) {
