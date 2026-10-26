@@ -2878,6 +2878,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             stamp(l, 19, grp);
             grouped(p_ptr, p_start, p_counts, 0, hit_out, true);
             stamp(l, 20, grp);
+            // --pcie-frac 0 (pcie_off): nothing is ever staged over PCIe, so the graph has no PCIe branch at all
+            if (!pcie_off() || device_plan_) {
             if (device_plan_) wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
             else if (m_bal_ != nullptr)   // set_pcie_balance: the PCIe part starts
                 wait_flag_ge_stamped(m_flagB_, ring, m_bal_ + ((l - lb_) * 2 + grp) * 4 + 1, nullptr, cs);
@@ -2894,6 +2896,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             // pcie_frac 0), so its launch is kPcieGroupRows block rows striding over the groups, not cap of them
             grouped(p_ptr2, p_start2, p_counts + 2, kPcieGroupRows, hit_out, false);
             stamp(l, 22, grp);
+            }
             if (!l2pf.empty() && !device_plan_ && l + 1 < le_ && l2pf[(size_t) (l + 1)].n > 0 && sh_stream_on() && sh_cs_ != nullptr &&
                 ev_fork_ != nullptr && ev_join_ != nullptr) {
                 // BW-5: the wait for the CPU's rows starts here: pull the next layer's dense weights into L2 meanwhile (the join
