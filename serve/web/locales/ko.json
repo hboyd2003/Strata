@@ -237,6 +237,7 @@
   "toast.requestFailed": "요청이 실패했습니다",
   "tool.arguments": "인수",
   "tool.beingWritten": "(작성 중)",
+  "tool.called": "호출됨",
   "tool.chars": "{n}자",
   "tool.cut": ", 모델용으로 줄임",
   "tool.done": "완료",
