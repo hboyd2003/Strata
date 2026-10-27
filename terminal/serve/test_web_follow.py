@@ -50,7 +50,7 @@ class WebFollow(unittest.TestCase):
         self.assertFalse(self.follow(401, True, 5_000))
 
     def test_the_old_120_px_rule_is_gone_and_the_reader_input_is_wired(self):
-        self.assertNotIn("< 120", between(self.src, "function renderChat", "$(\"chat\").addEventListener(\"click\""))
+        self.assertNotIn("< 120", between(self.src, "function renderChat", "function chatEvents"))
         watch = between(self.src, "(function watchReader()", "})();")
         for event in ("wheel", "touchmove", "pointerdown", "keydown", "scroll"):
             self.assertIn(f'"{event}"', watch)
