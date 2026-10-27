@@ -244,6 +244,7 @@ from serve.server_parts.engines import (  # noqa: F401  (moved unchanged, file s
     pool_cores_args,
     profile_shape,
     read_engine_stage_log,
+    reminder_tail_args,
     request_params,
     sh_stream_warning,
     start_exit_note,
@@ -9852,8 +9853,10 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
             raise SystemExit(f"[strata] config {e}")
         try:
             effort_end = effort_end_args(cfg, exe, tok)  # #458
+            reminder_tail = reminder_tail_args(cfg, exe, tok)
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
+        engine_extra = (effort_end or []) + (reminder_tail or [])
         from serve import replicas as rp
         try:
             groups = rp.gpu_groups(cfg)
@@ -9867,11 +9870,11 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         except split_mod.SplitConfigError as e:
             raise SystemExit(f"[strata] config {e}")
         if groups:
-            engine = start_replicas(cfg, groups, exe, effort_end or [], lazy, offline=a.offline)
+            engine = start_replicas(cfg, groups, exe, engine_extra, lazy, offline=a.offline)
         elif split:
-            engine = start_split(cfg, split, exe, effort_end or [], lazy, offline=a.offline)
+            engine = start_split(cfg, split, exe, engine_extra, lazy, offline=a.offline)
         else:
-            engine = start_engine_or_fallback(cfg, exe, effort_end, env, lazy, tok, offline=a.offline, batch_telemetry=a.batch_telemetry)
+            engine = start_engine_or_fallback(cfg, exe, engine_extra, env, lazy, tok, offline=a.offline, batch_telemetry=a.batch_telemetry)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
         warn_tight_ram(engine.info.get("arena_mib"))
         note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],

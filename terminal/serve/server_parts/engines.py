@@ -847,6 +847,31 @@ def engine_binary(exe: str, cfg: dict | None = None) -> str:
         if b.is_file():
             return str(b)
     return exe
+def reminder_tail_args(cfg: dict, exe: str, tok) -> list[str] | None:
+    """Opt-in (the config's "qwen_code_tail": true): the engine arguments that keep a client's per-request
+    `<system-reminder>` turn (Qwen Code's memory catalog: a separate short user turn on the end of every request, left
+    out of its history on the next) out of the conversation checkpoint, so the next turn reuses the conversation.
+    None when off (the default) or the engine is too old for it (said once).  ValueError for a non-boolean."""
+    on = cfg.get("qwen_code_tail", False)
+    if not isinstance(on, bool):
+        raise ValueError(f'"qwen_code_tail" must be true or false, not {on!r}')
+    if not on:
+        return None
+    try:
+        with open(engine_binary(exe, cfg), "rb") as f:
+            known = b"--tail-reminder-ids" in f.read()
+    except OSError:
+        known = False
+    ids = tok.encode("<system-reminder>", parse_special=False)
+    if not known or not ids:
+        print("[strata] qwen_code_tail needs an engine with --tail-reminder-ids: the reminder stays in the "
+              "checkpoint", flush=True)
+        return None
+    print("[strata] qwen_code_tail: a trailing <system-reminder> turn stays out of the conversation checkpoint",
+          flush=True)
+    return ["--tail-reminder-ids", ",".join(str(int(i)) for i in ids)]
+
+
 
 
 def engine_silence_s(cfg: dict) -> float:
