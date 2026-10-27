@@ -252,6 +252,7 @@
   "toast.requestFailed": "La requête a échoué",
   "tool.arguments": "Arguments",
   "tool.beingWritten": "(en cours d’écriture)",
+  "tool.called": "Appelé",
   "tool.chars": "{n} caractères",
   "tool.cut": ", coupé pour le modèle",
   "tool.done": "Terminé",
