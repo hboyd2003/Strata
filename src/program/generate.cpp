@@ -841,6 +841,12 @@ struct Options {
     /// the checkpoint goes in front of that turn instead, so it holds the conversation and not the effort text.
     /// -1 = off (the checkpoint at the last <|im_start|>, as before).
     int64_t tail_role_token = -1;
+    /// --serve (opt-in): the token ids a per-request reminder turn opens with (Qwen Code's `<system-reminder>`
+    /// memory catalog, a separate short user turn the client appends to every request and drops from its history).
+    /// When the turn before the last <|im_start|> holds these tokens right after its role header, the checkpoint
+    /// goes in front of that turn, so the next request - which renders the history without it - finds the whole
+    /// conversation.  Empty = off.
+    std::vector<int64_t> tail_reminder_ids;
     /// --serve: a text part of the prompt of at most N tokens (a chat message, the assistant header, a short tool
     /// result) goes through the verify windows, S tokens at a time, instead of the batched prompt path (0 = always
     /// the batched path)
@@ -1010,6 +1016,9 @@ void usage() {
                  "  --turn-token ID      --serve: the token that opens a chat turn (default 248045, <|im_start|>)\n"
                  "  --tail-role-token ID --serve: a turn of this role right before the last turn is left out of\n"
                  "                       the conversation checkpoint (a trailing effort turn; default -1 = off)\n"
+                 "  --tail-reminder-ids A,B,.. --serve: a short turn right before the last turn that opens with these\n"
+                 "                       token ids (a per-request <system-reminder> the client does not keep in its\n"
+                 "                       history) is left out of the conversation checkpoint (default: off)\n"
                  "  --short-read N       --serve: read at most N fresh text tokens through the decode windows instead\n"
                  "                       of the batched prompt path (default 64, 0 = off)\n"
                  "  --prefill-head-alias --serve: unload the native output head while each fresh prompt is read,\n"
@@ -3219,6 +3228,16 @@ int main(int argc, char** argv) {
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
         else if (a == "--turn-token") o.turn_token = std::atoll(next("--turn-token"));
         else if (a == "--tail-role-token") o.tail_role_token = std::atoll(next("--tail-role-token"));
+        else if (a == "--tail-reminder-ids") {
+            const std::string v = next("--tail-reminder-ids");
+            o.tail_reminder_ids.clear();
+            for (size_t b = 0; b < v.size();) {
+                size_t e = v.find(',', b);
+                if (e == std::string::npos) e = v.size();
+                if (e > b) o.tail_reminder_ids.push_back(std::atoll(v.substr(b, e - b).c_str()));
+                b = e + 1;
+            }
+        }
         else if (a == "--short-read") o.short_read = std::max(0LL, std::atoll(next("--short-read")));
         else if (a == "--prefill-head-alias") o.prefill_head_alias = true;
         else if (a == "--pipeline-windows") o.pipeline_windows = std::max(0, std::min(2, std::atoi(next("--pipeline-windows"))));
@@ -15698,6 +15717,29 @@ int main(int argc, char** argv) {
                         if (ids[(size_t) i + 1] == o.tail_role_token) turn_at = i;
                         break;
                     }
+            // --tail-reminder-ids (opt-in): the same for a client's per-request reminder turn, which is a user turn and
+            // so cannot be told from a real one by its role.  It is short, and its text opens with the given tokens
+            // right after "<|im_start|>role\n"; the turns before it are the conversation.  Repeated while the turn
+            // before is one too.
+            if (turn_at > 0 && !o.tail_reminder_ids.empty()) {
+                const int64_t k = (int64_t) o.tail_reminder_ids.size();
+                constexpr int64_t kReminderMaxTokens = 4096;
+                for (;;) {
+                    int64_t prev = -1;
+                    for (int64_t i = turn_at - 1; i > resume && turn_at - i <= kReminderMaxTokens; --i)
+                        if (ids[(size_t) i] == o.turn_token) { prev = i; break; }
+                    if (prev < 0) break;
+                    bool hit = false;
+                    for (int64_t j = prev + 1; j + k <= turn_at && j <= prev + 4 && !hit; ++j) {   // role, newline
+                        hit = true;
+                        for (int64_t m = 0; m < k && hit; ++m) hit = ids[(size_t) (j + m)] == o.tail_reminder_ids[(size_t) m];
+                    }
+                    if (!hit) break;
+                    std::fprintf(stderr, "strata serve: tail reminder turn of %lld tokens left out of the checkpoint\n",
+                                 (long long) (turn_at - prev));
+                    turn_at = prev;
+                }
+            }
             // A prompt read from token 0 also stops at its FIRST turn boundary: the end of the system prompt (with
             // the tools), which every new chat of the same client shares.  That checkpoint becomes the chain's root,
             // which the retention policy pins (conv_cache.hpp), so the next new chat reads only what comes after it.
