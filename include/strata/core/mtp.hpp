@@ -20,6 +20,7 @@
 #pragma once
 
 #include "strata/core/layer.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/core/pinned_ring.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
@@ -193,6 +194,7 @@ public:
     int64_t cell_floor() const { return cell_floor_; }
     int device() const { return device_; }
     bool idle(std::string& err) {
+        const OnDevice on_device(device_);
         if (cs_ && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp: its stream failed"; return false; }
         return true;
     }
