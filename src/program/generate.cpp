@@ -16917,8 +16917,9 @@ int main(int argc, char** argv) {
                 }
                 std::fflush(stdout);
                 if (correctness_window_trace) {
-                    // Suffix lookup replaces MTP; chained tokens beyond T_mtp are not MTP decisions.
-                    const int64_t mtp_offered = use_mtp && !from_sfx ? T_mtp - 1 : 0;
+                    // Suffix lookup replaces MTP; chained tokens beyond T_mtp are not MTP decisions.  A merged
+                    // window's rows are prompt tokens, so it offers no drafts.
+                    const int64_t mtp_offered = use_mtp && !from_sfx && !merged ? T_mtp - 1 : 0;
                     const int64_t mtp_accepted = std::min<int64_t>(a, mtp_offered);
                     const std::string record = strata::program::serial_window_record(
                         req_trace_id.value(), trace_window_index++, trace_token_ids,
