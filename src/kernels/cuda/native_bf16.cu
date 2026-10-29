@@ -229,6 +229,114 @@ __global__ void bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t l
                     if (k < n_tok) y[(size_t) k * ldy + o0 + r] = acc[r][k];
 }
 
+#if defined(STRATA_HIP_GFX906)
+// gfx906 STRATA_GFX906_ROUTER_GEMV=RPB (1, 2 or 4): the router's 512 x 2560 BF16 GEMV, bitwise
+// bf16_f32_mmvf_rows_kernel<256, NT, RPB> (= one bf16_f32_mmvf_kernel<256> launch per output).  Thread t still owns
+// pairs t + 256 i (i = 0..4) with the two ordered FMAs; what changes is only how the work is issued:
+//   * the five iterations are unrolled and every weight and activation load is issued before the first FMA (the
+//     rows kernel issues them per iteration, ~2 waves per SIMD that mostly wait);
+//   * the 32-lane butterfly (xor 16, 8, 4, 2, 1) adds the same operands without LDS round trips: xor 16 is a
+//     ds_swizzle, xor 8 / 4 are DPP row_ror 8 / 4 (after the xor 16 and xor 8 steps the lanes row_ror reads hold
+//     the same partials as lane ^ 8 / lane ^ 4), xor 2 / 1 are DPP quad_perm.  Float adds commute, so each lane's
+//     sum is the __shfl_xor butterfly's bits.
+template <int CTRL>
+__device__ __forceinline__ float r906_dpp(float v) {
+    return __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), CTRL, 0xf, 0xf, false));
+}
+__device__ __forceinline__ float r906_sum32(float v) {
+    v += __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(v), 0x1f | (16 << 10)));   // xor 16
+    v += r906_dpp<0x128>(v);   // row_ror 8  = xor 8
+    v += r906_dpp<0x124>(v);   // row_ror 4  ~ xor 4 (differs only in bit 3, already reduced)
+    v += r906_dpp<0x4e>(v);    // quad_perm [2,3,0,1] = xor 2
+    v += r906_dpp<0xb1>(v);    // quad_perm [1,0,3,2] = xor 1
+    return v;
+}
+template <int NT, int RPB>
+__global__ void __launch_bounds__(256) router_gemv_906_kernel(const float* __restrict__ x, const uint16_t* __restrict__ w,
+                                                              float* __restrict__ y) {
+    constexpr int NI = 2560, NO = 512, P = NI / 2, IT = P / 256;
+    const int t = threadIdx.x, o0 = blockIdx.x * RPB;
+    __shared__ float partials[RPB][NT][32];
+    if (t < 32)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r)
+#pragma unroll
+            for (int k = 0; k < NT; ++k) partials[r][k][t] = 0.0f;
+    uint32_t wv[IT][RPB];
+    float2 in[IT][NT];
+#pragma unroll
+    for (int i = 0; i < IT; ++i)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r) wv[i][r] = __ldg(reinterpret_cast<const uint32_t*>(w + (size_t) (o0 + r) * NI) + t + 256 * i);
+#pragma unroll
+    for (int i = 0; i < IT; ++i)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) in[i][k] = __ldg(reinterpret_cast<const float2*>(x + (size_t) k * NI) + t + 256 * i);
+    float acc[RPB][NT];
+#pragma unroll
+    for (int r = 0; r < RPB; ++r)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) acc[r][k] = 0.0f;
+#pragma unroll
+    for (int i = 0; i < IT; ++i)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r) {
+            const float w0 = f32_from_bf16((uint16_t) wv[i][r]), w1 = f32_from_bf16((uint16_t) (wv[i][r] >> 16));
+#pragma unroll
+            for (int k = 0; k < NT; ++k) {
+                acc[r][k] = __fmaf_rn(w0, in[i][k].x, acc[r][k]);
+                acc[r][k] = __fmaf_rn(w1, in[i][k].y, acc[r][k]);
+            }
+        }
+#pragma unroll
+    for (int r = 0; r < RPB; ++r)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) acc[r][k] = r906_sum32(acc[r][k]);
+    __syncthreads();   // the zeroed partials
+    if ((t & 31) == 0)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r)
+#pragma unroll
+            for (int k = 0; k < NT; ++k) partials[r][k][t / 32] = acc[r][k];
+    __syncthreads();
+    if (t >= 32) return;
+#pragma unroll
+    for (int r = 0; r < RPB; ++r)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) {
+            const float v = r906_sum32(partials[r][k][t]);
+            if (t == 0) y[(size_t) k * NO + o0 + r] = v;
+        }
+}
+bool getenv_tsum() {
+    static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+    return ts;
+}
+int router_gemv_906_rpb() {
+    static const int v = [] { const char* e = std::getenv("STRATA_GFX906_ROUTER_GEMV"); const int r = e ? std::atoi(e) : 0; return r == 1 || r == 2 || r == 4 ? r : 0; }();
+    return v;
+}
+// x [n_tok][2560] (ldx 2560), y [n_tok][512] (ldy 512), 1 <= n_tok <= 4
+bool router_gemv_906(const float* x, const uint16_t* w, float* y, int n_tok, cudaStream_t st) {
+    const int rpb = router_gemv_906_rpb();
+    if (rpb == 0 || n_tok < 1 || n_tok > 4) return false;
+#define R906(NT) \
+    if (rpb == 1) router_gemv_906_kernel<NT, 1><<<512, 256, 0, st>>>(x, w, y); \
+    else if (rpb == 2) router_gemv_906_kernel<NT, 2><<<256, 256, 0, st>>>(x, w, y); \
+    else router_gemv_906_kernel<NT, 4><<<128, 256, 0, st>>>(x, w, y);
+    switch (n_tok) {
+        case 1: R906(1) break;
+        case 2: R906(2) break;
+        case 3: R906(3) break;
+        default: R906(4) break;
+    }
+#undef R906
+    const cudaError_t result = cudaGetLastError();
+    if (result != cudaSuccess) throw std::runtime_error(std::string("router_gemv_906 launch: ") + cudaGetErrorString(result));
+    return true;
+}
+#endif
+
 template <int B>
 void launch_rows(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy, int n_in, int n_out, int n_tok,
                  cudaStream_t st, const uint16_t* w_aux = nullptr, float* y_aux = nullptr, int64_t ldy_aux = 0) {
@@ -305,6 +413,8 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
 #if defined(STRATA_HIP_GFX906)
         // Exact router T2: omit only the two inactive columns of the existing NT=4 rows kernel.
         // Live output pair/FMA/XOR32 order is unchanged. Other shapes, strides and TSUM keep baseline.
+        if (n_in == 2560 && n_out == 512 && ldx == n_in && ldy == n_out && !getenv_tsum() && router_gemv_906(x, w, y, n_tok, st))
+            return;
         if (n_tok == 2 && n_in == 2560 && n_out == 512 && ldx == n_in && ldy == n_out) {
             static const bool exact_t2 = [] { const char* v = std::getenv("STRATA_GFX906_ROUTER_T2_EXACT"); return v && v[0] == '1' && v[1] == 0; }();
             static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
@@ -386,6 +496,7 @@ void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
     static const bool rows = [] { const char* v = std::getenv("STRATA_MMVF_ROWS"); return v && v[0] == '1'; }();
     static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
     static const bool router_t1_rows = [] { const char* v = std::getenv("STRATA_GFX906_ROUTER_T1_ROWS"); return v && v[0] == '1' && v[1] == 0; }();
+    if (rows && !ts && n_in == 2560 && n_out == 512 && router_gemv_906(x, w, y, 1, st)) return;
     if (router_t1_rows && rows && !ts && n_in == 2560 && n_out == 512) {
         bf16_f32_mmvf_rows_kernel<256, 1, 4><<<128, 256, 0, st>>>(x, n_in, w, y, n_out, 2560, 512, 1);
         const cudaError_t result = cudaGetLastError();
