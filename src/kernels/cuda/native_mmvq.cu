@@ -2499,7 +2499,7 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
 // elements of ONE Q8_1 block (one sub-block scale for Q6_K: 16 elements share it; one sub-block scale + min for Q4_K/Q5_K),
 // so a column costs 4 dp4a + 1 convert + 1-2 multiplies/FMAs per 16 elements.  The per-row scale goes in once per row
 // (d * sc as a float: an fp16 times an int8/6-bit integer is exact in fp32).  The rows of a wavefront share each lane's
-// activation loads (R = STRATA_MMVQ_IACC_ROWS, default STRATA_MMVQ_WAVE_ROWS).
+// activation loads (R = STRATA_MMVQ_IACC_ROWS, default 4 rows when n_out >= 4096, else 2).
 // Rounding: the integer part is exact (|sum| <= 16 * 32 * 127 = 65024 for Q6_K, < 2^24, so its float is exact); the
 // float sums are grouped differently from the wave kernel (one rounding per 16 elements instead of ~2 per 4), so the
 // bits change but not the precision: no input is quantized further.  Every column still has the same code whatever
@@ -2521,14 +2521,14 @@ int iacc_mask() {
     }();
     return m;
 }
-int iacc_rows() {
+int iacc_rows(int n_out) {   // default: 4 rows a wavefront on the big projections, 2 on the small (640-row) ones
     if (g_iacc_rows > 0) return g_iacc_rows;
     static const int r = [] {
         const char* v = std::getenv("STRATA_MMVQ_IACC_ROWS");
         const int n = v ? std::atoi(v) : 0;
         return n == 1 || n == 2 || n == 4 ? n : 0;
     }();
-    return r > 0 ? r : wave_rows();
+    return r > 0 ? r : (n_out >= 4096 ? 4 : 2);
 }
 __device__ __forceinline__ int iacc_ld32(const uint8_t* p) {   // 2-byte aligned (the 210-byte Q6_K blocks)
     const uint16_t* h = reinterpret_cast<const uint16_t*>(p);
@@ -2538,9 +2538,8 @@ __device__ __forceinline__ int iacc_ld32(const uint8_t* p) {   // 2-byte aligned
 __device__ __forceinline__ int iacc_sub32(int x) { return (x + 0x60606060) ^ 0x80808080; }
 
 // Lane layout: K ints (4K elements) of ONE Q8_1 block per lane, LPB = 64 / K lanes a super-block, K super-blocks a
-// wavefront iteration.  K = 4 (16 lanes a block) when the row's block count divides by 4, else K = 2 (32 lanes a
-// block): a 2560-wide row has 10 blocks, which K = 4 covers in 3 iterations at 83% of the lanes and K = 2 in 5 at 100%
-// (STRATA_MMVQ_IACC_K=2/4 forces one).  Lane sub = lane % LPB: Q8_1 block b8 = sub / (8 / K), part lq = sub % (8 / K).
+// wavefront iteration.  K = 4 (16 lanes a block) by default; STRATA_MMVQ_IACC_K=2 (32 lanes a block, 100% of the
+// lanes on a 10-block row instead of 83%) was slower on every shape measured.  Lane sub = lane % LPB: Q8_1 block b8 = sub / (8 / K), part lq = sub % (8 / K).
 // Each type splits a row's work into fetch (loads only, so a lane's loads for all rows and columns are in flight
 // together) and decode (the integer weights and the per-row float scales a = d * sc, b = dmin * m).
 struct IaccLane { unsigned o0, o1, o2; int s0, s1; unsigned xq, xd; };
@@ -2735,7 +2734,8 @@ int iacc_k(int bpr) {
     if (g_iacc_k == 2 || g_iacc_k == 4) return g_iacc_k;
     static const int forced = [] { const char* v = std::getenv("STRATA_MMVQ_IACC_K"); return v ? std::atoi(v) : 0; }();
     if (forced == 2 || forced == 4) return forced;
-    return bpr % 4 == 0 ? 4 : 2;
+    (void) bpr;
+    return 4;   // K = 2 measured slower everywhere once the reduction went to DPP, even at 10 blocks a row
 }
 template<template<int> class P, int K, int NCOLS, int R>
 void iacc_launch_r(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
@@ -2745,7 +2745,7 @@ void iacc_launch_r(const void* w, const void* x, float* y, int n_in, int n_out, 
 }
 template<template<int> class P, int K, int NCOLS>
 void iacc_launch_n(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
-    switch (iacc_rows()) {
+    switch (iacc_rows(n_out)) {
         case 2: iacc_launch_r<P, K, NCOLS, 2>(w, x, y, n_in, n_out, s); break;
         case 4: iacc_launch_r<P, K, NCOLS, 4>(w, x, y, n_in, n_out, s); break;
         default: iacc_launch_r<P, K, NCOLS, 1>(w, x, y, n_in, n_out, s); break;
