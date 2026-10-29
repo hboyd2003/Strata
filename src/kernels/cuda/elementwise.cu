@@ -259,6 +259,27 @@ __global__ void copy_rows_from_mapped_kernel(float4* __restrict__ dst, const vol
         for (int64_t i = threadIdx.x; i < row4; i += blockDim.x) d[i] = const_cast<const float4*>(sr)[i];
     }
 }
+// exp/tier1 STRATA_POST_COPY_WIDE=1: the CPU rows copy with one float4 a thread (block = 128 float4 of one row,
+// gridDim.x blocks a row) instead of a block a row looping over it; the hit test spread over the block
+// (__syncthreads_or).  The same reads, the same values: a plain copy.  Also widens copy_i32_from_mapped (the plan copy) to
+// one word a thread, up to 1024 threads.
+__global__ void copy_rows_from_mapped_wide_kernel(float4* __restrict__ dst, const volatile float4* src, int64_t row4,
+                                                  const int32_t* __restrict__ hit_rows, const int32_t* __restrict__ count) {
+    const int row = blockIdx.y;
+    const int c = *count;
+    int h = 0;
+    for (int i = threadIdx.x; i < c; i += blockDim.x) h |= hit_rows[i] == row;
+    const int hit = __syncthreads_or(h);
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= row4) return;
+    float4* d = dst + (int64_t) row * row4;
+    if (hit) d[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    else d[i] = const_cast<const float4*>(src + (int64_t) row * row4)[i];
+}
+static bool post_copy_wide() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_POST_COPY_WIDE"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
 namespace {
 __global__ void scatter_rows_kernel(const float4* __restrict__ src, float4* dst, const int32_t* __restrict__ rows,
                                     int64_t w4) {
@@ -282,6 +303,12 @@ void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t w
     if ((width & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
         std::fprintf(stderr, "copy_rows_from_mapped: width must be a multiple of 4 and both pointers 16-byte aligned\n");
         std::exit(1);
+    }
+    if (post_copy_wide()) {
+        const int64_t row4 = width / 4;
+        copy_rows_from_mapped_wide_kernel<<<dim3((unsigned) ((row4 + 127) / 128), (unsigned) rows), 128, 0, (cudaStream_t) stream>>>(
+            (float4*) dst, (const volatile float4*) src, row4, hit_rows, count);
+        return;
     }
     copy_rows_from_mapped_kernel<<<(unsigned) rows, 128, 0, (cudaStream_t) stream>>>((float4*) dst, (const volatile float4*) src,
                                                                                   width / 4, hit_rows, count);
@@ -414,6 +441,12 @@ __global__ void copy_from_mapped_multi_kernel(MappedCopies a) {
 
 void copy_i32_from_mapped(int32_t* dst, const int32_t* src, int64_t n, void* stream) {
     if (n <= 0) return;
+    if (post_copy_wide()) {   // exp/tier1: one block, one word a thread (up to 1024 threads), as before upstream's grid
+        const int threads = (int) (n >= 1024 ? 1024 : (n + 63) / 64 * 64);
+        copy_i32_from_mapped_kernel<<<1, threads, 0, (cudaStream_t) stream>>>(dst, (const volatile int32_t*) src, n);
+        check_launch("copy_i32_from_mapped");
+        return;
+    }
     const unsigned bx = (unsigned) ((n + 127) / 128 < 64 ? (n + 127) / 128 : 64);
     copy_i32_from_mapped_kernel<<<bx < 1 ? 1 : bx, 128, 0, (cudaStream_t) stream>>>(
         dst, (const volatile int32_t*) src, n);
