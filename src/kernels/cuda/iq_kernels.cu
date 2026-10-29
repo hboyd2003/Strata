@@ -841,9 +841,9 @@ STRATA_TQP_FMT(149)
 // The formats of each role, one list each so a type cannot be in one switch and missing from another.  Every
 // entry is a kernel template for each CUDA architecture of the build, hence two lists rather than one.
 #ifdef STRATA_Q6K_EXPERTS   // opt-in build (-DSTRATA_Q6K_EXPERTS=ON): one more instance per kernel, loaded at start
-#define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(14) X(6) X(2) X(3) X(8) X(40) X(144) X(145) X(147) X(148) X(149)
+#define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(14) X(6) X(2) X(3) X(8) X(40) X(144) X(145) X(147) X(148) X(149)
 #else
-#define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(6) X(2) X(3) X(8) X(40) X(144) X(145) X(147) X(148) X(149)
+#define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(6) X(2) X(3) X(8) X(40) X(144) X(145) X(147) X(148) X(149)
 #endif
 // Q5_K / Q6_K downs: Qwen3.6-35B-A3B (FF 512, whole 256-blocks per row); Flash-Next's FF 640 never selects them
 #ifdef STRATA_Q6K_EXPERTS
@@ -3380,6 +3380,16 @@ int d_qk(int t) {
 #define STRATA_QK(T) case T: return Fmt<T>::qk;
         STRATA_D_FMTS(STRATA_QK)
 #undef STRATA_QK
+        default: return 0;
+    }
+}
+// work items per block of a gate/up format (Fmt::ipb; 0 = not a gate/up format): row_dot_80_sub16 needs
+// (n_embd / qk) * ipb == 80
+int gu_ipb(int t) {
+    switch (t) {
+#define STRATA_IPB(T) case T: return Fmt<T>::ipb;
+        STRATA_GU_FMTS(STRATA_IPB)
+#undef STRATA_IPB
         default: return 0;
     }
 }
@@ -6323,7 +6333,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const bool v1 = g_grouped_v1;
     const int64_t gy = (v1 || grid_groups <= 0 || grid_groups > cap_groups) ? cap_groups : grid_groups;
     const int gu_rows = (!g_old_kernels && !g_no_sub16_gu && L.n_embd == 2560 && gu_split(L.gu_type) &&
-                         gu_qk(L.gu_type) != 128 && L.gu_type != 12 && L.gu_type != 13) ? 16 : GU_ROWS;   // qk 128 (APR trellis): no sub-16 rows, see launch_gu
+                         gu_qk(L.gu_type) != 128 && L.gu_type != 12 && L.gu_type != 13 &&
+                         (L.n_embd / gu_qk(L.gu_type)) * gu_ipb(L.gu_type) == 80) ? 16 : GU_ROWS;   // qk 128 (APR trellis): no sub-16 rows, see launch_gu
     const dim3 ggu((unsigned) ((2 * L.n_ff + gu_rows - 1) / gu_rows), (unsigned) gy);
 #if STRATA_EXP_LAYOUTS
 #if defined(STRATA_HIP_GFX906)

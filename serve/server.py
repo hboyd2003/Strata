@@ -9181,6 +9181,18 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")
     import serve.frontend as _frontend
     _frontend.ENV_TO_USER = etu
+    stu = cfg.get("system_to_user", False)             # opt-in: see frontend.SystemToUser
+    if stu is True:
+        stu = {}
+    if stu is not False:
+        keys = {"learn", "patterns", "ignore", "state", "place"}
+        if not isinstance(stu, dict) or set(stu) - keys:
+            raise SystemExit(f"[strata] config \"system_to_user\" must be true, false or an object with "
+                             f"{', '.join(sorted(keys))}, not {stu!r}")
+        try:
+            _frontend.SYSTEM_TO_USER = _frontend.SystemToUser(**stu)
+        except ValueError as e:
+            raise SystemExit(f"[strata] config \"system_to_user\": {e}")
     rs = cfg.get("repeat_stop_tokens", REPEAT_STOP_TOKENS)   # #606: opt-out with 0
     if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
