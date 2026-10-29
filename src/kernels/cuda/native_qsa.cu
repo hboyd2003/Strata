@@ -48,6 +48,9 @@ __global__ void norm(const float* input, const float* __restrict__ gamma, float*
     const std::size_t row_offset = std::size_t(blockIdx.x) * n_cols;
     input += row_offset; output += row_offset;
     float partial = 0.0f;
+#if defined(STRATA_HIP_GFX906)
+#pragma unroll 4   // gfx906: a thread's loads in flight together (the same sum order)
+#endif
     for (std::size_t col = tid; col < std::size_t(n_cols); col += BlockSize) {
         const float x = input[col];
         partial += x * x;
@@ -63,6 +66,9 @@ __global__ void norm(const float* input, const float* __restrict__ gamma, float*
     partial = warp_sum(partial);
     const float mean = partial / n_cols;
     const float scale = rsqrtf(mean + epsilon);
+#if defined(STRATA_HIP_GFX906)
+#pragma unroll 4
+#endif
     for (std::size_t col = tid; col < std::size_t(n_cols); col += BlockSize)
         output[col] = scale * input[col] * gamma[col];
 }
