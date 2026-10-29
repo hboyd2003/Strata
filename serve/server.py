@@ -3195,6 +3195,36 @@ def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
     return ["--tail-role-token", str(role[0])]
 
 
+def reminder_tail_args(cfg: dict, exe: str, tok) -> list[str] | None:
+    """Opt-in (the config's "qwen_code_tail": true): the engine arguments that keep a client's per-request
+    `<system-reminder>` turn (Qwen Code's memory catalog: a separate short user turn on the end of every request, left
+    out of its history on the next) out of the conversation checkpoint, so the next turn reuses the conversation.
+    None when off (the default) or the engine is too old for it (said once).  ValueError for a non-boolean."""
+    on = cfg.get("qwen_code_tail", False)
+    if not isinstance(on, bool):
+        raise ValueError(f'"qwen_code_tail" must be true or false, not {on!r}')
+    if not on:
+        return None
+    try:
+        with open(engine_binary(exe, cfg), "rb") as f:
+            known = b"--tail-reminder-ids" in f.read()
+    except OSError:
+        known = False
+    # the tag's tokens as they open the turn: the tag is followed by a newline there, and a BPE can merge its ">"
+    # with that newline, so only the tokens the tag alone and the tag + newline share are matched
+    ids = tok.encode("<system-reminder>", parse_special=False)
+    nl = tok.encode("<system-reminder>\n", parse_special=False)
+    while ids and nl[:len(ids)] != ids:
+        ids = ids[:-1]
+    if not known or not ids:
+        print("[strata] qwen_code_tail needs an engine with --tail-reminder-ids: the reminder stays in the "
+              "checkpoint", flush=True)
+        return None
+    print("[strata] qwen_code_tail: a trailing <system-reminder> turn stays out of the conversation checkpoint",
+          flush=True)
+    return ["--tail-reminder-ids", ",".join(str(int(i)) for i in ids)]
+
+
 def engine_silence_s(cfg: dict) -> float:
     """#481: the config's "engine_silence_s" - seconds an engine may print nothing during a request before the server
     ends it (default ENGINE_SILENCE_S; 0 = wait forever).  ValueError for anything but a number >= 0."""
@@ -9329,8 +9359,10 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             raise SystemExit(f"[strata] config {e}")
         try:
             effort_end = effort_end_args(cfg, exe, tok)  # #458
+            reminder_tail = reminder_tail_args(cfg, exe, tok)
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
+        engine_extra = (effort_end or []) + (reminder_tail or [])
         from serve import replicas as rp
         try:
             groups = rp.gpu_groups(cfg)
@@ -9344,11 +9376,11 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         except split_mod.SplitConfigError as e:
             raise SystemExit(f"[strata] config {e}")
         if groups:
-            engine = start_replicas(cfg, groups, exe, effort_end or [], lazy, offline=a.offline)
+            engine = start_replicas(cfg, groups, exe, engine_extra, lazy, offline=a.offline)
         elif split:
-            engine = start_split(cfg, split, exe, effort_end or [], lazy, offline=a.offline)
+            engine = start_split(cfg, split, exe, engine_extra, lazy, offline=a.offline)
         else:
-            engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
+            engine = StrataEngine(exe, engine_args(cfg) + engine_extra, cwd=cfg.get("cwd"), log=cfg.get("log"),
                                   env=env, lazy=lazy)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
         warn_tight_ram(engine.info.get("arena_mib"))
