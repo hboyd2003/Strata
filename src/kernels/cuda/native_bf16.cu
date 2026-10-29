@@ -256,6 +256,7 @@ __global__ void __launch_bounds__(256) router_gemv_906_kernel(const float* __res
                                                               float* __restrict__ y) {
     constexpr int NI = 2560, NO = 512, P = NI / 2, IT = P / 256;
     const int t = threadIdx.x, o0 = blockIdx.x * RPB;
+    if (o0 >= NO) return;   // the padding blocks (doubr 57fa6d85: a grid of exactly 512 blocks runs ~7x slower on MI50)
     __shared__ float partials[RPB][NT][32];
     if (t < 32)
 #pragma unroll
@@ -321,9 +322,9 @@ bool router_gemv_906(const float* x, const uint16_t* w, float* y, int n_tok, cud
     const int rpb = router_gemv_906_rpb();
     if (rpb == 0 || n_tok < 1 || n_tok > 4) return false;
 #define R906(NT) \
-    if (rpb == 1) router_gemv_906_kernel<NT, 1><<<512, 256, 0, st>>>(x, w, y); \
-    else if (rpb == 2) router_gemv_906_kernel<NT, 2><<<256, 256, 0, st>>>(x, w, y); \
-    else router_gemv_906_kernel<NT, 4><<<128, 256, 0, st>>>(x, w, y);
+    if (rpb == 1) router_gemv_906_kernel<NT, 1><<<512 + 64, 256, 0, st>>>(x, w, y); \
+    else if (rpb == 2) router_gemv_906_kernel<NT, 2><<<256 + 64, 256, 0, st>>>(x, w, y); \
+    else router_gemv_906_kernel<NT, 4><<<128 + 64, 256, 0, st>>>(x, w, y);
     switch (n_tok) {
         case 1: R906(1) break;
         case 2: R906(2) break;
