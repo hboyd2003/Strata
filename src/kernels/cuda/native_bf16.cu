@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -313,13 +314,21 @@ bool getenv_tsum() {
     static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
     return ts;
 }
-int router_gemv_906_rpb() {
-    static const int v = [] { const char* e = std::getenv("STRATA_GFX906_ROUTER_GEMV"); const int r = e ? std::atoi(e) : 0; return r == 1 || r == 2 || r == 4 ? r : 0; }();
-    return v;
+// STRATA_GFX906_ROUTER_GEMV=1|2|4 fixes the rows a block; =auto takes router_chain_bench's best per T on the MI50
+// (T1 11.6 -> 5.9 us at 1, T2 10.2 -> 7.9 and T3 15.1 -> 9.5 at 2, T4 16.5 -> 11.0 at 4)
+int router_gemv_906_rpb(int n_tok) {
+    static const int v = [] {
+        const char* e = std::getenv("STRATA_GFX906_ROUTER_GEMV");
+        if (e && std::strcmp(e, "auto") == 0) return -1;
+        const int r = e ? std::atoi(e) : 0;
+        return r == 1 || r == 2 || r == 4 ? r : 0;
+    }();
+    if (v >= 0) return v;
+    return n_tok == 1 ? 1 : n_tok <= 3 ? 2 : 4;
 }
 // x [n_tok][2560] (ldx 2560), y [n_tok][512] (ldy 512), 1 <= n_tok <= 4
 bool router_gemv_906(const float* x, const uint16_t* w, float* y, int n_tok, cudaStream_t st) {
-    const int rpb = router_gemv_906_rpb();
+    const int rpb = router_gemv_906_rpb(n_tok);
     if (rpb == 0 || n_tok < 1 || n_tok > 4) return false;
 #define R906(NT) \
     if (rpb == 1) router_gemv_906_kernel<NT, 1><<<512 + 64, 256, 0, st>>>(x, w, y); \
