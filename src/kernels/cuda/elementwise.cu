@@ -323,14 +323,15 @@ void copy_rows_from_mapped_after(const uint32_t* flag, uint32_t value, float* ds
     copy_rows_from_mapped_kernel<<<(unsigned) rows, 128, 0, (cudaStream_t) stream>>>(
         (float4*) dst, (const volatile float4*) src, width / 4, hit_rows, count, (const volatile uint32_t*) flag, value);
 }
-void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream) {
+void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream, int max_blocks) {
     if (n <= 0) return;
     if ((n & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
         std::fprintf(stderr, "copy_from_mapped: n must be a multiple of 4 and both pointers 16-byte aligned\n");
         std::exit(1);
     }
     const int64_t n4 = n / 4;
-    const int blocks = (int) ((n4 + 255) / 256 < 64 ? (n4 + 255) / 256 : 64);
+    const int64_t cap = max_blocks < 1 ? 1 : max_blocks;
+    const int blocks = (int) ((n4 + 255) / 256 < cap ? (n4 + 255) / 256 : cap);
     copy_from_mapped_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>((float4*) dst, (const volatile float4*) src, n4);
     check_launch("copy_from_mapped");
 }
