@@ -4025,6 +4025,9 @@ class Service:
         self.auto_sessions_keep = 12                  # newest auto-*.bin files kept (0: no count limit)
         self.auto_sessions_max_gb = 100.0             # their total bytes cap (0: no cap)
         self.auto_conv = None                         # the conversation the engine holds: {"key", "tokens"}
+        self.auto_stats = {"switches": 0, "saves": 0, "restores": 0, "failures": 0, "pruned": 0,
+                           "last_event": None, "last_tokens": None, "last_bytes": None, "last_ms": None,
+                           "last_at": None, "last_error": None}   # the Monitor's Auto sessions card
         self.auto_tls = threading.local()             # this request's conversation key (set by prepare)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
@@ -4843,6 +4846,7 @@ class Service:
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
+                "auto_sessions": self.auto_sessions_view(),
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
@@ -5311,6 +5315,7 @@ class Service:
         if cur is not None and cur.get("key") == key:
             cur["tokens"] = max(int(cur.get("tokens") or 0), len(ids))
             return
+        self.auto_stats["switches"] += 1
         try:
             # A failed save normally skips the restore too: the held conversation is then still the engine's and
             # parks in RAM as before - a restore would replace it with weaker and lose it for good.  A held
@@ -5328,6 +5333,7 @@ class Service:
             self._auto_session_restore(key)
         except Exception as e:                        # a cache must never fail the request
             print(f"[strata] auto sessions: {e}", flush=True)
+            self.auto_stats.update(failures=self.auto_stats["failures"] + 1, last_error=str(e)[:200])
         self.auto_conv = {"key": key, "tokens": len(ids)}
 
     def _auto_session_save(self, key):
@@ -5335,6 +5341,7 @@ class Service:
         r = self.engine.session_file("save", os.path.join(self.slot_save_path, name))
         print(f"[strata] auto sessions: saved {r.get('tokens')} tokens ({r.get('bytes', 0) / 1e9:.2f} GB) to "
               f"{name} in {float(r.get('ms') or 0):.0f} ms", flush=True)
+        self._auto_session_note("saved", r)
         self._auto_session_prune()
 
     def _auto_session_restore(self, key):
@@ -5345,6 +5352,45 @@ class Service:
         r = self.engine.session_file("restore", path)
         print(f"[strata] auto sessions: restored {r.get('tokens')} tokens from {name} in "
               f"{float(r.get('ms') or 0):.0f} ms", flush=True)
+        self._auto_session_note("restored", r)
+
+    def _auto_session_note(self, event, r):
+        st = self.auto_stats
+        st["saves" if event == "saved" else "restores"] += 1
+        st.update(last_event=event, last_tokens=r.get("tokens"), last_bytes=r.get("bytes"), last_ms=r.get("ms"),
+                  last_at=time.time())
+
+    def _auto_session_files(self) -> list:
+        """The auto-*.bin files in slot_save_path, newest first: (mtime, size, path)."""
+        entries = []
+        with os.scandir(self.slot_save_path) as it:
+            for e in it:
+                if e.is_file() and e.name.startswith("auto-") and e.name.endswith(".bin"):
+                    st = e.stat()
+                    entries.append((st.st_mtime, st.st_size, e.path))
+        entries.sort(reverse=True)
+        return entries
+
+    def auto_sessions_view(self) -> dict:
+        """The Monitor's Auto sessions card: the limits, the conversation the engine holds, the auto-*.bin files on
+        disk and what the switches since the start did."""
+        view = {"enabled": bool(self.auto_sessions), "path": self.slot_save_path,
+                "min_tokens": self.auto_sessions_min_tokens, "keep": self.auto_sessions_keep,
+                "max_gb": self.auto_sessions_max_gb, **self.auto_stats,
+                "files": None, "files_bytes": None, "newest_at": None, "held_tokens": None, "held_on_disk": None}
+        if not self.auto_sessions:
+            return view
+        try:
+            entries = self._auto_session_files()
+            view.update(files=len(entries), files_bytes=sum(size for _, size, _ in entries),
+                        newest_at=entries[0][0] if entries else None)
+        except OSError:
+            pass
+        cur = self.auto_conv
+        if cur is not None:
+            view["held_tokens"] = int(cur.get("tokens") or 0)
+            view["held_on_disk"] = os.path.isfile(os.path.join(self.slot_save_path, f"auto-{cur['key']}.bin"))
+        return view
 
     def auto_session_shutdown_save(self):
         """A normal stop must not lose the conversation the engine holds: save it as the auto-sessions file the next
@@ -5370,16 +5416,10 @@ class Service:
         keep = int(self.auto_sessions_keep or 0)
         cap = int(float(self.auto_sessions_max_gb or 0) * (1 << 30))
         try:
-            entries = []
-            with os.scandir(self.slot_save_path) as it:
-                for e in it:
-                    if e.is_file() and e.name.startswith("auto-") and e.name.endswith(".bin"):
-                        st = e.stat()
-                        entries.append((st.st_mtime, st.st_size, e.path))
+            entries = self._auto_session_files()      # newest first
         except OSError as e:
             print(f"[strata] auto sessions: cannot prune ({e})", flush=True)
             return
-        entries.sort(reverse=True)                    # newest first
         total = sum(size for _, size, _ in entries)
         removed = 0
         for i in range(len(entries) - 1, -1, -1):     # oldest first
@@ -5394,6 +5434,7 @@ class Service:
             except OSError:
                 break
         if removed:
+            self.auto_stats["pruned"] += removed
             print(f"[strata] auto sessions: pruned {removed} file(s), {total / 1e9:.1f} GB kept", flush=True)
 
     def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None,
