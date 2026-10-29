@@ -720,6 +720,31 @@ struct In {
     const std::vector<std::array<uint64_t, 5>>* verify_kv = nullptr;
     SessionError kind = SessionError::invalid;
     size_t kv_layer = 0;
+    // Streaming read pass: `limits.admit` is asked as the metadata grows, with `base` (the blocks and small vectors)
+    // plus what the parse has allocated so far plus the array about to be - each priced from the size the file
+    // declares, before the array is allocated.  `grow_admit` is off for every other walk.
+    bool grow_admit = false;
+    uint64_t base = 0, held = 0;
+    // The apply pass: the metadata was checked and kept by the read pass, so this walk hashes it and drops it
+    // instead of allocating a second copy.
+    bool discard = false;
+    bool room(uint64_t extra) {
+        if (!grow_admit || !limits.admit) return true;
+        const uint64_t need = (base > UINT64_MAX - held || base + held > UINT64_MAX - extra) ? UINT64_MAX : base + held + extra;
+        std::string why;
+        if (!limits.admit(need, why)) { kind = SessionError::memory; return fail(why); }
+        held += extra;
+        return true;
+    }
+    bool skip(uint64_t c) {
+        uint8_t sink[65536];
+        while (c) {
+            const size_t k = (size_t) std::min<uint64_t>(c, sizeof sink);
+            if (!raw(sink, k)) return false;
+            c -= k;
+        }
+        return true;
+    }
     bool fail(const std::string& m) { if (error.empty()) error = "session file: " + m; return false; }
     bool raw(void* p, size_t c) {
         if (c > left) return fail("payload ends early");
@@ -742,6 +767,8 @@ struct In {
     template<class T> bool vec(std::vector<T>& v, uint64_t limit = UINT64_MAX) {
         uint64_t n = 0;
         if (!count(n, sizeof(T), limit)) return false;
+        if (discard) return skip(n * sizeof(T));
+        if (!room(n * sizeof(T))) return false;
         v.resize((size_t) n);
         return raw(v.data(), (size_t) n * sizeof(T));
     }
@@ -759,7 +786,9 @@ bool get_checkpoint(In& in, ConversationCheckpoint& c) {
     if (!in.vec(c.ids, in.limits.max_tokens)) return false;
     uint64_t n = 0;
     if (!in.count(n, 16, in.limits.max_tokens)) return false;
-    c.imgs.resize((size_t) n);
+    if (in.discard) { if (!in.skip(n * 16)) return false; }
+    else if (!in.room(n * sizeof(ConversationImageKey))) return false;
+    c.imgs.resize(in.discard ? 0 : (size_t) n);
     for (auto& k : c.imgs) if (!in.i64(k.start) || !in.u64(k.hash)) return false;
     const auto& m = in.limits.max_state_bytes;   // byte arrays: element and byte counts are the same
     return in.vec(c.gdn, m[0]) && in.vec(c.ple, m[1]) && in.vec(c.tails, m[2]) && in.vec(c.dead, m[3]) &&
@@ -778,10 +807,19 @@ bool get_meta_prefix(In& in, SavedConversation& s) {
         return in.fail("saved with another layer range than this runtime's");
     if (cvec > 1) return in.fail("invalid cvec flag");
     s.cvec = cvec == 1;
-    if (!get_checkpoint(in, s.live)) return false;
+    if (in.discard) {
+        ConversationCheckpoint scratch;
+        if (!get_checkpoint(in, scratch)) return false;
+    } else if (!get_checkpoint(in, s.live)) return false;
     uint64_t n = 0;
     // a checkpoint is at least 8 counts + used = 72 bytes; a K/V layer at least 7 + 5 = 96
     if (!in.count(n, 72, in.limits.max_checkpoints)) return false;
+    if (in.discard) {
+        ConversationCheckpoint scratch;
+        for (uint64_t i = 0; i < n; ++i) if (!get_checkpoint(in, scratch)) return false;
+        return true;
+    }
+    if (!in.room(n * sizeof(ConversationCheckpoint))) return false;
     s.checkpoints.resize((size_t) n);
     for (auto& c : s.checkpoints) if (!get_checkpoint(in, c)) return false;
     return true;
@@ -1345,9 +1383,13 @@ bool read_stream_impl(const std::string& path, const SessionFileIdentity& id, Sa
     ReadFile rf;
     uint64_t payload = 0;
     if (!rf.open(path, id, limits, payload, error, st)) return false;
+    // The two blocks, the small vectors and one hash per block are known now; the metadata is priced as the parse
+    // reaches each array, from the size the file declares (In::room) - not from the limits' worst case.
+    const uint64_t fixed = sat_add(sat_add(sat_mul(2, kBlock), uint64_t(1) << 20),
+                                   sat_mul(rf.size / kBlock + 1, 6 * sizeof(uint64_t)));
     if (limits.admit) {
         std::string why;
-        if (!limits.admit(session_read_stream_peak_bytes(rf.size, limits), why)) {
+        if (!limits.admit(fixed, why)) {
             st.error = SessionError::memory;
             error = "session file: " + why;
             return false;
@@ -1356,6 +1398,8 @@ bool read_stream_impl(const std::string& path, const SessionFileIdentity& id, Sa
     SavedConversation parsed;
     In in{&rf.source, SessionHasher(0), payload, error, limits};
     in.record_kv = kv_part_bytes;
+    in.grow_admit = true;
+    in.base = fixed;
     if (!get_payload_streamed(in, parsed, {})) { st.error = in.kind; return false; }
     if (in.left) { error = "session file: payload has " + std::to_string(in.left) + " unparsed bytes"; return false; }
     uint8_t t[kTrailer];
@@ -1385,9 +1429,10 @@ bool apply_stream_impl(const std::string& path, const SessionFileIdentity& id, c
     uint64_t payload = 0;
     if (!rf.open(path, id, SessionReadLimits{}, payload, error, st)) return false;
     SessionReadLimits open;   // the read pass checked the engine's bounds; this walk only hands the K/V over
-    SavedConversation parsed;   // re-parsed, then discarded
+    SavedConversation parsed;   // stays empty: In::discard hashes the metadata and drops it
     In in{&rf.source, SessionHasher(0), payload, error, open};
     in.verify_kv = &kv_part_bytes;
+    in.discard = true;
     if (!get_payload_streamed(in, parsed, sink)) { st.error = in.kind; return false; }
     if (in.left) { error = "session file: payload has " + std::to_string(in.left) + " unparsed bytes"; return false; }
     uint8_t t[kTrailer];
