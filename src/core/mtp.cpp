@@ -480,7 +480,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         prio = cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_hi) == cudaSuccess;
     cudaGetLastError();
 #endif
-#if defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906 too (opt-in there: the gfx12 default does not match it)
     // engine-latency, STRATA_MTP_HIP_PRIO (default on gfx1200/gfx1201, =1 elsewhere opt-in, =0 off): the draft stream at the
     // highest priority.  ROCm hands out hardware queues per priority (GPU_MAX_HW_QUEUES per level), so the drafter gets a
     // queue of its own: its round no longer waits behind the commit graph that the verifier's stream launched just before

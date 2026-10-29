@@ -1142,7 +1142,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         return cudaStreamCreateWithFlags(s, cudaStreamNonBlocking);
     };
     bool copy_made = false;
-#if defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906 too (opt-in)
     // engine-latency, STRATA_COPY_HIP_PRIO=1 (opt-in): the copy stream at high priority, so it gets a hardware queue of
     // its own (ROCm hands queues out per priority).  Sharing one with the window's stream, --pcie-mode dma's copies and
     // their host function queue behind the window's graph, which spins on the flag they raise (a timeout at layer 1).
