@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
@@ -43,6 +44,8 @@ const Case CASES[] = {
     {"IQ4_XS", 23, 2560, 6144, 256, 136, {0, -1}},
     {"Q6_K q", 14, 2560, 12288, 256, 210, {208, -1}},
     {"Q6_K head", 14, 2560, 248320, 256, 210, {208, -1}},
+    {"Q6_K dhead", 14, 2560, 106299, 256, 210, {208, -1}},   // the MTP draft head over rt/draft_vocab.bin
+    {"Q6_K dhead en", 14, 2560, 40525, 256, 210, {208, -1}},   // ... over draft_vocab_en.bin
 };
 const int WIDTHS[] = {1, 2, 3, 4, 5};
 // exp/tier1: rows a wavefront, STRATA_MMVQ_MUL24, STRATA_MMVQ_Q6K_R4 - every config bitwise the first's
@@ -173,8 +176,10 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     if (!ck(cudaStreamCreate(&s), "stream create")) return 1;
     int bad = 0, skipped = 0;
+    const char* only = std::getenv("STRATA_BENCH_CASE");   // a substring of the case names to run (all: unset)
     for (const Case& c : CASES)
         for (int T : WIDTHS) {
+            if (only != nullptr && std::strstr(c.name, only) == nullptr) continue;
             const int r = run_case(c, T, bench, s);
             if (r < 0) ++skipped;
             else bad += r;
