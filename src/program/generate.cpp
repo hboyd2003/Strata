@@ -356,7 +356,7 @@ cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_
         return on;
     }();
     // how often the kernel copy runs and why it falls back (0 kernel, 1 size, 2 src align, 3 dst align, 4 unmapped):
-    // the first fallback of each kind is printed, and the counts every 2000 copies
+    // the first fallback of each kind is printed, and the counts every 100000 copies
     static std::atomic<int64_t> n_by[5];
     auto tally = [&](int k) {
         if (k > 0 && n_by[k].load(std::memory_order_relaxed) == 0)
@@ -365,7 +365,7 @@ cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_
                          : k == 3 ? "dst not 16-byte aligned" : "src not mapped", bytes, src, dst);
         const int64_t total = n_by[0].load() + n_by[1].load() + n_by[2].load() + n_by[3].load() + n_by[4].load() + 1;
         n_by[k].fetch_add(1, std::memory_order_relaxed);
-        if (total % 2000 == 0)
+        if (total % 100000 == 0)
             std::fprintf(stderr, "strata: adaptive kernel copy: %lld copies, %lld kernel, fallbacks size %lld src %lld "
                          "dst %lld unmapped %lld\n", (long long) total, (long long) n_by[0].load(), (long long) n_by[1].load(),
                          (long long) n_by[2].load(), (long long) n_by[3].load(), (long long) n_by[4].load());
