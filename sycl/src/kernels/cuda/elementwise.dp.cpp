@@ -541,7 +541,7 @@ void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t w
             });
     }
 }
-void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream) {
+void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream, int /*max_blocks: CUDA/HIP grid cap*/) {
     if (n <= 0) return;
     if ((n & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
         std::fprintf(stderr, "copy_from_mapped: n must be a multiple of 4 and both pointers 16-byte aligned\n");

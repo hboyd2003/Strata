@@ -323,16 +323,59 @@ void copy_rows_from_mapped_after(const uint32_t* flag, uint32_t value, float* ds
     copy_rows_from_mapped_kernel<<<(unsigned) rows, 128, 0, (cudaStream_t) stream>>>(
         (float4*) dst, (const volatile float4*) src, width / 4, hit_rows, count, (const volatile uint32_t*) flag, value);
 }
-void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream) {
+void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream, int max_blocks) {
     if (n <= 0) return;
     if ((n & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
         std::fprintf(stderr, "copy_from_mapped: n must be a multiple of 4 and both pointers 16-byte aligned\n");
         std::exit(1);
     }
     const int64_t n4 = n / 4;
-    const int blocks = (int) ((n4 + 255) / 256 < 64 ? (n4 + 255) / 256 : 64);
+    const int64_t cap = max_blocks < 1 ? 1 : max_blocks;
+    const int blocks = (int) ((n4 + 255) / 256 < cap ? (n4 + 255) / 256 : cap);
     copy_from_mapped_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>((float4*) dst, (const volatile float4*) src, n4);
     check_launch("copy_from_mapped");
+}
+
+constexpr int kMappedBatch = 64;
+struct MappedCopyBatch {
+    float4* dst[kMappedBatch];
+    const float4* src[kMappedBatch];
+    int64_t n4[kMappedBatch];
+    int count;
+};
+__global__ void copy_from_mapped_batch_kernel(MappedCopyBatch a) {
+    const int64_t i0 = (int64_t) blockIdx.x * blockDim.x + threadIdx.x, st = (int64_t) gridDim.x * blockDim.x;
+    for (int c = 0; c < a.count; ++c) {
+        float4* __restrict__ d = a.dst[c];
+        const volatile float4* s = (const volatile float4*) a.src[c];
+        for (int64_t i = i0; i < a.n4[c]; i += st) {
+            const float4 v = const_cast<const float4*>(s)[i];
+            d[i] = v;
+        }
+    }
+}
+void copy_from_mapped_batch(float* const* dst, const float* const* src, const int64_t* n, int count, void* stream,
+                            int max_blocks) {
+    const int64_t cap = max_blocks < 1 ? 1 : max_blocks;
+    for (int c0 = 0; c0 < count; c0 += kMappedBatch) {
+        MappedCopyBatch a{};
+        int64_t most = 0;
+        for (int c = c0; c < count && a.count < kMappedBatch; ++c) {
+            if ((n[c] & 3) != 0 || ((uintptr_t) dst[c] & 15) != 0 || ((uintptr_t) src[c] & 15) != 0) {
+                std::fprintf(stderr, "copy_from_mapped_batch: n must be a multiple of 4 and both pointers 16-byte aligned\n");
+                std::exit(1);
+            }
+            a.dst[a.count] = (float4*) dst[c];
+            a.src[a.count] = (const float4*) src[c];
+            a.n4[a.count] = n[c] / 4;
+            most = a.n4[a.count] > most ? a.n4[a.count] : most;
+            ++a.count;
+        }
+        if (most == 0) continue;
+        const int blocks = (int) ((most + 255) / 256 < cap ? (most + 255) / 256 : cap);
+        copy_from_mapped_batch_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(a);
+        check_launch("copy_from_mapped_batch");
+    }
 }
 
 __global__ void doorbell_publish_kernel(const float* __restrict__ x, const int32_t* __restrict__ ids,
@@ -463,8 +506,18 @@ void copy_i32_from_mapped(int32_t* dst, const int32_t* src, int64_t n, void* str
 
 #if defined(__HIPCC__)   // AMD keeps one copy a launch
 void copy_from_mapped_multi(const MappedCopy* copies, int n, void* stream) {
-    for (int i = 0; i < n; ++i)
+    for (int i = 0; i < n; ++i) {
+#if defined(STRATA_HIP_GFX906)
+        // gfx906: a long aligned copy (the draft round's residual rows, T x 10240 floats) takes the float4 copy over up
+        // to 64 blocks - the one-block loop reads one volatile word a thread at a time, ~45 us a row on MI50.  Same bytes.
+        if (copies[i].words >= 1024 && (copies[i].words & 3) == 0 && ((uintptr_t) copies[i].dst & 15) == 0 &&
+            ((uintptr_t) copies[i].src & 15) == 0) {
+            copy_from_mapped((float*) copies[i].dst, (const float*) copies[i].src, copies[i].words, stream);
+            continue;
+        }
+#endif
         copy_i32_from_mapped((int32_t*) copies[i].dst, (const int32_t*) copies[i].src, copies[i].words, stream);
+    }
 }
 #endif
 

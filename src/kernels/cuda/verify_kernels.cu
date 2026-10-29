@@ -106,6 +106,12 @@ __device__ __forceinline__ void gdn_ab_body(const int bx, const float* __restric
     float acc[MAX_T];
 #pragma unroll
     for (int t = 0; t < MAX_T; ++t) acc[t] = 0.0f;
+#if defined(STRATA_HIP_GFX906)
+    // gfx906: unrolled so a lane's next chunks are loaded while it sums the current one (the 2560-wide rows are 10
+    // chunks a lane: one memory latency after another, ~12 us a window on MI50); the same chunks in the same order
+    constexpr int AB_UNROLL = MAX_T <= 2 ? 5 : 2;
+#pragma unroll AB_UNROLL
+#endif
     for (int j = lane; j < n / 8; j += 32) {
         const uint4 wv = __ldg(w4 + j);
         const float w0 = __uint_as_float(wv.x << 16), w1 = __uint_as_float(wv.x & 0xffff0000u);
@@ -685,6 +691,9 @@ __global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t strid
                                   const int32_t* __restrict__ row_dev, float* __restrict__ R_dst,
                                   int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p) {
     const int row = *row_dev;
+#if defined(STRATA_HIP_GFX906)
+#pragma unroll 8   // gfx906: the one block's 40 loads a thread in flight together (19 us a draft step one by one)
+#endif
     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < stride; i += (int64_t) gridDim.x * blockDim.x)
         R_dst[i] = R_src[(size_t) row * stride + i];
     __syncthreads();
@@ -850,6 +859,9 @@ __global__ void argmax_rows_kernel(const float* __restrict__ logits, int n, int 
     const int lo = b * per_block, hi = min(n, lo + per_block);
     float bv = __int_as_float(0xff800000);   // -inf
     int bi = n;
+#if defined(STRATA_HIP_GFX906)
+#pragma unroll 8   // gfx906: the thread's loads in flight together, not one latency each (the same order)
+#endif
     for (int v = lo + (int) threadIdx.x; v < hi; v += (int) blockDim.x) {
         const float s = l[v];
         if (s > bv) { bv = s; bi = v; }
@@ -894,6 +906,9 @@ __global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int 
     const float m = l[ids[row]];
     const int vt = (int) (blockIdx.x * blockDim.x + threadIdx.x);
     float s = 0.0f;
+#if defined(STRATA_HIP_GFX906)
+#pragma unroll 8   // gfx906: ~104 exps a thread for the draft head's 106K tokens, one load latency each without it (66 us)
+#endif
     for (int i = vt; i < n_vocab; i += 1024) s += __expf(l[i] - m);
     for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
     if ((threadIdx.x & 31) == 0) parts[vt >> 5] = s;
