@@ -396,13 +396,35 @@ cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_
         if (on) std::fprintf(stderr, "strata: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
         return on;
     }();
-    if (kernel && bytes % 16 == 0 && ((uintptr_t) src & 15) == 0 && ((uintptr_t) dst & 15) == 0) {
-        void* dsrc = nullptr;
-        if (cudaHostGetDevicePointer(&dsrc, const_cast<void*>(src), 0) == cudaSuccess && dsrc != nullptr) {
-            strata::kernels::copy_from_mapped((float*) dst, (const float*) dsrc, (int64_t) (bytes / 4), (void*) st);
-            return cudaGetLastError();
+    // how often the kernel copy runs and why it falls back (0 kernel, 1 size, 2 src align, 3 dst align, 4 unmapped):
+    // the first fallback of each kind is printed, and the counts every 2000 copies
+    static std::atomic<int64_t> n_by[5];
+    auto tally = [&](int k) {
+        if (k > 0 && n_by[k].load(std::memory_order_relaxed) == 0)
+            std::fprintf(stderr, "strata: adaptive kernel copy: first fallback (%s): %zu bytes, src %p, dst %p\n",
+                         k == 1 ? "size not a multiple of 16" : k == 2 ? "src not 16-byte aligned"
+                         : k == 3 ? "dst not 16-byte aligned" : "src not mapped", bytes, src, dst);
+        const int64_t total = n_by[0].load() + n_by[1].load() + n_by[2].load() + n_by[3].load() + n_by[4].load() + 1;
+        n_by[k].fetch_add(1, std::memory_order_relaxed);
+        if (total % 2000 == 0)
+            std::fprintf(stderr, "strata: adaptive kernel copy: %lld copies, %lld kernel, fallbacks size %lld src %lld "
+                         "dst %lld unmapped %lld\n", (long long) total, (long long) n_by[0].load(), (long long) n_by[1].load(),
+                         (long long) n_by[2].load(), (long long) n_by[3].load(), (long long) n_by[4].load());
+    };
+    if (kernel) {
+        const int why = bytes % 16 != 0 ? 1 : ((uintptr_t) src & 15) != 0 ? 2 : ((uintptr_t) dst & 15) != 0 ? 3 : 0;
+        if (why == 0) {
+            void* dsrc = nullptr;
+            if (cudaHostGetDevicePointer(&dsrc, const_cast<void*>(src), 0) == cudaSuccess && dsrc != nullptr) {
+                tally(0);
+                strata::kernels::copy_from_mapped((float*) dst, (const float*) dsrc, (int64_t) (bytes / 4), (void*) st);
+                return cudaGetLastError();
+            }
+            (void) cudaGetLastError();   // not registered / not mapped: the ordinary copy
+            tally(4);
+        } else {
+            tally(why);
         }
-        (void) cudaGetLastError();   // not registered / not mapped: the ordinary copy
     }
 #endif
     return cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, st);
