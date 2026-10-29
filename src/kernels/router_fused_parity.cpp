@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     bool bench = false;
     for (int i = 1; i < argc; ++i) bench |= std::strcmp(argv[i], "--bench") == 0;
-    if (std::getenv("STRATA_GFX906_ROUTER_W64") || std::getenv("STRATA_GFX906_ROUTER_GEMV")) {
+    if (std::getenv("STRATA_GFX906_ROUTER_W64") || (!bench && std::getenv("STRATA_GFX906_ROUTER_GEMV"))) {
         std::fprintf(stderr, "unset STRATA_GFX906_ROUTER_W64 / _GEMV: the reference must be the old kernels\n");
         return 2;
     }
@@ -140,14 +140,24 @@ int main(int argc, char** argv) {
     if (bench) {
         cudaEvent_t e0, e1;
         CK(cudaEventCreate(&e0)); CK(cudaEventCreate(&e1));
+        // arms: 0 the three old launches, 1 fused, 2 the same three launches with the w64 top-10 (and the gfx906
+        // router GEMV when STRATA_GFX906_ROUTER_GEMV is set for the bench run); each with some misses and with none
+        auto w64_3 = [&](int l, int T, const int32_t* res, Pub& p) {
+            K::bf16_gemv_fp32_mmvf_multi(dx, N, dw[l], dl0, NE, N, NE, T, s);
+            K::native_router_top10_w64(dl0, di0, dw0, T, s);
+            K::doorbell_publish_res(dx, di0, res, NE, (int64_t) T * N, (int64_t) T * KK, p.m_x, p.m_ids, p.m_seq, s);
+        };
+        for (int miss = 1; miss >= 0; --miss)
         for (int T = 1; T <= MAXT; ++T)
-            for (int which = 0; which < 2; ++which) {
+            for (int which = 0; which < 3; ++which) {
+                const int32_t* rb = miss ? dres_some : dres_all;
                 cudaGraph_t g;
                 cudaGraphExec_t ge;
                 CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
                 for (int l = 0; l < L; ++l) {
-                    if (which) fused(l, T, dres_some, p1);
-                    else ref(l, T, dres_some, p0);
+                    if (which == 1) fused(l, T, rb, p1);
+                    else if (which == 2) w64_3(l, T, rb, p0);
+                    else ref(l, T, rb, p0);
                 }
                 CK(cudaStreamEndCapture(s, &g));
                 CK(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0));
@@ -162,8 +172,8 @@ int main(int argc, char** argv) {
                     ms.push_back(m);
                 }
                 std::sort(ms.begin(), ms.end());
-                std::printf("T %d %-5s : %6.2f us per layer (gemv + top10 + doorbell)\n", T, which ? "fused" : "3 launches",
-                            1e3 * ms[ms.size() / 2] / L);
+                std::printf("%s T %d %-12s : %6.2f us per layer (gemv + top10 + doorbell)\n", miss ? "miss  " : "no-miss", T,
+                            which == 1 ? "fused" : which == 2 ? "3 new" : "3 old", 1e3 * ms[ms.size() / 2] / L);
                 cudaGraphExecDestroy(ge);
                 cudaGraphDestroy(g);
             }
