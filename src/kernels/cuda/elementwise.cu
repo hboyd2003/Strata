@@ -336,6 +336,48 @@ void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream, int
     check_launch("copy_from_mapped");
 }
 
+constexpr int kMappedBatch = 64;
+struct MappedCopyBatch {
+    float4* dst[kMappedBatch];
+    const float4* src[kMappedBatch];
+    int64_t n4[kMappedBatch];
+    int count;
+};
+__global__ void copy_from_mapped_batch_kernel(MappedCopyBatch a) {
+    const int64_t i0 = (int64_t) blockIdx.x * blockDim.x + threadIdx.x, st = (int64_t) gridDim.x * blockDim.x;
+    for (int c = 0; c < a.count; ++c) {
+        float4* __restrict__ d = a.dst[c];
+        const volatile float4* s = (const volatile float4*) a.src[c];
+        for (int64_t i = i0; i < a.n4[c]; i += st) {
+            const float4 v = const_cast<const float4*>(s)[i];
+            d[i] = v;
+        }
+    }
+}
+void copy_from_mapped_batch(float* const* dst, const float* const* src, const int64_t* n, int count, void* stream,
+                            int max_blocks) {
+    const int64_t cap = max_blocks < 1 ? 1 : max_blocks;
+    for (int c0 = 0; c0 < count; c0 += kMappedBatch) {
+        MappedCopyBatch a{};
+        int64_t most = 0;
+        for (int c = c0; c < count && a.count < kMappedBatch; ++c) {
+            if ((n[c] & 3) != 0 || ((uintptr_t) dst[c] & 15) != 0 || ((uintptr_t) src[c] & 15) != 0) {
+                std::fprintf(stderr, "copy_from_mapped_batch: n must be a multiple of 4 and both pointers 16-byte aligned\n");
+                std::exit(1);
+            }
+            a.dst[a.count] = (float4*) dst[c];
+            a.src[a.count] = (const float4*) src[c];
+            a.n4[a.count] = n[c] / 4;
+            most = a.n4[a.count] > most ? a.n4[a.count] : most;
+            ++a.count;
+        }
+        if (most == 0) continue;
+        const int blocks = (int) ((most + 255) / 256 < cap ? (most + 255) / 256 : cap);
+        copy_from_mapped_batch_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(a);
+        check_launch("copy_from_mapped_batch");
+    }
+}
+
 __global__ void doorbell_publish_kernel(const float* __restrict__ x, const int32_t* __restrict__ ids,
                                         const float* __restrict__ w, int n, int k, float* x_out, int32_t* ids_out,
                                         float* w_out, uint32_t* seq) {
