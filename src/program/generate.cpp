@@ -389,7 +389,7 @@ bool pin_blobs_on() {
 // the swaps off SDMA without turning SDMA off for the prompt read (HSA_ENABLE_SDMA=0 costs 10-24% of it).  Needs the source to
 // be mapped, 16-byte aligned memory (the registered arena); anything else takes the normal cudaMemcpyAsync.
 cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_t st) {
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906 too: its SDMA tops out at ~13 GB/s, a mapped-read kernel ~26
     static const bool kernel = [] {
         const char* e = std::getenv("STRATA_HIP_ADAPT_KERNEL_COPY");
         const bool on = e != nullptr && e[0] == '1';
