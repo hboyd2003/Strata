@@ -3,7 +3,8 @@
 //
 //     mmvq_iacc_parity <dir> [--bench]
 //
-// <dir> holds raw GGUF tensors named <name>.<TYPE>.<n_in>x<n_out>.bin (TYPE Q6_K / Q4_K / Q5_K / IQ4_XS).  The
+// <dir> holds raw GGUF tensors named <name>.<TYPE>.<n_in>x<n_out>.bin (TYPE Q6_K / Q4_K / Q5_K / IQ4_XS / Q4_0; Q4_0 and
+// IQ4_XS have no iacc path and are timed with --bench only).  The
 // activations are synthetic (normal, with log-normal per-channel scales so a few channels dominate, like the residual
 // stream), quantized to Q8_1 by the engine's own kernel.  The reference is the fp64 sum of the dequantized weights times
 // the dequantized Q8_1 values, so it measures only the kernels' arithmetic (both read the same bytes).  Per case it
@@ -82,6 +83,12 @@ void dequant_block(int type, const uint8_t* b, double* y) {
             }
             q += 32; is += 2; u1 <<= 2; u2 <<= 2;
         }
+    } else if (type == 2) {   // Q4_0 (32 values)
+        const double d = h2d(rd16(b));
+        for (int k = 0; k < 16; ++k) {
+            y[k] = d * double((b[2 + k] & 0xF) - 8);
+            y[k + 16] = d * double((b[2 + k] >> 4) - 8);
+        }
     } else if (type == 23) {   // IQ4_XS
         const double d = h2d(rd16(b));
         const uint16_t sh = rd16(b + 2);
@@ -97,7 +104,7 @@ void dequant_block(int type, const uint8_t* b, double* y) {
     }
 }
 
-struct Tensor { std::string name; int type, n_in, n_out, bbytes; std::vector<uint8_t> w; };
+struct Tensor { std::string name; int type, n_in, n_out, bbytes, qk = 256; std::vector<uint8_t> w; };
 
 bool ck(cudaError_t e, const char* what) {
     if (e == cudaSuccess) return true;
@@ -148,10 +155,10 @@ int run(const Tensor& t, int T, bool bench, cudaStream_t s, void* dw, int mask) 
         }
     std::vector<double> ref(std::size_t(T) * t.n_out);
     std::vector<double> wr(t.n_in);
-    const int bpr = t.n_in / 256;
+    const int bpr = t.n_in / t.qk;
     for (int r = 0; r < t.n_out; ++r) {
         for (int b = 0; b < bpr; ++b)
-            dequant_block(t.type, t.w.data() + (std::size_t(r) * bpr + b) * t.bbytes, wr.data() + 256 * b);
+            dequant_block(t.type, t.w.data() + (std::size_t(r) * bpr + b) * t.bbytes, wr.data() + t.qk * b);
         for (int j = 0; j < T; ++j) {
             double acc = 0;
             const double* xc = xd.data() + std::size_t(j) * t.n_in;
@@ -265,11 +272,12 @@ int main(int argc, char** argv) {
         else if (ty == "Q4_K") { t.type = 12; t.bbytes = 144; mask = 2; }
         else if (ty == "Q5_K") { t.type = 13; t.bbytes = 176; mask = 4; }
         else if (ty == "IQ4_XS") { t.type = 23; t.bbytes = 136; mask = 0; }
+        else if (ty == "Q4_0") { t.type = 2; t.bbytes = 18; t.qk = 32; mask = 0; }
         else continue;
         t.name += "." + ty;
         FILE* fp = std::fopen((dir + "/" + f).c_str(), "rb");
         if (!fp) continue;
-        t.w.resize(std::size_t(t.n_out) * (t.n_in / 256) * t.bbytes);
+        t.w.resize(std::size_t(t.n_out) * (t.n_in / t.qk) * t.bbytes);
         const std::size_t got = std::fread(t.w.data(), 1, t.w.size(), fp);
         std::fclose(fp);
         if (got != t.w.size()) { std::printf("%s: short read\n", f.c_str()); ++bad; continue; }
