@@ -3600,6 +3600,12 @@ int main(int argc, char** argv) {
     }
     const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
                                o.expert_cache_remote[2] > 0;
+    // --pcie-frac 0 given on one GPU: no expert is ever staged over PCIe (a request's own pcie_frac is ignored), so the
+    // verify graph leaves its PCIe branch out (strata::core::pcie_off).  The auto share and the multi-GPU paths keep it.
+    if (pcie_given && o.pcie_frac == 0.0 && o.layer_split.empty() && o.peer_device < 0 && !remote_caches) {
+        strata::core::set_pcie_off(true);
+        std::fprintf(stderr, "strata generate: --pcie-frac 0: no PCIe staging; the verify graph has no PCIe branch\n");
+    }
     // A layer split keeps the resident RAM mode: every stage's GPU cache is left out of the RAM copy, and an adaptive
     // swap copies an evicted expert back from the card that owns its layer (resident_stage_swaps).
     // The helper-GPU caches are allowed beside the resident RAM mode too: their experts are left out of the RAM copy
@@ -13918,7 +13924,9 @@ int main(int argc, char** argv) {
                     else if (key == "penalty_freq") req_penalty_freq = fv;
                     else if (key == "penalty_present") req_penalty_present = fv;
                     else if (key == "seed") req_seed = std::strtoull(tok.c_str() + eq + 1, nullptr, 10);
-                    else if (key == "pcie_frac") { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
+                    else if (key == "pcie_frac") {   // ignored under --pcie-frac 0 (pcie_off: the graph has no PCIe branch)
+                        if (!strata::core::pcie_off()) { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
+                    }
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
                     else if (key == "pipe") req_pipe = std::max(0.0, (double) fv);
                     else if (key == "aux_cpus") req_aux_cpus = std::atoi(tok.c_str() + eq + 1) != 0 ? 1 : 0;
