@@ -506,8 +506,18 @@ void copy_i32_from_mapped(int32_t* dst, const int32_t* src, int64_t n, void* str
 
 #if defined(__HIPCC__)   // AMD keeps one copy a launch
 void copy_from_mapped_multi(const MappedCopy* copies, int n, void* stream) {
-    for (int i = 0; i < n; ++i)
+    for (int i = 0; i < n; ++i) {
+#if defined(STRATA_HIP_GFX906)
+        // gfx906: a long aligned copy (the draft round's residual rows, T x 10240 floats) takes the float4 copy over up
+        // to 64 blocks - the one-block loop reads one volatile word a thread at a time, ~45 us a row on MI50.  Same bytes.
+        if (copies[i].words >= 1024 && (copies[i].words & 3) == 0 && ((uintptr_t) copies[i].dst & 15) == 0 &&
+            ((uintptr_t) copies[i].src & 15) == 0) {
+            copy_from_mapped((float*) copies[i].dst, (const float*) copies[i].src, copies[i].words, stream);
+            continue;
+        }
+#endif
         copy_i32_from_mapped((int32_t*) copies[i].dst, (const int32_t*) copies[i].src, copies[i].words, stream);
+    }
 }
 #endif
 
