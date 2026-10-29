@@ -38,6 +38,9 @@ int main(int argc, char** argv) {
     CK(cudaStreamCreate(&s));
     // cases: 0 gaussian, 1 gaussian x 4 (peaky), 2 logits on a 1/4 grid (many equal p), 3 all equal, 4 a few equal
     // maxima planted at random experts, 5 large magnitudes (underflowing p), 6 two values only
+    int fails_all = 0;
+    for (int arm = 0; arm < 2; ++arm) {
+    std::mt19937 rng(7);
     int fails = 0, checked = 0;
     for (int c = 0; c < 7; ++c) {
         for (int it = 0; it < 40; ++it) {
@@ -64,7 +67,8 @@ int main(int argc, char** argv) {
             CK(cudaMemset(dw0, 0x11, (size_t) MAXT * KK * 4)); CK(cudaMemset(dw1, 0x22, (size_t) MAXT * KK * 4));
             if (T == 1) K::native_router_top10(dl, di0, dw0, s);
             else K::native_router_top10_multi(dl, di0, dw0, T, s);
-            if (!K::native_router_top10_w64(dl, di1, dw1, T, s)) { std::printf("w64 not built here\n"); return 0; }
+            const bool built = arm == 0 ? K::native_router_top10_w64(dl, di1, dw1, T, s) : K::native_router_top10_w64_doubr(dl, di1, dw1, T, s);
+            if (!built) { std::printf("w64 not built here\n"); return 0; }
             CK(cudaStreamSynchronize(s));
             std::vector<int32_t> i0((size_t) T * KK), i1((size_t) T * KK);
             std::vector<float> w0((size_t) T * KK), w1((size_t) T * KK);
@@ -85,7 +89,10 @@ int main(int argc, char** argv) {
             }
         }
     }
-    std::printf("router_w64: %d of %d launches differ\n", fails, checked);
+    std::printf("router %s: %d of %d launches differ\n", arm ? "w64_doubr" : "w64", fails, checked);
+    fails_all += fails;
+    }
+    const int fails = fails_all;
     if (bench) {
         constexpr int L = 48, reps = 30;
         std::vector<float> h((size_t) MAXT * NE);
@@ -94,12 +101,13 @@ int main(int argc, char** argv) {
         cudaEvent_t e0, e1;
         CK(cudaEventCreate(&e0)); CK(cudaEventCreate(&e1));
         for (int T : {1, 2, 3, 4, 8}) {
-            for (int which = 0; which < 2; ++which) {
+            for (int which = 0; which < 3; ++which) {
                 cudaGraph_t g;
                 cudaGraphExec_t ge;
                 CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
                 for (int l = 0; l < L; ++l) {
-                    if (which) K::native_router_top10_w64(dl, di1, dw1, T, s);
+                    if (which == 2) K::native_router_top10_w64_doubr(dl, di1, dw1, T, s);
+                    else if (which) K::native_router_top10_w64(dl, di1, dw1, T, s);
                     else if (T == 1) K::native_router_top10(dl, di0, dw0, s);
                     else K::native_router_top10_multi(dl, di0, dw0, T, s);
                 }
@@ -116,7 +124,7 @@ int main(int argc, char** argv) {
                     ms.push_back(m);
                 }
                 std::sort(ms.begin(), ms.end());
-                std::printf("T %d %-5s : %6.2f us per layer\n", T, which ? "w64" : "old", 1e3 * ms[ms.size() / 2] / L);
+                std::printf("T %d %-6s : %6.2f us per layer\n", T, which == 2 ? "doubr" : which ? "w64" : "old", 1e3 * ms[ms.size() / 2] / L);
                 cudaGraphExecDestroy(ge);
                 cudaGraphDestroy(g);
             }
