@@ -237,6 +237,7 @@
   "toast.requestFailed": "リクエストに失敗しました",
   "tool.arguments": "引数",
   "tool.beingWritten": "(書き込み中)",
+  "tool.called": "呼び出し済み",
   "tool.chars": "{n} 文字",
   "tool.cut": "、モデル向けに省略",
   "tool.done": "完了",
