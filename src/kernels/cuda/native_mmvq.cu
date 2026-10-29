@@ -35,6 +35,7 @@
 #if !defined(__HIPCC__)
 #include "q8_1_il.cuh"
 #endif
+#include <type_traits>
 #include "strata/kernels/pdl.hpp"
 
 #include <cuda_fp16.h>
@@ -57,6 +58,17 @@ namespace {
 
 constexpr int QK = 256;
 constexpr int Q8K = 32;
+// exp/tier1 STRATA_MMVQ_MUL24=1 (from exp/dense 70793186, made a runtime choice): the integer scale products of the
+// K-quant / IQ4_XS dots as 24-bit multiplies on gfx906 (v_mul_i32_i24, full rate, instead of the quarter-rate
+// v_mul_lo_u32).  Every operand fits 24 signed bits (|dot| <= 2^19, |scale| <= 255), so the 32-bit product is the same
+// integer: bitwise the same sums.  M24 = false (every caller but the wave kernel's Mul24<F>): the plain multiply.
+template<bool M24>
+__device__ __forceinline__ int strata_imul(int a, int b) {
+#if defined(STRATA_HIP_GFX906)
+    if constexpr (M24) return __mul24(a, b);
+#endif
+    return a * b;
+}
 constexpr int QI = 32;
 constexpr int VDR = 2;
 constexpr int WARPS = 4;
@@ -188,6 +200,7 @@ __global__ void native_swiglu_quantize_q8_1_kernel(const float* __restrict__ gat
 }
 
 // Exact pinned vec_dot_q5_K_q8_1_impl_vmmq expression and integer dot order.
+template<bool M24 = false>
 __device__ __forceinline__ float q5_q8_dot_impl(
     const int* __restrict__ vl, const int* __restrict__ vh, const int* __restrict__ u,
     const uint8_t* __restrict__ sc, const uint8_t* __restrict__ m, const half2& dm5,
@@ -204,8 +217,8 @@ __device__ __forceinline__ float q5_q8_dot_impl(
         const int v1i = vl1i | vh1i;
         const int dot1 = STRATA_DP4A(v0i, u[2 * i], STRATA_DP4A(v1i, u[2 * i + 1], 0));
         const int dot2 = STRATA_DP4A(0x01010101, u[2 * i], STRATA_DP4A(0x01010101, u[2 * i + 1], 0));
-        sumf_d += d8[i] * (dot1 * sc[i]);
-        sumf_m += d8[i] * (dot2 * m[i]);
+        sumf_d += d8[i] * strata_imul<M24>(dot1, sc[i]);
+        sumf_m += d8[i] * strata_imul<M24>(dot2, m[i]);
     }
     const float2 dm5f = __half22float2(dm5);
     return dm5f.x * sumf_d - dm5f.y * sumf_m;
@@ -540,6 +553,7 @@ __global__ void native_iq4_xs_mmvq_kernel(const IQ4XSBlock* __restrict__ w,
 }
 
 // Exact pinned vec_dot_q4_K_q8_1_impl_vmmq expression and integer dot order.
+template<bool M24 = false>
 __device__ __forceinline__ float q4_q8_dot_impl(
     const int* __restrict__ v, const int* __restrict__ u,
     const uint8_t* __restrict__ sc, const uint8_t* __restrict__ m, const half2& dm4,
@@ -552,8 +566,8 @@ __device__ __forceinline__ float q4_q8_dot_impl(
         const int v1i = (v[1] >> (4 * i)) & 0x0f0f0f0f;
         const int dot1 = STRATA_DP4A(v1i, u[2 * i + 1], STRATA_DP4A(v0i, u[2 * i], 0));
         const int dot2 = STRATA_DP4A(0x01010101, u[2 * i + 1], STRATA_DP4A(0x01010101, u[2 * i], 0));
-        sumf_d += d8[i] * (dot1 * sc[i]);
-        sumf_m += d8[i] * (dot2 * m[i]);
+        sumf_d += d8[i] * strata_imul<M24>(dot1, sc[i]);
+        sumf_m += d8[i] * strata_imul<M24>(dot2, m[i]);
     }
     const float2 dm4f = __half22float2(dm4);
     return dm4f.x * sumf_d - dm4f.y * sumf_m;
@@ -638,6 +652,7 @@ __global__ void native_q4_k_mmvq_kernel(const Q4KBlock* __restrict__ w,
 
 // Exact pinned vec_dot_q6_K_q8_1: keep signed per-16-element scales,
 // signed-byte subtraction, DP4A order, and the float accumulation sequence.
+template<bool M24 = false>
 __device__ __forceinline__ float q6_q8_dot_impl(int vl, int vh, const int* __restrict__ u,
                                               const int8_t* __restrict__ scales,
                                               float d, const float* __restrict__ d8) {
@@ -648,7 +663,7 @@ __device__ __forceinline__ float q6_q8_dot_impl(int vl, int vh, const int* __res
         const int vil = (vl >> (4 * i)) & 0x0f0f0f0f;
         const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
         const int vi = __vsubss4(vil | vih, 0x20202020);
-        sumf += d8[i] * (STRATA_DP4A(vi, u[i], 0) * sc);
+        sumf += d8[i] * strata_imul<M24>(STRATA_DP4A(vi, u[i], 0), sc);
     }
     return d * sumf;
 }
@@ -926,7 +941,10 @@ struct Q5KTraits {
         r.dm = bq5->dm;
         return r;
     }
-    __device__ static float apply(const W& r, const Q81Block* __restrict__ bq8, int iqs) {
+    static constexpr bool HAS_M24 = true;
+    __device__ static float apply(const W& r, const Q81Block* __restrict__ bq8, int iqs) { return apply_m<false>(r, bq8, iqs); }
+    template<bool M24>
+    __device__ static float apply_m(const W& r, const Q81Block* __restrict__ bq8, int iqs) {
         int u[4];
         float d8[2];
 #pragma unroll
@@ -938,7 +956,7 @@ struct Q5KTraits {
             u[2 * i + 1] = q8[4];
         }
         const uint8_t* sc = reinterpret_cast<const uint8_t*>(r.aux);
-        return q5_q8_dot_impl(r.vl, r.vh, u, sc, sc + 2, r.dm, d8);
+        return q5_q8_dot_impl<M24>(r.vl, r.vh, u, sc, sc + 2, r.dm, d8);
     }
 };
 struct Q4KTraits {
@@ -965,7 +983,10 @@ struct Q4KTraits {
         r.dm = bq4->dm;
         return r;
     }
-    __device__ static float apply(const W& r, const Q81Block* __restrict__ bq8, int iqs) {
+    static constexpr bool HAS_M24 = true;
+    __device__ static float apply(const W& r, const Q81Block* __restrict__ bq8, int iqs) { return apply_m<false>(r, bq8, iqs); }
+    template<bool M24>
+    __device__ static float apply_m(const W& r, const Q81Block* __restrict__ bq8, int iqs) {
         int u[4];
         float d8[2];
 #pragma unroll
@@ -977,7 +998,7 @@ struct Q4KTraits {
             u[2 * i + 1] = q8[4];
         }
         const uint8_t* sc = reinterpret_cast<const uint8_t*>(r.aux);
-        return q4_q8_dot_impl(r.v, u, sc, sc + 2, r.dm, d8);
+        return q4_q8_dot_impl<M24>(r.v, u, sc, sc + 2, r.dm, d8);
     }
 };
 struct Q20Traits {
@@ -1056,7 +1077,10 @@ struct Q6KTraits {
         r.d = w->d;
         return r;
     }
-    __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) {
+    static constexpr bool HAS_M24 = true;
+    __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) { return apply_m<false>(r, x, iqs); }
+    template<bool M24>
+    __device__ static float apply_m(const W& r, const Q81Block* __restrict__ x, int iqs) {
         int u[2];
         float d8[2];
 #pragma unroll
@@ -1064,7 +1088,7 @@ struct Q6KTraits {
             u[i] = reinterpret_cast<const int*>(x[r.bq8_offset + 2 * i].qs)[iqs % 8];
             d8[i] = __low2float(x[r.bq8_offset + 2 * i].ds);
         }
-        return q6_q8_dot_impl(r.vl, r.vh, u, r.scales, r.d, d8);
+        return q6_q8_dot_impl<M24>(r.vl, r.vh, u, r.scales, r.d, d8);
     }
 };
 struct IQ4XSTraits {
@@ -1081,7 +1105,10 @@ struct IQ4XSTraits {
         r.dw = __half2float(w->d);
         return r;
     }
-    __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) {
+    static constexpr bool HAS_M24 = true;
+    __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) { return apply_m<false>(r, x, iqs); }
+    template<bool M24>
+    __device__ static float apply_m(const W& r, const Q81Block* __restrict__ x, int iqs) {
         int sumi = 0;
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
@@ -1090,7 +1117,7 @@ struct IQ4XSTraits {
             sumi = STRATA_DP4A(r.v[j].x, u0, sumi);
             sumi = STRATA_DP4A(r.v[j].y, u1, sumi);
         }
-        sumi *= r.ls - 32;
+        sumi = strata_imul<M24>(sumi, r.ls - 32);
         const float d = r.dw * __low2float(x[iqs / 4].ds);
         return d * sumi;
     }
@@ -2417,15 +2444,48 @@ int wave_rows() {
     }();
     return r;
 }
+// exp/tier1 STRATA_MMVQ_MUL24=1: the wave kernel on Mul24<F> (F's dot with 24-bit scale products; bitwise the same)
+template<typename F>
+struct Mul24 : F {
+    __device__ static float apply(const typename F::W& r, const Q81Block* __restrict__ x, int iqs) {
+        return F::template apply_m<true>(r, x, iqs);
+    }
+};
+template<typename F, typename = void> struct HasM24 : std::false_type {};
+template<typename F> struct HasM24<F, std::void_t<decltype(F::HAS_M24)>> : std::true_type {};
+int g_mul24 = -1;   // native_mmvq_set_mul24 (tests); -1 = STRATA_MMVQ_MUL24
+bool mul24_on() {
+    if (g_mul24 >= 0) return g_mul24 != 0;
+    static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_MUL24"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+// exp/tier1 STRATA_MMVQ_Q6K_R4=1: Q6_K with n_out >= 10240 at 2+ columns (lm head, GDN qkv, QSA q) takes R = 4 rows a
+// wavefront whatever STRATA_MMVQ_WAVE_ROWS says (exp/dense bench: head T2 1150 -> 1070 us; R = 4 loses at T1, on
+// out_proj and on IQ4_XS).  Every R gives the same bits.
+int g_q6k_r4 = -1;   // native_mmvq_set_q6k_r4 (tests); -1 = STRATA_MMVQ_Q6K_R4
+bool q6k_r4_on() {
+    if (g_q6k_r4 >= 0) return g_q6k_r4 != 0;
+    static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_Q6K_R4"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
 template<typename F, int NCOLS, int R>
 void wave_launch_r(const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
     const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
+    if constexpr (HasM24<F>::value) {
+        if (mul24_on()) {
+            native_mmvq_wave_kernel<Mul24<F>, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+            return;
+        }
+    }
     native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
 }
 template<typename F, int NCOLS>
 void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    if constexpr (std::is_same_v<F, Q6KTraits> && NCOLS >= 2) {
+        if (n_out >= 10240 && q6k_r4_on()) { wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s); return; }
+    }
     switch (wave_rows()) {
         case 2: wave_launch_r<F, NCOLS, 2>(w, x, y, n_in, n_out, s); break;
         case 4: wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s); break;
@@ -3095,7 +3155,11 @@ void native_q6_k_unpack(const void* weights) {
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
 #if defined(STRATA_HIP_GFX906)
 void native_mmvq_set_wave_rows(int rows) { g_wave_rows = rows == 1 || rows == 2 || rows == 4 ? rows : 0; }
+void native_mmvq_set_mul24(int on) { g_mul24 = on; }
+void native_mmvq_set_q6k_r4(int on) { g_q6k_r4 = on; }
 #else
+void native_mmvq_set_mul24(int) {}
+void native_mmvq_set_q6k_r4(int) {}
 void native_mmvq_set_wave_rows(int) {}
 #endif
 bool native_mmvq_multi_exact() { return g_multi_exact; }
