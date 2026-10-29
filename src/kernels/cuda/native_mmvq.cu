@@ -2492,9 +2492,298 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
         default: wave_launch_r<F, NCOLS, 1>(w, x, y, n_in, n_out, s); break;
     }
 }
+// ---- exp/iacc STRATA_MMVQ_IACC (default off): a second wave64 layout for the K-quant matrix-vector products that keeps
+// each Q8_1 block's integer dot product whole.  The wave kernel above gives a lane 8 elements of a block row (two
+// 4-element dp4a runs that fall in two different Q8_1 blocks), so every column pays, per 8 elements, 2 dot*scale
+// multiplies, 2 int->float converts and 3 FMAs.  Here 16 lanes take one super-block and a lane takes 16 consecutive
+// elements of ONE Q8_1 block (one sub-block scale for Q6_K: 16 elements share it; one sub-block scale + min for Q4_K/Q5_K),
+// so a column costs 4 dp4a + 1 convert + 1-2 multiplies/FMAs per 16 elements.  The per-row scale goes in once per row
+// (d * sc as a float: an fp16 times an int8/6-bit integer is exact in fp32).  The rows of a wavefront share each lane's
+// activation loads (R = STRATA_MMVQ_IACC_ROWS, default STRATA_MMVQ_WAVE_ROWS).
+// Rounding: the integer part is exact (|sum| <= 16 * 32 * 127 = 65024 for Q6_K, < 2^24, so its float is exact); the
+// float sums are grouped differently from the wave kernel (one rounding per 16 elements instead of ~2 per 4), so the
+// bits change but not the precision: no input is quantized further.  Every column still has the same code whatever
+// ncols is.  Values: 1 / all = Q6_K, Q4_K, Q5_K; else a comma list of q6k, q4k, q5k.
+int g_iacc = -1;   // native_mmvq_set_iacc (tests, benchmarks); -1 = STRATA_MMVQ_IACC
+int g_iacc_rows = 0;
+int iacc_mask() {
+    if (g_iacc >= 0) return g_iacc;
+    static const int m = [] {
+        const char* v = std::getenv("STRATA_MMVQ_IACC");
+        if (!v || !*v || std::string(v) == "0") return 0;
+        const std::string s(v);
+        if (s == "1" || s == "all") return 7;
+        int r = 0;
+        if (s.find("q6k") != std::string::npos) r |= 1;
+        if (s.find("q4k") != std::string::npos) r |= 2;
+        if (s.find("q5k") != std::string::npos) r |= 4;
+        return r;
+    }();
+    return m;
+}
+int iacc_rows() {
+    if (g_iacc_rows > 0) return g_iacc_rows;
+    static const int r = [] {
+        const char* v = std::getenv("STRATA_MMVQ_IACC_ROWS");
+        const int n = v ? std::atoi(v) : 0;
+        return n == 1 || n == 2 || n == 4 ? n : 0;
+    }();
+    return r > 0 ? r : wave_rows();
+}
+__device__ __forceinline__ int iacc_ld32(const uint8_t* p) {   // 2-byte aligned (the 210-byte Q6_K blocks)
+    const uint16_t* h = reinterpret_cast<const uint16_t*>(p);
+    return int(h[0]) | (int(h[1]) << 16);
+}
+// x - 32 for bytes of x in [0, 63] (Q6_K's 6-bit codes): no byte carries, the same int8 bytes as __vsubss4(x, 0x20202020)
+__device__ __forceinline__ int iacc_sub32(int x) { return (x + 0x60606060) ^ 0x80808080; }
+
+// Lane layout: K ints (4K elements) of ONE Q8_1 block per lane, LPB = 64 / K lanes a super-block, K super-blocks a
+// wavefront iteration.  K = 4 (16 lanes a block) when the row's block count divides by 4, else K = 2 (32 lanes a
+// block): a 2560-wide row has 10 blocks, which K = 4 covers in 3 iterations at 83% of the lanes and K = 2 in 5 at 100%
+// (STRATA_MMVQ_IACC_K=2/4 forces one).  Lane sub = lane % LPB: Q8_1 block b8 = sub / (8 / K), part lq = sub % (8 / K).
+// Each type splits a row's work into fetch (loads only, so a lane's loads for all rows and columns are in flight
+// together) and decode (the integer weights and the per-row float scales a = d * sc, b = dmin * m).
+struct IaccLane { unsigned o0, o1, o2; int s0, s1; unsigned xq, xd; };
+template<int K> struct IaccRaw6 { int a[K], b[K]; int s, d; };
+template<int K>
+struct IaccQ6K {
+    static constexpr unsigned BYTES = 210;
+    static constexpr bool SUMU = false;
+    using Raw = IaccRaw6<K>;
+    __device__ static IaccLane lane(int sub) {
+        const int b8 = sub / (8 / K), lq = sub % (8 / K), l0 = 4 * K * lq, h = b8 >> 2, q = b8 & 3;
+        IaccLane l;
+        l.o0 = unsigned(64 * h + 32 * (q & 1) + l0);        // ql
+        l.o1 = unsigned(128 + 32 * h + l0);                 // qh
+        l.o2 = unsigned(192 + 8 * h + 2 * q + (l0 >> 4));   // the 16-element sub-block's scale
+        l.s0 = 4 * (q >> 1);                                // nibble
+        l.s1 = 2 * q;                                       // qh pair
+        l.xd = unsigned(36 * b8);
+        l.xq = l.xd + unsigned(4 + l0);
+        return l;
+    }
+    __device__ static void fetch(const uint8_t* __restrict__ wr, unsigned wo, const IaccLane& l, Raw& r) {
+        const uint8_t* pl = wr + (wo + l.o0);
+        const uint8_t* ph = wr + (wo + l.o1);
+#pragma unroll
+        for (int k = 0; k < K; ++k) { r.a[k] = iacc_ld32(pl + 4 * k); r.b[k] = iacc_ld32(ph + 4 * k); }
+        r.s = *reinterpret_cast<const int8_t*>(wr + (wo + l.o2));
+        r.d = *reinterpret_cast<const uint16_t*>(wr + wo + 208);
+    }
+    __device__ static void decode(const Raw& r, const IaccLane& l, int (&v)[K], float& a, float& b) {
+#pragma unroll
+        for (int k = 0; k < K; ++k)
+            v[k] = iacc_sub32(((r.a[k] >> l.s0) & 0x0f0f0f0f) | (((r.b[k] >> l.s1) << 4) & 0x30303030));
+        a = __half2float(__ushort_as_half((unsigned short) r.d)) * float(r.s);
+        b = 0.0f;
+    }
+};
+// Q4_K / Q5_K: sub-block s = b8 has a 6-bit scale and min (get_scale_min_k4); y = d*sc*q - dmin*m per element, so a
+// column also needs its integer activation sum over the lane's elements (dp4a by ones, once per column, shared by the
+// rows).  The 12 scale bytes are fetched as 3 dwords; s, s + 4 and s - 4 (s >= 4) are picked out in decode.
+__device__ __forceinline__ void iacc_scale_min(const int (&w3)[3], int s, int& d, int& m) {
+    auto byte = [&](int i) {   // selects, not an indexed (scratch) array: i is per lane
+        const int wd = i < 4 ? w3[0] : (i < 8 ? w3[1] : w3[2]);
+        return (wd >> (8 * (i & 3))) & 0xff;
+    };
+    const int bs = byte(s), bs4 = byte(s + 4), bsm4 = byte(s >= 4 ? s - 4 : s);
+    if (s < 4) { d = bs & 63; m = bs4 & 63; }
+    else { d = (bs4 & 0xf) | ((bsm4 >> 6) << 4); m = (bs4 >> 4) | ((bs >> 6) << 4); }
+}
+template<int K> struct IaccRawK { int a[K], b[K]; int sc[3]; int dm; };
+template<bool Q5, int K>
+struct IaccQ45K {
+    static constexpr unsigned BYTES = Q5 ? 176 : 144;
+    static constexpr bool SUMU = true;
+    using Raw = IaccRawK<K>;
+    __device__ static IaccLane lane(int sub) {
+        const int s = sub / (8 / K), lq = sub % (8 / K), l0 = 4 * K * lq;
+        IaccLane l;
+        l.o0 = unsigned((Q5 ? 48 : 16) + 32 * (s >> 1) + l0);   // qs
+        l.o1 = unsigned(16 + l0);                               // qh (Q5_K)
+        l.o2 = 0;
+        l.s0 = 4 * (s & 1);
+        l.s1 = s;
+        l.xd = unsigned(36 * s);
+        l.xq = l.xd + unsigned(4 + l0);
+        return l;
+    }
+    __device__ static void fetch(const uint8_t* __restrict__ wr, unsigned wo, const IaccLane& l, Raw& r) {
+        const uint8_t* pl = wr + (wo + l.o0);
+        const uint8_t* b = wr + wo;
+#pragma unroll
+        for (int k = 0; k < K; ++k) r.a[k] = *reinterpret_cast<const int*>(pl + 4 * k);
+        if constexpr (Q5) {
+            const uint8_t* ph = wr + (wo + l.o1);
+#pragma unroll
+            for (int k = 0; k < K; ++k) r.b[k] = *reinterpret_cast<const int*>(ph + 4 * k);
+        }
+        r.dm = *reinterpret_cast<const int*>(b);
+#pragma unroll
+        for (int k = 0; k < 3; ++k) r.sc[k] = *reinterpret_cast<const int*>(b + 4 + 4 * k);
+    }
+    __device__ static void decode(const Raw& r, const IaccLane& l, int (&v)[K], float& a, float& b) {
+#pragma unroll
+        for (int k = 0; k < K; ++k) {
+            if constexpr (Q5) v[k] = ((r.a[k] >> l.s0) & 0x0f0f0f0f) | (((r.b[k] >> l.s1) << 4) & 0x10101010);
+            else v[k] = (r.a[k] >> l.s0) & 0x0f0f0f0f;
+        }
+        int sc, m;
+        iacc_scale_min(r.sc, l.s1, sc, m);
+        const float2 dm = __half22float2(__builtin_bit_cast(half2, r.dm));
+        a = dm.x * float(sc);
+        b = dm.y * float(m);
+    }
+};
+template<int K> using IaccQ4K = IaccQ45K<false, K>;
+template<int K> using IaccQ5K = IaccQ45K<true, K>;
+template<template<int> class P, int K, int NCOLS, int R, bool GUARD>
+__device__ __forceinline__ void iacc_rows_dot(const uint8_t* __restrict__ w, const Q81Block* __restrict__ x,
+                                              float (&acc)[NCOLS][R], int row0, int n_out, int bpr, int x_stride,
+                                              int lane) {
+    using PK = P<K>;
+    constexpr int LPB = 64 / K;
+    const IaccLane l = PK::lane(lane % LPB);
+    const std::size_t row_bytes = std::size_t(bpr) * PK::BYTES;
+    unsigned wo = unsigned(lane / LPB) * PK::BYTES;
+    unsigned xo = unsigned(lane / LPB) * (8u * 36u);
+    for (int kbx = lane / LPB; kbx < bpr; kbx += K, wo += K * PK::BYTES, xo += K * 8 * 36) {
+        typename PK::Raw raw[R];
+#pragma unroll
+        for (int i = 0; i < R; ++i)
+            if (!GUARD || row0 + i < n_out) PK::fetch(w + std::size_t(row0 + i) * row_bytes, wo, l, raw[i]);
+        int u[NCOLS][K];
+        int dx[NCOLS];
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            const uint8_t* xc = reinterpret_cast<const uint8_t*>(x + std::size_t(j) * x_stride);
+            const int* q = reinterpret_cast<const int*>(xc + (xo + l.xq));
+#pragma unroll
+            for (int k = 0; k < K; ++k) u[j][k] = q[k];
+            dx[j] = *reinterpret_cast<const uint16_t*>(xc + (xo + l.xd));
+        }
+        // every load of the iteration is issued before any of them is used (the scheduler otherwise sinks each load to
+        // its first use at high occupancy, and a lane's few iterations then wait on memory one load at a time)
+        __builtin_amdgcn_sched_barrier(0);
+        float d8[NCOLS], d8s[NCOLS];
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            d8[j] = __half2float(__ushort_as_half((unsigned short) dx[j]));
+            if constexpr (PK::SUMU) {
+                int s = 0;
+#pragma unroll
+                for (int k = 0; k < K; ++k) s = STRATA_DP4A(u[j][k], 0x01010101, s);
+                d8s[j] = d8[j] * float(s);
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < R; ++i) {
+            if (!GUARD || row0 + i < n_out) {
+                int v[K];
+                float a, b;
+                PK::decode(raw[i], l, v, a, b);
+#pragma unroll
+                for (int j = 0; j < NCOLS; ++j) {
+                    int ia = 0;
+#pragma unroll
+                    for (int k = 0; k < K; ++k) ia = STRATA_DP4A(v[k], u[j][k], ia);
+                    acc[j][i] = fmaf(d8[j] * a, float(ia), acc[j][i]);
+                    if constexpr (PK::SUMU) acc[j][i] = fmaf(-b, d8s[j], acc[j][i]);
+                }
+            }
+        }
+    }
+}
+template<int CTRL, int ROW_MASK>
+__device__ __forceinline__ float iacc_dpp(float v) {
+    return __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), CTRL, ROW_MASK, 0xf, false));
+}
+// the 64-lane sum with DPP adds (no LDS round trips; these waves live only a few k iterations, so the 6 dependent
+// ds_bpermute steps of a butterfly per output were a large share of their time); the total lands in lane 63
+__device__ __forceinline__ float iacc_wave_sum(float v) {
+    v += iacc_dpp<0xb1, 0xf>(v);    // quad_perm [1,0,3,2]
+    v += iacc_dpp<0x4e, 0xf>(v);    // quad_perm [2,3,0,1]: quad sums
+    v += iacc_dpp<0x141, 0xf>(v);   // row_half_mirror: 8-lane sums
+    v += iacc_dpp<0x140, 0xf>(v);   // row_mirror: 16-lane (row) sums
+    v += iacc_dpp<0x142, 0xa>(v);   // row_bcast15: rows 1, 3 += rows 0, 2
+    v += iacc_dpp<0x143, 0xc>(v);   // row_bcast31: rows 2, 3 += lane 31 -> lane 63 holds the total
+    return v;
+}
+template<template<int> class P, int K, int NCOLS, int R>
+__launch_bounds__(256)
+__global__ void native_mmvq_iacc_kernel(const uint8_t* __restrict__ w, const Q81Block* __restrict__ x,
+                                        float* __restrict__ y, int n_in, int n_out) {
+    const int lane = int(threadIdx.x) & 63;
+    const int wave = __builtin_amdgcn_readfirstlane(int(threadIdx.x) >> 6);
+    const int row0 = (int(blockIdx.x) * 4 + wave) * R;
+    if (row0 >= n_out) return;
+    const int bpr = n_in / QK;
+    const int x_stride = n_in / Q8K;
+    float acc[NCOLS][R] = {};
+    if (row0 + R <= n_out) iacc_rows_dot<P, K, NCOLS, R, false>(w, x, acc, row0, n_out, bpr, x_stride, lane);
+    else iacc_rows_dot<P, K, NCOLS, R, true>(w, x, acc, row0, n_out, bpr, x_stride, lane);
+#pragma unroll
+    for (int j = 0; j < NCOLS; ++j)
+#pragma unroll
+        for (int i = 0; i < R; ++i) {
+            const float v = iacc_wave_sum(acc[j][i]);
+            if (lane == 63 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
+        }
+}
+int g_iacc_k = 0;
+int iacc_k(int bpr) {
+    if (g_iacc_k == 2 || g_iacc_k == 4) return g_iacc_k;
+    static const int forced = [] { const char* v = std::getenv("STRATA_MMVQ_IACC_K"); return v ? std::atoi(v) : 0; }();
+    if (forced == 2 || forced == 4) return forced;
+    return bpr % 4 == 0 ? 4 : 2;
+}
+template<template<int> class P, int K, int NCOLS, int R>
+void iacc_launch_r(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
+    const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
+    native_mmvq_iacc_kernel<P, K, NCOLS, R><<<blocks, 256, 0, s>>>(static_cast<const uint8_t*>(w),
+                                                                  static_cast<const Q81Block*>(x), y, n_in, n_out);
+}
+template<template<int> class P, int K, int NCOLS>
+void iacc_launch_n(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
+    switch (iacc_rows()) {
+        case 2: iacc_launch_r<P, K, NCOLS, 2>(w, x, y, n_in, n_out, s); break;
+        case 4: iacc_launch_r<P, K, NCOLS, 4>(w, x, y, n_in, n_out, s); break;
+        default: iacc_launch_r<P, K, NCOLS, 1>(w, x, y, n_in, n_out, s); break;
+    }
+}
+template<template<int> class P, int K>
+void iacc_launch_k(const void* w, const void* x, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
+    switch (ncols) {
+        case 1: iacc_launch_n<P, K, 1>(w, x, y, n_in, n_out, s); break;
+        case 2: iacc_launch_n<P, K, 2>(w, x, y, n_in, n_out, s); break;
+        case 3: iacc_launch_n<P, K, 3>(w, x, y, n_in, n_out, s); break;
+        case 4: iacc_launch_n<P, K, 4>(w, x, y, n_in, n_out, s); break;
+        case 5: iacc_launch_n<P, K, 5>(w, x, y, n_in, n_out, s); break;
+        case 6: iacc_launch_n<P, K, 6>(w, x, y, n_in, n_out, s); break;
+        case 7: iacc_launch_n<P, K, 7>(w, x, y, n_in, n_out, s); break;
+        case 8: iacc_launch_n<P, K, 8>(w, x, y, n_in, n_out, s); break;
+        default: throw std::invalid_argument("native MMVQ (iacc) requires 1 <= ncols <= 8");
+    }
+}
+template<template<int> class P>
+void iacc_launch(const void* w, const void* x, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
+    if (iacc_k(n_in / QK) == 4) iacc_launch_k<P, 4>(w, x, y, n_in, n_out, ncols, s);
+    else iacc_launch_k<P, 2>(w, x, y, n_in, n_out, ncols, s);
+}
+// true when the iacc layout took the call (its type is switched on)
+template<typename F>
+bool iacc_try(const void* w, const void* x, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
+    const int m = iacc_mask();
+    if (m == 0) return false;
+    if constexpr (std::is_same_v<F, Q6KTraits>) { if (m & 1) { iacc_launch<IaccQ6K>(w, x, y, n_in, n_out, ncols, s); return true; } }
+    if constexpr (std::is_same_v<F, Q4KTraits>) { if (m & 2) { iacc_launch<IaccQ4K>(w, x, y, n_in, n_out, ncols, s); return true; } }
+    if constexpr (std::is_same_v<F, Q5KTraits>) { if (m & 4) { iacc_launch<IaccQ5K>(w, x, y, n_in, n_out, ncols, s); return true; } }
+    return false;
+}
 template<typename F>
 void wave_launch(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
     const auto s = static_cast<cudaStream_t>(stream);
+    if (iacc_try<F>(weights, x_q8_1, y, n_in, n_out, ncols, s)) return;
     switch (ncols) {
         case 1: wave_launch_n<F, 1>(weights, x_q8_1, y, n_in, n_out, s); break;
         case 2: wave_launch_n<F, 2>(weights, x_q8_1, y, n_in, n_out, s); break;
@@ -3157,10 +3446,12 @@ void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
 void native_mmvq_set_wave_rows(int rows) { g_wave_rows = rows == 1 || rows == 2 || rows == 4 ? rows : 0; }
 void native_mmvq_set_mul24(int on) { g_mul24 = on; }
 void native_mmvq_set_q6k_r4(int on) { g_q6k_r4 = on; }
+void native_mmvq_set_iacc(int mask, int rows, int k) { g_iacc = mask; g_iacc_rows = rows == 1 || rows == 2 || rows == 4 ? rows : 0; g_iacc_k = k; }
 #else
 void native_mmvq_set_mul24(int) {}
 void native_mmvq_set_q6k_r4(int) {}
 void native_mmvq_set_wave_rows(int) {}
+void native_mmvq_set_iacc(int, int, int) {}
 #endif
 bool native_mmvq_multi_exact() { return g_multi_exact; }
 void native_mmvq_set_b6_rows(int mode) { g_b6_rows = mode; }
