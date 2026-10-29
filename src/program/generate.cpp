@@ -347,21 +347,38 @@ bool pin_blobs_on() {
 // AND SDMA together (any one off avoids it; the barrier packet that never passes is a ROCm-side problem, #884).  This keeps
 // the swaps off SDMA without turning SDMA off for the prompt read (HSA_ENABLE_SDMA=0 costs 10-24% of it).  Needs the source to
 // be mapped, 16-byte aligned memory (the registered arena); anything else takes the normal cudaMemcpyAsync.
-cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_t st) {
-#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906 too: its SDMA tops out at ~13 GB/s, a mapped-read kernel ~26
-    static const bool kernel = [] {
+bool adapt_kernel_copy_on() {
+    static const bool on = [] {
         const char* e = std::getenv("STRATA_HIP_ADAPT_KERNEL_COPY");
-        const bool on = e != nullptr && e[0] == '1';
-        if (on) std::fprintf(stderr, "strata: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
-        return on;
+        const bool v = e != nullptr && e[0] == '1';
+        if (v) std::fprintf(stderr, "strata: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
+        return v;
     }();
-    // STRATA_ADAPT_COPY_BLOCKS=N (default 64): the swap copy's grid.  The copies run beside the MTP draft's round graph and
-    // slow it (~1.2 ms a window at 64 blocks); a mapped read is PCIe-latency bound, so fewer blocks may keep the rate
-    static const int copy_blocks = [] {
+    return on;
+}
+// STRATA_ADAPT_COPY_BLOCKS=N (default 64): the swap copy's grid.  The copies run beside the MTP draft's round graph and
+// slow it (~1.2 ms a window at 64 blocks); a mapped read is PCIe-latency bound, so fewer blocks keep most of the rate
+int adapt_copy_blocks() {
+    static const int blocks = [] {
         const char* e = std::getenv("STRATA_ADAPT_COPY_BLOCKS");
         const int v = e != nullptr ? std::atoi(e) : 0;
         return v > 0 ? v : 64;
     }();
+    return blocks;
+}
+// STRATA_ADAPT_COPY_BATCH=1 (with the kernel copy; serve, one GPU, no --adapt-overlap gate): a swap round's copies as
+// one launch (adapt_copy_h2d_batch) instead of one launch per swap
+bool adapt_copy_batch_on() {
+    static const bool on = [] {
+        const char* e = std::getenv("STRATA_ADAPT_COPY_BATCH");
+        return e != nullptr && e[0] == '1';
+    }();
+    return on && adapt_kernel_copy_on();
+}
+cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_t st) {
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906 too: its SDMA tops out at ~13 GB/s, a mapped-read kernel ~26
+    const bool kernel = adapt_kernel_copy_on();
+    const int copy_blocks = adapt_copy_blocks();
     // how often the kernel copy runs and why it falls back (0 kernel, 1 size, 2 src align, 3 dst align, 4 unmapped):
     // the first fallback of each kind is printed, and the counts every 100000 copies
     static std::atomic<int64_t> n_by[5];
@@ -395,6 +412,40 @@ cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_
     }
 #endif
     return cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, st);
+}
+// The round's copies: the ones the kernel can take (16-byte multiples, aligned, mapped source) in one launch first, the
+// rest through adapt_copy_h2d (which counts their fallbacks).  Disjoint destinations, so the order does not matter.
+cudaError_t adapt_copy_h2d_batch(void* const* dst, const void* const* src, const size_t* bytes, size_t n, cudaStream_t st) {
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+    std::vector<float*> kd;
+    std::vector<const float*> ks;
+    std::vector<int64_t> kn;
+    std::vector<size_t> rest;
+    for (size_t i = 0; i < n; ++i) {
+        void* dsrc = nullptr;
+        if (bytes[i] % 16 == 0 && ((uintptr_t) src[i] & 15) == 0 && ((uintptr_t) dst[i] & 15) == 0 &&
+            cudaHostGetDevicePointer(&dsrc, const_cast<void*>(src[i]), 0) == cudaSuccess && dsrc != nullptr) {
+            kd.push_back((float*) dst[i]);
+            ks.push_back((const float*) dsrc);
+            kn.push_back((int64_t) (bytes[i] / 4));
+        } else {
+            (void) cudaGetLastError();
+            rest.push_back(i);
+        }
+    }
+    if (!kd.empty()) {
+        strata::kernels::copy_from_mapped_batch(kd.data(), ks.data(), kn.data(), (int) kd.size(), (void*) st,
+                                                adapt_copy_blocks());
+        if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return e;
+    }
+    for (const size_t i : rest)
+        if (const cudaError_t e = adapt_copy_h2d(dst[i], src[i], bytes[i], st); e != cudaSuccess) return e;
+    return cudaSuccess;
+#else
+    for (size_t i = 0; i < n; ++i)
+        if (const cudaError_t e = adapt_copy_h2d(dst[i], src[i], bytes[i], st); e != cudaSuccess) return e;
+    return cudaSuccess;
+#endif
 }
 int pin_blobs(std::vector<std::pair<uintptr_t, uintptr_t>> r, std::vector<void*>& live) {
     int failed = 0;   // ranges left pageable (a copy from them still works, through the driver's staging)
@@ -11520,6 +11571,7 @@ int main(int argc, char** argv) {
             bool main_live = false;
             // STRATA_DMA_BATCH (F12): the main device's copies as one cudaMemcpyBatchAsync (mode 0: one each)
             const int dma_mode = multi_gpu ? 0 : strata::core::dma_batch_mode();
+            const bool kbatch = !multi_gpu && !aov && adapt_copy_batch_on();
             std::vector<void*> cp_dst;
             std::vector<const void*> cp_src;
             std::vector<size_t> cp_bytes;
@@ -11539,7 +11591,7 @@ int main(int argc, char** argv) {
                 const int stn = multi_gpu ? stage_of(s.layer) : 0;   // the swap stays in the layer's own cache
                 GpuStage* gs = stn > 0 ? stages[(size_t) stn - 1].get() : nullptr;
                 const strata::core::OnDevice on(gs ? gs->dev : -1);
-                if (dma_mode != 0 && slot >= 0 && b != nullptr) {
+                if ((dma_mode != 0 || kbatch) && slot >= 0 && b != nullptr) {
                     cp_dst.push_back(xcache.device_slot(slot));
                     cp_src.push_back(b);
                     cp_bytes.push_back((size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer));
@@ -11579,8 +11631,10 @@ int main(int argc, char** argv) {
                 for (const Swap& s : swaps) drive.d.res_dirty_idx.push_back((int32_t) (s.layer * g.n_expert + s.out));
                 drive.d.res_dirty = true;
             }
-            if (!cp_dst.empty() && strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
-                                                            adapt_stream, dma_mode) != cudaSuccess) {
+            if (!cp_dst.empty() &&
+                (kbatch ? adapt_copy_h2d_batch(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(), adapt_stream)
+                        : strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
+                                                   adapt_stream, dma_mode)) != cudaSuccess) {
                 std::fprintf(stderr, "strata serve: adaptive swap copy failed (batched): %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
