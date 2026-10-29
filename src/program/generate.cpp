@@ -396,6 +396,13 @@ cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_
         if (on) std::fprintf(stderr, "strata: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
         return on;
     }();
+    // STRATA_ADAPT_COPY_BLOCKS=N (default 64): the swap copy's grid.  The copies run beside the MTP draft's round graph and
+    // slow it (~1.2 ms a window at 64 blocks); a mapped read is PCIe-latency bound, so fewer blocks may keep the rate
+    static const int copy_blocks = [] {
+        const char* e = std::getenv("STRATA_ADAPT_COPY_BLOCKS");
+        const int v = e != nullptr ? std::atoi(e) : 0;
+        return v > 0 ? v : 64;
+    }();
     // how often the kernel copy runs and why it falls back (0 kernel, 1 size, 2 src align, 3 dst align, 4 unmapped):
     // the first fallback of each kind is printed, and the counts every 100000 copies
     static std::atomic<int64_t> n_by[5];
@@ -417,7 +424,8 @@ cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_
             void* dsrc = nullptr;
             if (cudaHostGetDevicePointer(&dsrc, const_cast<void*>(src), 0) == cudaSuccess && dsrc != nullptr) {
                 tally(0);
-                strata::kernels::copy_from_mapped((float*) dst, (const float*) dsrc, (int64_t) (bytes / 4), (void*) st);
+                strata::kernels::copy_from_mapped((float*) dst, (const float*) dsrc, (int64_t) (bytes / 4), (void*) st,
+                                                 copy_blocks);
                 return cudaGetLastError();
             }
             (void) cudaGetLastError();   // not registered / not mapped: the ordinary copy
