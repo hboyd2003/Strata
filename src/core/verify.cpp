@@ -304,6 +304,13 @@ bool env_on(const char* name) {
 const bool g_coherent = env_on("STRATA_VERIFY_COHERENT");
 const bool g_doorbell_store = env_on("STRATA_DOORBELL_STORE");
 #endif
+inline bool doorbell_store_on() {   // STRATA_DOORBELL_STORE (#649) exists only in the HIP build
+#if defined(STRATA_USE_HIP)
+    return g_doorbell_store;
+#else
+    return false;
+#endif
+}
 const bool g_trace = env_on("STRATA_VERIFY_TRACE");
 const bool g_no_multi_gr = env_on("STRATA_NO_MULTI_GR");   // #783 PR-g: per-token GR reads/writes and generic-T kernels again
 const bool g_no_batch_kv = env_on("STRATA_NO_BATCH_KV_STEP");   // #783 PR-d: per-token K/V and indexer appends again
@@ -1216,6 +1223,12 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         // (not with set_always_publish: the device table may lag the host's while windows are in flight)
         device_plan_ = !all_resident_ && !always_publish_ && (v != nullptr && std::atoi(v) != 0);
     }
+    if (strata::kernels::router_fused_906_enabled() && rf_counter_ == nullptr) {   // gfx906: the fused router's counter
+        if (cudaMalloc((void**) &rf_counter_, 4) != cudaSuccess || cudaMemset(rf_counter_, 0, 4) != cudaSuccess) {
+            cudaGetLastError();
+            rf_counter_ = nullptr;
+        }
+    }
     // (halo's STRATA_VERIFY_RESIDENT=1 is this window's all_resident_ graph above, which 0.1.39 has on by default)
     if (g_qfuse() || g_qfuse_hc()) {   // S26: the HC read's q8_1 group counters, zeroed once (each launch leaves them zero)
         if (cudaMalloc((void**) &qcnt_, sizeof(unsigned) * (size_t) (g.n_embd / 32)) != cudaSuccess ||
@@ -2105,7 +2118,24 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         // move into the combine, gate + up share one launch (all bitwise; resident combine path, 2-8 rows only)
         const WeightRef* w_sgi = lfuse_on(n) && g_lfuse_gate() ? v.get("ffn_gate_inp_shexp.weight") : nullptr;
         bool sg_ready = false;
-        if (dec_batch && n > 1 && w_router != nullptr && native_router_enabled() && NE == 512 && K == 10) {
+        // gfx906 STRATA_GFX906_ROUTER_FUSED=1: router GEMV + top-10 + doorbell_publish_res in one launch, bitwise the
+        // three below, when nothing else runs between them (no LFUSE row, route prior / resident, device plan, ar,
+        // stored or remote doorbell; one token only with the native BF16 projection, as moe_route would take it)
+        bool router_fused = false;
+        if (rf_counter_ != nullptr && dec_batch && n >= 1 && n <= 4 && w_router != nullptr && native_router_enabled() &&
+            NE == 512 && K == 10 && N == 2560 && w_sgi == nullptr && (n > 1 || layer_native_bf16()) &&
+            g_route_prior() <= 0.0f && route_resident_cfg().margin <= 0.0f && !ar_on() && !device_plan_ &&
+            !doorbell_store_on() && !remote_opt_ && !always_publish_) {
+            RouterFused906 rf;
+            rf.x = mixed_ + tb * N; rf.w = (const uint16_t*) w_router->data;
+            rf.logits = logits_ + tb * NE; rf.ids = ids_ + tb * K; rf.weights = w_ + tb * K;
+            rf.d_res = hits_.d_res != nullptr ? hits_.d_res + l * g.n_expert : nullptr; rf.n_expert = (int) g.n_expert;
+            rf.x_out = m_x_ + tb * N; rf.ids_out = m_ids_ + tb * K; rf.seq = m_seq_; rf.counter = rf_counter_;
+            try { router_fused = router_fused_906(rf, n, cs); }
+            catch (const std::exception& e) { err = "verify fused router: " + std::string(e.what()); return false; }
+        }
+        if (router_fused) {
+        } else if (dec_batch && n > 1 && w_router != nullptr && native_router_enabled() && NE == 512 && K == 10) {
             try {
                 if (w_sgi != nullptr)
                     sg_ready = bf16_gemv_fp32_mmvf_multi_aux(mixed_ + tb * N, N, (const uint16_t*) w_router->data,
@@ -2169,7 +2199,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             if (remote_opt_ || always_publish_)
                 doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
                                  m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
-            else {
+            else if (!router_fused) {
                 const int32_t* layer_res = hits_.d_res != nullptr ? (hits_.d_res + l * g.n_expert) : nullptr;
                 doorbell_publish_res(xm, ids_ + tb * K, layer_res, (int) g.n_expert, (int64_t) n * N, (int64_t) n * K,
                                      m_x_ + tb * N, m_ids_ + tb * K, m_seq_, cs);

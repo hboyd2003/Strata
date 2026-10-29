@@ -3,6 +3,8 @@
 #include "s26_tsum.cuh"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/pdl.hpp"
+#include "strata/kernels/native_router.hpp"
+#include "router_w64.cuh"
 
 #include <cuda_runtime.h>
 #include <cstdlib>
@@ -252,12 +254,13 @@ __device__ __forceinline__ float r906_sum32(float v) {
     v += r906_dpp<0xb1>(v);    // quad_perm [1,0,3,2] = xor 1
     return v;
 }
+// one block's RPB outputs for NT tokens (threadIdx.x 0..255); thread 0 writes them.  No return before the end: the
+// fused kernel below goes on after it.
 template <int NT, int RPB>
-__global__ void __launch_bounds__(256) router_gemv_906_kernel(const float* __restrict__ x, const uint16_t* __restrict__ w,
-                                                              float* __restrict__ y) {
+__device__ __forceinline__ void router_gemv_906_block(const float* __restrict__ x, const uint16_t* __restrict__ w,
+                                                      float* __restrict__ y, int o0) {
     constexpr int NI = 2560, NO = 512, P = NI / 2, IT = P / 256;
-    const int t = threadIdx.x, o0 = blockIdx.x * RPB;
-    if (o0 >= NO) return;   // the padding blocks (doubr 57fa6d85: a grid of exactly 512 blocks runs ~7x slower on MI50)
+    const int t = threadIdx.x;
     __shared__ float partials[RPB][NT][32];
     if (t < 32)
 #pragma unroll
@@ -301,14 +304,68 @@ __global__ void __launch_bounds__(256) router_gemv_906_kernel(const float* __res
 #pragma unroll
             for (int k = 0; k < NT; ++k) partials[r][k][t / 32] = acc[r][k];
     __syncthreads();
-    if (t >= 32) return;
+    if (t < 32)
 #pragma unroll
-    for (int r = 0; r < RPB; ++r)
+        for (int r = 0; r < RPB; ++r)
 #pragma unroll
-        for (int k = 0; k < NT; ++k) {
-            const float v = r906_sum32(partials[r][k][t]);
-            if (t == 0) y[(size_t) k * NO + o0 + r] = v;
-        }
+            for (int k = 0; k < NT; ++k) {
+                const float v = r906_sum32(partials[r][k][t]);
+                if (t == 0) y[(size_t) k * NO + o0 + r] = v;
+            }
+}
+template <int NT, int RPB>
+__global__ void __launch_bounds__(256) router_gemv_906_kernel(const float* __restrict__ x, const uint16_t* __restrict__ w,
+                                                              float* __restrict__ y) {
+    const int o0 = blockIdx.x * RPB;
+    if (o0 >= 512) return;   // the padding blocks (doubr 57fa6d85: a grid of exactly 512 blocks runs ~7x slower on MI50)
+    router_gemv_906_block<NT, RPB>(x, w, y, o0);
+}
+
+// gfx906 STRATA_GFX906_ROUTER_FUSED=1: verify's router stage - the GEMV above, native_router_top10_multi and
+// doorbell_publish_res - as ONE launch (was 3 graph nodes a layer).  The GEMV blocks are router_gemv_906_block; the
+// last block to finish (a ticket counter: __threadfence, atomicAdd, __threadfence) runs the top-10 with
+// router_w64.cuh's routine, one wave a token, then doorbell_publish_res_kernel's publish with 256 threads instead of
+// 1024 (the same ids, the same x copy on a miss, the same fences and ring increment).  Every logit, id, weight and
+// published byte is the three kernels' (the top-10 is route_multi's bits, router_w64_parity).  The counter is the
+// caller's (one uint32, zero; the last block puts it back to zero), so launches on one stream may share it.
+template <int NT, int RPB>
+__global__ void __launch_bounds__(256) router_fused_906_kernel(RouterFused906 a) {
+    constexpr int NO = 512, NB = NO / RPB, K = NT * 10, N = NT * 2560;
+    const int t = threadIdx.x, o0 = blockIdx.x * RPB;
+    if (o0 >= NO) return;   // the padding blocks: they take no ticket
+    router_gemv_906_block<NT, RPB>(a.x, a.w, a.logits, o0);
+    __shared__ unsigned last;
+    __shared__ int32_t sid[K];
+    __threadfence();   // this block's logits, before its ticket
+    __syncthreads();
+    if (t == 0) last = atomicAdd(a.counter, 1u) == (unsigned) (NB - 1);
+    __syncthreads();
+    if (!last) return;
+    __threadfence();   // every block's logits are visible (acquire: the L1 is invalidated)
+    const int wave = t >> 6;
+    if (wave < NT) w64::route_w64_token(a.logits + wave * 512, a.ids + wave * 10, a.weights + wave * 10, sid + wave * 10);
+    __syncthreads();
+    // doorbell_publish_res_kernel
+    int any_miss = 0;
+    if (t < K) {
+        const int32_t id = sid[t];
+        a.ids_out[t] = id;
+        if (a.d_res == nullptr || id < 0 || id >= a.n_expert || a.d_res[id] < 0) any_miss = 1;
+    }
+    if (__syncthreads_or(any_miss)) {
+        const float4* x4 = reinterpret_cast<const float4*>(a.x);
+        float4* o4 = reinterpret_cast<float4*>(a.x_out);
+        for (int i = t; i < N / 4; i += 256) o4[i] = x4[i];
+        __threadfence_system();
+    } else if (t < K) {
+        __threadfence_system();
+    }
+    __syncthreads();
+    if (t == 0) {
+        *(volatile uint32_t*) a.seq = *(volatile uint32_t*) a.seq + 1u;
+        __threadfence_system();   // #697 (HIP)
+        *a.counter = 0u;
+    }
 }
 bool getenv_tsum() {
     static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
@@ -346,6 +403,47 @@ bool router_gemv_906(const float* x, const uint16_t* w, float* y, int n_tok, cud
     return true;
 }
 #endif
+}  // namespace
+
+bool router_fused_906_enabled() {
+#if defined(STRATA_HIP_GFX906)
+    static const bool on = [] { const char* e = std::getenv("STRATA_GFX906_ROUTER_FUSED"); return e && e[0] == '1' && e[1] == 0; }();
+    return on;
+#else
+    return false;
+#endif
+}
+
+bool router_fused_906(const RouterFused906& a, int n_tok, void* stream) {
+#if defined(STRATA_HIP_GFX906)
+    if (!router_fused_906_enabled() || n_tok < 1 || n_tok > 4 || a.counter == nullptr || a.seq == nullptr ||
+        (reinterpret_cast<uintptr_t>(a.x) & 15u) != 0 || (reinterpret_cast<uintptr_t>(a.x_out) & 15u) != 0)
+        return false;
+    // rows a block: STRATA_GFX906_ROUTER_GEMV if set to 1 / 2 / 4, else the auto table
+    int rpb = router_gemv_906_rpb(n_tok);
+    if (rpb == 0) rpb = n_tok == 1 ? 1 : n_tok <= 3 ? 2 : 4;
+    const cudaStream_t st = (cudaStream_t) stream;
+#define RF906(NT) \
+    if (rpb == 1) router_fused_906_kernel<NT, 1><<<512 + 64, 256, 0, st>>>(a); \
+    else if (rpb == 2) router_fused_906_kernel<NT, 2><<<256 + 64, 256, 0, st>>>(a); \
+    else router_fused_906_kernel<NT, 4><<<128 + 64, 256, 0, st>>>(a);
+    switch (n_tok) {
+        case 1: RF906(1) break;
+        case 2: RF906(2) break;
+        case 3: RF906(3) break;
+        default: RF906(4) break;
+    }
+#undef RF906
+    const cudaError_t result = cudaGetLastError();
+    if (result != cudaSuccess) throw std::runtime_error(std::string("router_fused_906 launch: ") + cudaGetErrorString(result));
+    return true;
+#else
+    (void) a; (void) n_tok; (void) stream;
+    return false;
+#endif
+}
+
+namespace {
 
 template <int B>
 void launch_rows(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy, int n_in, int n_out, int n_tok,
