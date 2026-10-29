@@ -38,7 +38,7 @@ void native_mmvq_set_wave_rows(int rows);
 void native_mmvq_set_mul24(int on);
 void native_mmvq_set_q6k_r4(int on);
 // exp/iacc (gfx906): the integer-accumulating wave64 layout for Q6_K (bit 1), Q4_K (2), Q5_K (4); -1 = STRATA_MMVQ_IACC.
-// rows: rows a wavefront for it (1/2/4; 0 = STRATA_MMVQ_IACC_ROWS, else STRATA_MMVQ_WAVE_ROWS). Rounding-only change.
+// rows: rows a wavefront for it (1/2/4; 0 = STRATA_MMVQ_IACC_ROWS, else 4 if n_out >= 4096 else 2). Rounding-only.
 void native_mmvq_set_iacc(int mask, int rows = 0, int k = 0);   // k: ints a lane, 2/4 (0 = auto)
 // B6 (lab, opt-in STRATA_B6_MMVQ_ROWS=1): the exact multi-column layout with the activation blocks of every column
 // loaded once per weight block and reused across the block's rows (bitwise the same sums as the default exact
