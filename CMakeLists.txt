@@ -1382,6 +1382,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(router_w64_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(router_w64_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME router_w64_parity COMMAND router_w64_parity --selftest)
+  # gfx906 STRATA_GFX906_ROUTER_FUSED: router GEMV + top-10 + doorbell in one launch against the three launches, bitwise
+  add_executable(router_fused_parity src/kernels/router_fused_parity.cpp)
+  target_include_directories(router_fused_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(router_fused_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   # B6: the dense projections' time per verify row at the model's shapes, default vs STRATA_B6_MMVQ_ROWS, bitwise
   if(STRATA_ENABLE_CUDA)
     add_executable(b6_mmvq_bench src/kernels/b6_mmvq_bench.cpp)
