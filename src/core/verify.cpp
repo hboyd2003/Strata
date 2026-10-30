@@ -782,6 +782,7 @@ Verifier::~Verifier() {
     if (dc_arena_) cudaFree(dc_arena_);
     if (h_commitd_) cudaFreeHost(h_commitd_);
     if (qcnt_) cudaFree(qcnt_);
+    if (rf_counter_) cudaFree(rf_counter_);
     if (d_spec_) cudaFree(d_spec_);
     if (tap_file_) std::fclose(tap_file_);
 #if !defined(STRATA_GPU_METAL)   // (on Metal tap_dev_ is the window's unified-memory buffer, not an allocation of this object)
@@ -1349,6 +1350,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     if (strata::kernels::router_fused_906_enabled() && rf_counter_ == nullptr) {   // gfx906: the fused router's counter
         if (cudaMalloc((void**) &rf_counter_, 4) != cudaSuccess || cudaMemset(rf_counter_, 0, 4) != cudaSuccess) {
             cudaGetLastError();
+            if (rf_counter_) cudaFree(rf_counter_);
             rf_counter_ = nullptr;
         }
     }
