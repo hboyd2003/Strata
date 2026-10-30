@@ -2774,7 +2774,7 @@ void iacc_launch(const void* w, const void* x, float* y, int n_in, int n_out, in
 template<typename F>
 bool iacc_try(const void* w, const void* x, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
     const int m = iacc_mask();
-    if (m == 0) return false;
+    if (m == 0 || ncols > 8) return false;   // its kernels take 1..8 columns; the wave kernel goes to 16 (VERIFY_MAX_T > 8)
     if constexpr (std::is_same_v<F, Q6KTraits>) { if (m & 1) { iacc_launch<IaccQ6K>(w, x, y, n_in, n_out, ncols, s); return true; } }
     if constexpr (std::is_same_v<F, Q4KTraits>) { if (m & 2) { iacc_launch<IaccQ4K>(w, x, y, n_in, n_out, ncols, s); return true; } }
     if constexpr (std::is_same_v<F, Q5KTraits>) { if (m & 4) { iacc_launch<IaccQ5K>(w, x, y, n_in, n_out, ncols, s); return true; } }
