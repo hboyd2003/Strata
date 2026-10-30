@@ -395,6 +395,14 @@ void parallel_host_memcpy(const std::vector<HostCopySpan>& spans) {
 const QsaState& session_qsa(const SessionState& ss, size_t j) {
     return ss.qsa_states[(size_t) ss.qsa_ord0 + j];
 }
+// The bytes of part `i` (k, v, k_scale, v_scale, pooled) a snapshot keeps for `unchanged` tokens: whole pages, and the
+// indexer's whole rows (its moving spare row is rewritten).  conversation_kv_save reuses them; a delta save's source
+// marks them stable.
+size_t kept_prefix(const Layout& l, const ModelGeometry& g, bool index, size_t i, size_t part_bytes, int64_t unchanged) {
+    if (i == 4) return index ? size_t(unchanged / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * 4 : 0;
+    const int64_t whole_cells = l.page_size > 0 ? (unchanged / l.page_size) * l.page_size : 0;
+    return l.cells ? (part_bytes / size_t(l.cells)) * size_t(whole_cells) : 0;
+}
 } // namespace
 
 bool conversation_kv_capture_bytes(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
@@ -430,7 +438,6 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
         error = "conversation snapshot: invalid unchanged prefix";
         return false;
     }
-    const int64_t whole_cells = (unchanged_tokens / l.page_size) * l.page_size;
     image.format = l.format;
     image.cells = l.cells;
     image.heads = g.n_head_kv;
@@ -448,8 +455,7 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
     for (size_t i = 0; i < dst.size(); ++i) {
         // Recopy the partial page and the indexer's moving spare row. Completed
         // pages/rows strictly before the first rewritten token remain identical.
-        const size_t keep = i == 4 ? (index ? size_t(unchanged_tokens / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * 4 : 0)
-                                  : l.cells ? (sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
+        const size_t keep = kept_prefix(l, g, index, i, sizes[i], unchanged_tokens);
         if (keep > dst[i]->size()) { error = "conversation snapshot: missing reusable prefix"; return false; }
         if (fast_host && i < 4) {
             if (sizes[i] > keep && src[i] == nullptr) { error = "conversation snapshot: missing state buffer"; return false; }
@@ -1064,14 +1070,8 @@ bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const Mode
     s.format = l.format; s.cells = l.cells; s.heads = g.n_head_kv; s.head_dim = g.head_dim;
     s.page_size = l.page_size; s.pooled_rows = l.pooled_rows; s.idx_dim = g.idx_key_dim;
     s.sizes = {l.data, l.value_data, l.scales, l.value_scales, l.pooled};
-    // the prefix conversation_kv_save keeps for `unchanged` tokens: whole pages, and the indexer's whole rows (its
-    // moving spare row is rewritten)
-    const int64_t whole_cells = l.page_size > 0 ? (unchanged / l.page_size) * l.page_size : 0;
-    for (size_t i = 0; i < 5; ++i) {
-        const size_t keep = i == 4 ? (index ? size_t(unchanged / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * 4 : 0)
-                                   : l.cells ? (s.sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
-        s.stable[i] = std::min(keep, s.sizes[i]);
-    }
+    for (size_t i = 0; i < 5; ++i)   // the prefix conversation_kv_save keeps
+        s.stable[i] = std::min(kept_prefix(l, g, index, i, s.sizes[i], unchanged), s.sizes[i]);
     const auto src = pools(st);
     const auto sizes = s.sizes;
     auto why = std::make_shared<std::string>();
