@@ -3,7 +3,8 @@
 > with me directing and reviewing. Read and test it before you rely on any of it.
 >
 > **Performance changes are kept only if they measurably help on my hardware.** Every performance change
-> (my own, upstream PRs, or commits from other forks) is built, checked for output parity and A/B-timed on one box.
+> (my own, upstream PRs, or commits from other forks) is built, checked for output parity and A/B-timed on one box
+> with the fork's benchmark harness ([`bench/gfx906/ab.py`](docs/gfx906/branches/gfx906-ab.md), which you can run too).
 > If it could not be shown to make that box faster, it was left out, however promising it looked. The box:
 >
 > - **GPU:** one AMD Instinct MI50 (gfx906, wave64) with 32 GiB HBM2 VRAM, 225 W cap, on PCIe 4.0 x16
