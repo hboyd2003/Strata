@@ -14030,11 +14030,21 @@ int main(int argc, char** argv) {
                         refuse(err);
                         continue;
                     }
+                    // each K/V part the file holds must be exactly the part it lands in: a short one would leave the
+                    // outgoing conversation's bytes in the pool, a long one fail mid-transfer (FATAL)
+                    bool sizes_ok = file_kv.size() == targets.size();
+                    for (size_t j = 0; sizes_ok && j < targets.size(); ++j)
+                        for (size_t p = 0; p < 5; ++p) sizes_ok = sizes_ok && file_kv[j][p] == (uint64_t) targets[j].sizes[p];
+                    if (!sizes_ok) {
+                        refuse("conversation snapshot: invalid K/V payload size");
+                        continue;
+                    }
                     if (cudaDeviceSynchronize() != cudaSuccess) {
                         refuse("the device did not go quiet before the restore", strata::core::SessionError::io);
                         continue;
                     }
                     conversations.take_reuse();   // retained K/V described the outgoing session
+                    const bool live_ok_before = live_ok;
                     live_ok = false;
                     // disk -> host pool in blocks of at most 16 MiB: one bounded allowance; the apply pass is bound
                     // to the K/V sizes the read pass validated and fail-stops once it has written the first block,
@@ -14056,7 +14066,7 @@ int main(int argc, char** argv) {
                     if (!strata::core::session_file_apply_streamed(path, id, sink, file_kv, err, &st2)) {
                         if (!touched) {
                             // the file changed or failed before the first block: the session is as it was
-                            live_ok = true;
+                            live_ok = live_ok_before;
                             refuse(err, st2.error);
                             continue;
                         }
