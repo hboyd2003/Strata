@@ -87,6 +87,7 @@ from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
 from serve import native_trace  # noqa: E402
+from serve import session_files  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -5515,16 +5516,45 @@ class Service:
         st.update(last_event=event, last_tokens=r.get("tokens"), last_bytes=r.get("bytes"), last_ms=r.get("ms"),
                   last_at=time.time())
 
+    _DELTA_LOG = re.compile(r"(auto-.*\.bin)\.[0-9a-f]{16}\.kv")
+
     def _auto_session_files(self) -> list:
-        """The auto-*.bin files in slot_save_path, newest first: (mtime, size, path)."""
-        entries = []
+        """The auto-*.bin files in slot_save_path, newest first: (mtime, size, path).  A delta session's K/V log
+        (<name>.<16 hex>.kv, STRATA_SESSION_DELTA) counts toward its file's size."""
+        entries, logs = [], {}
         with os.scandir(self.slot_save_path) as it:
             for e in it:
-                if e.is_file() and e.name.startswith("auto-") and e.name.endswith(".bin"):
+                if not e.is_file():
+                    continue
+                m = self._DELTA_LOG.fullmatch(e.name)
+                if m:
+                    logs[m.group(1)] = logs.get(m.group(1), 0) + e.stat().st_size
+                elif e.name.startswith("auto-") and e.name.endswith(".bin"):
                     st = e.stat()
                     entries.append((st.st_mtime, st.st_size, e.path))
+        entries = [(t, size + logs.get(os.path.basename(path), 0), path) for t, size, path in entries]
         entries.sort(reverse=True)
         return entries
+
+    def _remove_auto_session(self, path: str):
+        """An auto-*.bin file and its delta K/V logs (the head first: no head is left pointing at a removed log)."""
+        session_files.remove(path, strict=True)
+
+    def _remove_orphan_auto_logs(self) -> int:
+        """Delta K/V logs whose auto-*.bin head is gone (a crash between a key's first log and its head, a failed log
+        unlink): the size cap never sees them, so they go here.  No save runs meanwhile (the FIFO is held)."""
+        removed = 0
+        with os.scandir(self.slot_save_path) as it:
+            names = {e.name: e.path for e in it if e.is_file()}
+        for name, path in names.items():
+            m = self._DELTA_LOG.fullmatch(name)
+            if m and m.group(1) not in names:
+                try:
+                    os.unlink(path)
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
 
     def auto_sessions_view(self) -> dict:
         """The Monitor's Auto sessions card: the limits, the conversation the engine holds, the auto-*.bin files on
@@ -5571,6 +5601,12 @@ class Service:
         keep = int(self.auto_sessions_keep or 0)
         cap = int(float(self.auto_sessions_max_gb or 0) * (1 << 30))
         try:
+            orphans = self._remove_orphan_auto_logs()
+        except OSError:
+            orphans = 0
+        if orphans:
+            print(f"[strata] auto sessions: removed {orphans} K/V log(s) left without their file", flush=True)
+        try:
             entries = self._auto_session_files()      # newest first
         except OSError as e:
             print(f"[strata] auto sessions: cannot prune ({e})", flush=True)
@@ -5583,7 +5619,7 @@ class Service:
             if not (beyond_count or over_cap):
                 break
             try:
-                os.unlink(entries[i][2])
+                self._remove_auto_session(entries[i][2])
                 total -= entries[i][1]
                 removed += 1
             except OSError:
