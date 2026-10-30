@@ -5,6 +5,8 @@ running one Qwen model for long agent conversations. Everything in it was measur
 nothing was kept unless it made that machine faster (see the warning in the [README](../../README.md)).
 
 - [maintenance.md](maintenance.md): how `main` is rebuilt, why it is force-pushed, and how to follow it
+- [Releases](https://github.com/hboyd2003/Strata/releases): tagged `v<upstream>+<fork>-gfx906`, with a Docker image each
+  ([how they work](maintenance.md#releases))
 - [tested.md](tested.md): what was tried and **not** kept (forks, upstream PRs, switches, tuning), with numbers
 - [branches/](branches/): one page per custom branch, written on that branch (what it does, its switches, its A/B);
   the table at the bottom links each one
@@ -106,6 +108,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-adapt-copy`](branches/perf-gfx906-adapt-copy.md) | own | kernel copies for adaptive expert swaps |
 | [`perf/gfx906-draft-copy`](branches/perf-gfx906-draft-copy.md) | own (partly from VlDubr) | smaller swap-copy grid so copies stop crowding the MTP draft |
 | [`serve/session-delta`](branches/serve-session-delta.md) | own | delta session files: append a turn's new K/V instead of rewriting the file |
+| [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
 
 Not merged: `gfx906/dsv41` and `build/dsv41-serve` (DeepSeek V4.1 on gfx906; parked).
