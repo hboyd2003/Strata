@@ -3294,7 +3294,12 @@ def reminder_tail_args(cfg: dict, exe: str, tok) -> list[str] | None:
             known = b"--tail-reminder-ids" in f.read()
     except OSError:
         known = False
+    # the tag's tokens as they open the turn: the tag is followed by a newline there, and a BPE can merge its ">"
+    # with that newline, so only the tokens the tag alone and the tag + newline share are matched
     ids = tok.encode("<system-reminder>", parse_special=False)
+    nl = tok.encode("<system-reminder>\n", parse_special=False)
+    while ids and nl[:len(ids)] != ids:
+        ids = ids[:-1]
     if not known or not ids:
         print("[strata] qwen_code_tail needs an engine with --tail-reminder-ids: the reminder stays in the "
               "checkpoint", flush=True)
