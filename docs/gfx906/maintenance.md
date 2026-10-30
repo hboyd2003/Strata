@@ -20,7 +20,8 @@ Each branch is one of these kinds:
 | Parked | `gfx906/dsv41`, `build/dsv41-serve` | kept rebased but not merged (DeepSeek work, paused) | `main` |
 
 Fork and PR copies change only to follow their source. Fixes and tuning go on my own branches instead,
-so a copy can always be compared with what its author published.
+so a copy can always be compared with what its author published. Bug fixes to the copies' code collect on
+[`fix/rebased-review`](branches/fix-rebased-review.md), merged after my other branches.
 
 ## A catch-up (rebuilding `main`)
 

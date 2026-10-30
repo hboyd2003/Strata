@@ -110,6 +110,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-adapt-copy`](branches/perf-gfx906-adapt-copy.md) | own | kernel copies for adaptive expert swaps |
 | [`perf/gfx906-draft-copy`](branches/perf-gfx906-draft-copy.md) | own (partly from VlDubr) | smaller swap-copy grid so copies stop crowding the MTP draft |
 | [`serve/session-delta`](branches/serve-session-delta.md) | own | delta session files: append a turn's new K/V instead of rewriting the file |
+| [`fix/rebased-review`](branches/fix-rebased-review.md) | own | review fixes for the forks' and PRs' code (auto sessions, session restore, correctness trace) |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
