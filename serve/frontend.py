@@ -572,6 +572,18 @@ def _system_to_user(messages: list[dict]) -> list[dict]:
     return out
 
 
+def without_moved_lines(text: str) -> str:
+    """A user message's text without the block _system_to_user put at its front (the client's own text): auto
+    sessions key a conversation on it, and the block moves between turns ("latest") or changes with the stamp."""
+    stu = SYSTEM_TO_USER
+    if stu is None:
+        return text
+    head, sep, rest = text.partition("\n\n")
+    if sep and head and all(stu.moves(line) for line in head.split("\n")):
+        return rest
+    return text
+
+
 def _late_system_to_user(messages: list[dict]) -> list[dict]:
     """The chat template takes a system message only at the start ("System message must be at the beginning").
     Clients also send them mid-conversation - Claude Code's hook context as {"role": "system"} after the first user
