@@ -43,8 +43,20 @@ than hand-merging the old one.
 - **Hashes do not survive a catch-up.** `main` and every branch are rewritten, typically every few days.
 - To follow the fork: `git fetch` and then `git reset --hard origin/main` (or the branch you track).
   `git pull` will try to merge the old history with the new and make a mess.
-- To build on it: branch from a commit you have fetched and keep that commit around (a tag of your own).
+- To build on it: start from a release tag (those are never moved), or from a commit you keep around yourself.
   Rebase your work onto the new `main` after a catch-up; don't merge it.
+
+## Releases
+
+Releases are tagged `v<upstream version>+<fork version>-gfx906`, for example `v0.2.8+0.1-gfx906`. The upstream part
+is the upstream Strata version `main` is built on; the fork part counts every fork release and doesn't reset when
+upstream moves. Tags are the only refs that are never rewritten, so a release tag is the thing to pin.
+
+Each release has a GitHub Release and an image, `ghcr.io/hboyd2003/strata-gfx906:<upstream>-<fork>` (plus `:latest`).
+The image is the one production runs on the MI50 box, pushed from there; the tag then starts a workflow that checks it
+and writes the notes. Details: [branches/gfx906-release.md](branches/gfx906-release.md).
+
+The fork carries no upstream tags. Upstream's own releases are at [Niko1221/Strata](https://github.com/Niko1221/Strata/releases).
 
 ## How a change gets in
 
