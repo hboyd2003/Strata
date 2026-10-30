@@ -16,6 +16,7 @@
 #include <optional>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -2148,12 +2149,97 @@ struct LogFile {
     }
 };
 
+// The apply pass's hand-over of a delta log to the sink.  A log of many appends holds one small record per part per
+// save, and every sink call is a device copy with a synchronization (~0.1 ms on gfx906), so small records (each
+// save's new cells) are held in an arena, per part, and handed over merged - each part's bytes in log order, in blocks
+// of up to 16 MiB - when the arena fills and at the end.  A large record (a full write's, a long turn's) goes to the
+// sink in place, after the bytes its part holds in the arena, so a later record still overwrites an earlier one.
+class KvMerger {
+public:
+    static constexpr size_t kSmall = 4u << 20, kArena = 48u << 20;
+    explicit KvMerger(const SessionKvBlock& sink) : sink_(sink) {}
+    // bytes [off, off+n) of (layer, part), from a record of `record_n` bytes
+    bool put(size_t layer, size_t part, uint64_t off, const uint8_t* p, size_t n, uint64_t record_n) {
+        if (record_n >= kSmall) return flush_part(layer, part) && give(layer, part, off, p, n);
+        if (!arena_) {
+            arena_ = Aligned(static_cast<uint8_t*>(std::aligned_alloc(kAlign, kArena)));
+            stage_ = aligned_block();
+            if (!arena_ || !stage_) { error_ = "out of memory for the K/V merge buffers"; return false; }
+        }
+        if (used_ + n > kArena && !flush_all()) return false;
+        std::memcpy(arena_.get() + used_, p, n);
+        auto& list = held_[{layer, part}];
+        if (!list.empty() && list.back().off + list.back().n == off && list.back().at + list.back().n == used_)
+            list.back().n += n;   // (the next bytes of the same record)
+        else
+            list.push_back({off, used_, n});
+        used_ += n;
+        return true;
+    }
+    bool flush_all() {
+        for (auto it = held_.begin(); it != held_.end();) {
+            if (!merge(it->first.first, it->first.second, it->second)) return false;
+            it = held_.erase(it);
+        }
+        used_ = 0;
+        return true;
+    }
+    const std::string& error() const { return error_; }
+private:
+    struct Held { uint64_t off; size_t at, n; };
+    bool give(size_t layer, size_t part, uint64_t off, const uint8_t* p, size_t n) {
+        if (sink_(layer, part, off, p, n)) return true;
+        if (error_.empty()) error_ = "the K/V sink failed";
+        return false;
+    }
+    bool flush_part(size_t layer, size_t part) {
+        const auto it = held_.find({layer, part});
+        if (it == held_.end()) return true;
+        if (!merge(layer, part, it->second)) return false;
+        held_.erase(it);
+        return true;
+    }
+    // one part's held pieces, in log order, merged through the stage (a piece that overwrites or continues what the
+    // stage holds joins it; anything else hands the stage over first)
+    bool merge(size_t layer, size_t part, const std::vector<Held>& list) {
+        uint64_t start = 0;
+        size_t len = 0;
+        for (const Held& h : list) {
+            uint64_t off = h.off;
+            const uint8_t* p = arena_.get() + h.at;
+            for (size_t n = h.n; n;) {
+                if (len && (off < start || off > start + len || off - start >= kBlock)) {
+                    if (!give(layer, part, start, stage_.get(), len)) return false;
+                    len = 0;
+                }
+                if (!len) start = off;
+                const size_t at = (size_t) (off - start), c = std::min(n, kBlock - at);
+                std::memcpy(stage_.get() + at, p, c);
+                len = std::max(len, at + c);
+                off += c; p += c; n -= c;
+            }
+        }
+        return len == 0 || give(layer, part, start, stage_.get(), len);
+    }
+    const SessionKvBlock& sink_;
+    Aligned arena_, stage_;
+    size_t used_ = 0;
+    std::map<std::pair<size_t, size_t>, std::vector<Held>> held_;
+    std::string error_;
+};
+
 bool walk_log(LogFile& lf, const SessionFileIdentity& id, const LogRef& ref,
               const std::vector<std::array<uint64_t, 5>>& sizes, const SessionReadLimits& limits,
               const SessionKvBlock& sink, SessionHashState* end_state, std::string& error, SessionStatus& st,
               bool changed) {
     FileSource& src = lf.src;
     SessionHasher hash(0);
+    KvMerger merger(sink);
+    auto sink_failed = [&] {
+        if (error.empty()) error = "session file: " + merger.error();
+        st.error = SessionError::io;
+        return false;
+    };
     auto read = [&](void* p, size_t n) {
         if (!src.read(p, n)) { st.error = src.kind(); error = "session file: K/V log read error: " + src.error(); return false; }
         hash.update(p, n);
@@ -2195,15 +2281,12 @@ bool walk_log(LogFile& lf, const SessionFileIdentity& id, const LogRef& ref,
             const uint64_t o = offset + at, end = pad ? 0 : sizes[layer][part];
             at += c;
             if (pad || !sink || o >= end) continue;
-            if (!sink(layer, part, o, p, (size_t) std::min<uint64_t>(c, end - o))) {
-                if (error.empty()) error = "session file: the K/V sink failed";
-                st.error = SessionError::io;
-                return false;
-            }
+            if (!merger.put(layer, part, o, p, (size_t) std::min<uint64_t>(c, end - o), n)) return sink_failed();
         }
         pos += n;
         if (!pad) covered[layer][part] = std::max(covered[layer][part], offset + n);
     }
+    if (sink && !merger.flush_all()) return sink_failed();
     if (hash.digest() != ref.digest) {
         error = changed ? "session file: the K/V log changed since the read pass (checksum)"
                         : "session file: K/V log checksum mismatch";
