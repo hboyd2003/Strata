@@ -7,6 +7,8 @@ nothing was kept unless it made that machine faster (see the warning in the [REA
 - [maintenance.md](maintenance.md): how `main` is rebuilt, why it is force-pushed, and how to follow it
 - [Releases](https://github.com/hboyd2003/Strata/releases): tagged `v<upstream>+<fork>-gfx906`, with a Docker image each
   ([how they work](maintenance.md#releases))
+- [branches/gfx906-ab.md](branches/gfx906-ab.md): the benchmark harness every number here was measured with
+  (`bench/gfx906/ab.py`). Run its standard suite on your machine and compare with ours.
 - [tested.md](tested.md): what was tried and **not** kept (forks, upstream PRs, switches, tuning), with numbers
 - [branches/](branches/): one page per custom branch, written on that branch (what it does, its switches, its A/B);
   the table at the bottom links each one
@@ -75,7 +77,7 @@ All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did 
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
-**Speed:** about 83 tok/s decode on short prompts. On real agent traffic (the last 100 requests on 2026-10-30: context median
+**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md)): about 83 tok/s decode on short prompts. On real agent traffic (the last 100 requests on 2026-10-30: context median
 144K tokens, p90 185K, ~730 new tokens a turn) decode is 82 tok/s median with 0.74 draft acceptance, and prompt
 reading takes ~45% of engine time. Prefill ~740 tok/s at 16K and
 ~720 tok/s at 100K. The fork started at ~59 tok/s decode on the same box and model.
