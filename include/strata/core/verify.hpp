@@ -528,6 +528,7 @@ private:
     std::vector<float> logit_bias_host_;
     float* logit_bias_device_ = nullptr;
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
+    uint32_t* rf_counter_ = nullptr;   ///< STRATA_GFX906_ROUTER_FUSED: the fused router launch's ticket counter (one uint32)
     unsigned long long* rr_stats_ = nullptr;   ///< STRATA_ROUTE_RESIDENT's counters on device_ (#1578); null: none
     std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
     VerifyReleaseControl* release_control_ = nullptr;  ///< fixed-lifetime watchdog registration; null before init completes

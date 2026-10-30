@@ -347,24 +347,105 @@ bool pin_blobs_on() {
 // AND SDMA together (any one off avoids it; the barrier packet that never passes is a ROCm-side problem, #884).  This keeps
 // the swaps off SDMA without turning SDMA off for the prompt read (HSA_ENABLE_SDMA=0 costs 10-24% of it).  Needs the source to
 // be mapped, 16-byte aligned memory (the registered arena); anything else takes the normal cudaMemcpyAsync.
-cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_t st) {
-#if defined(STRATA_USE_HIP)
-    static const bool kernel = [] {
+bool adapt_kernel_copy_on() {
+    static const bool on = [] {
         const char* e = std::getenv("STRATA_HIP_ADAPT_KERNEL_COPY");
-        const bool on = e != nullptr && e[0] == '1';
-        if (on) std::fprintf(stderr, "strata: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
-        return on;
+        const bool v = e != nullptr && e[0] == '1';
+        if (v) std::fprintf(stderr, "strata: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
+        return v;
     }();
-    if (kernel && bytes % 16 == 0 && ((uintptr_t) src & 15) == 0 && ((uintptr_t) dst & 15) == 0) {
-        void* dsrc = nullptr;
-        if (cudaHostGetDevicePointer(&dsrc, const_cast<void*>(src), 0) == cudaSuccess && dsrc != nullptr) {
-            strata::kernels::copy_from_mapped((float*) dst, (const float*) dsrc, (int64_t) (bytes / 4), (void*) st);
-            return cudaGetLastError();
+    return on;
+}
+// STRATA_ADAPT_COPY_BLOCKS=N (default 64): the swap copy's grid.  The copies run beside the MTP draft's round graph and
+// slow it (~1.2 ms a window at 64 blocks); a mapped read is PCIe-latency bound, so fewer blocks keep most of the rate
+int adapt_copy_blocks() {
+    static const int blocks = [] {
+        const char* e = std::getenv("STRATA_ADAPT_COPY_BLOCKS");
+        const int v = e != nullptr ? std::atoi(e) : 0;
+        return v > 0 ? v : 64;
+    }();
+    return blocks;
+}
+// STRATA_ADAPT_COPY_BATCH=1 (with the kernel copy; serve, one GPU, no --adapt-overlap gate): a swap round's copies as
+// one launch (adapt_copy_h2d_batch) instead of one launch per swap
+bool adapt_copy_batch_on() {
+    static const bool on = [] {
+        const char* e = std::getenv("STRATA_ADAPT_COPY_BATCH");
+        return e != nullptr && e[0] == '1';
+    }();
+    return on && adapt_kernel_copy_on();
+}
+cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_t st) {
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906 too: its SDMA tops out at ~13 GB/s, a mapped-read kernel ~26
+    const bool kernel = adapt_kernel_copy_on();
+    const int copy_blocks = adapt_copy_blocks();
+    // how often the kernel copy runs and why it falls back (0 kernel, 1 size, 2 src align, 3 dst align, 4 unmapped):
+    // the first fallback of each kind is printed, and the counts every 100000 copies
+    static std::atomic<int64_t> n_by[5];
+    auto tally = [&](int k) {
+        if (k > 0 && n_by[k].load(std::memory_order_relaxed) == 0)
+            std::fprintf(stderr, "strata: adaptive kernel copy: first fallback (%s): %zu bytes, src %p, dst %p\n",
+                         k == 1 ? "size not a multiple of 16" : k == 2 ? "src not 16-byte aligned"
+                         : k == 3 ? "dst not 16-byte aligned" : "src not mapped", bytes, src, dst);
+        const int64_t total = n_by[0].load() + n_by[1].load() + n_by[2].load() + n_by[3].load() + n_by[4].load() + 1;
+        n_by[k].fetch_add(1, std::memory_order_relaxed);
+        if (total % 100000 == 0)
+            std::fprintf(stderr, "strata: adaptive kernel copy: %lld copies, %lld kernel, fallbacks size %lld src %lld "
+                         "dst %lld unmapped %lld\n", (long long) total, (long long) n_by[0].load(), (long long) n_by[1].load(),
+                         (long long) n_by[2].load(), (long long) n_by[3].load(), (long long) n_by[4].load());
+    };
+    if (kernel) {
+        const int why = bytes % 16 != 0 ? 1 : ((uintptr_t) src & 15) != 0 ? 2 : ((uintptr_t) dst & 15) != 0 ? 3 : 0;
+        if (why == 0) {
+            void* dsrc = nullptr;
+            if (cudaHostGetDevicePointer(&dsrc, const_cast<void*>(src), 0) == cudaSuccess && dsrc != nullptr) {
+                tally(0);
+                strata::kernels::copy_from_mapped((float*) dst, (const float*) dsrc, (int64_t) (bytes / 4), (void*) st,
+                                                 copy_blocks);
+                return cudaGetLastError();
+            }
+            (void) cudaGetLastError();   // not registered / not mapped: the ordinary copy
+            tally(4);
+        } else {
+            tally(why);
         }
-        (void) cudaGetLastError();   // not registered / not mapped: the ordinary copy
     }
 #endif
     return cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, st);
+}
+// The round's copies: the ones the kernel can take (16-byte multiples, aligned, mapped source) in one launch first, the
+// rest through adapt_copy_h2d (which counts their fallbacks).  Disjoint destinations, so the order does not matter.
+cudaError_t adapt_copy_h2d_batch(void* const* dst, const void* const* src, const size_t* bytes, size_t n, cudaStream_t st) {
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+    std::vector<float*> kd;
+    std::vector<const float*> ks;
+    std::vector<int64_t> kn;
+    std::vector<size_t> rest;
+    for (size_t i = 0; i < n; ++i) {
+        void* dsrc = nullptr;
+        if (bytes[i] % 16 == 0 && ((uintptr_t) src[i] & 15) == 0 && ((uintptr_t) dst[i] & 15) == 0 &&
+            cudaHostGetDevicePointer(&dsrc, const_cast<void*>(src[i]), 0) == cudaSuccess && dsrc != nullptr) {
+            kd.push_back((float*) dst[i]);
+            ks.push_back((const float*) dsrc);
+            kn.push_back((int64_t) (bytes[i] / 4));
+        } else {
+            (void) cudaGetLastError();
+            rest.push_back(i);
+        }
+    }
+    if (!kd.empty()) {
+        strata::kernels::copy_from_mapped_batch(kd.data(), ks.data(), kn.data(), (int) kd.size(), (void*) st,
+                                                adapt_copy_blocks());
+        if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return e;
+    }
+    for (const size_t i : rest)
+        if (const cudaError_t e = adapt_copy_h2d(dst[i], src[i], bytes[i], st); e != cudaSuccess) return e;
+    return cudaSuccess;
+#else
+    for (size_t i = 0; i < n; ++i)
+        if (const cudaError_t e = adapt_copy_h2d(dst[i], src[i], bytes[i], st); e != cudaSuccess) return e;
+    return cudaSuccess;
+#endif
 }
 int pin_blobs(std::vector<std::pair<uintptr_t, uintptr_t>> r, std::vector<void*>& live) {
     int failed = 0;   // ranges left pageable (a copy from them still works, through the driver's staging)
@@ -10348,6 +10429,20 @@ int main(int argc, char** argv) {
         std::vector<int32_t> live;
         std::vector<ImgKey> live_imgs, req_imgs;
         bool live_ok = false;
+        // STRATA_SESSION_DELTA=1: the session file the live K/V last came from or went to (a SAVE, or a RESTORE of a
+        // delta file), its log state, and how many leading tokens' cells are unchanged since then - the next SAVE to
+        // that path appends only the cells past them.  Lowered where a request rewrites cells (read_from), dropped
+        // whenever the cells come from anywhere else (a parked conversation, a borrowed prefix, a batch slot, #879).
+        struct SessionLineage {
+            std::string path;
+            strata::core::SessionLog log;
+            int64_t unchanged = 0;
+            std::vector<int32_t> ids;
+        } lineage;
+        const bool session_delta = [] {
+            const char* e = std::getenv("STRATA_SESSION_DELTA");
+            return e != nullptr && e[0] == '1' && strata::core::session_delta_supported();
+        }();
         // #879: a window met non-finite logits: the next request drops every cached state first and reads from token 0
         bool nan_flush = false;
         // #3465: the non-finite logits came in a window that reads the PROMPT's tail (the last few tokens, read through
@@ -11490,6 +11585,7 @@ int main(int argc, char** argv) {
             bool main_live = false;
             // STRATA_DMA_BATCH (F12): the main device's copies as one cudaMemcpyBatchAsync (mode 0: one each)
             const int dma_mode = multi_gpu ? 0 : strata::core::dma_batch_mode();
+            const bool kbatch = !multi_gpu && !aov && adapt_copy_batch_on();
             std::vector<void*> cp_dst;
             std::vector<const void*> cp_src;
             std::vector<size_t> cp_bytes;
@@ -11509,7 +11605,7 @@ int main(int argc, char** argv) {
                 const int stn = multi_gpu ? stage_of(s.layer) : 0;   // the swap stays in the layer's own cache
                 GpuStage* gs = stn > 0 ? stages[(size_t) stn - 1].get() : nullptr;
                 const strata::core::OnDevice on(gs ? gs->dev : -1);
-                if (dma_mode != 0 && slot >= 0 && b != nullptr) {
+                if ((dma_mode != 0 || kbatch) && slot >= 0 && b != nullptr) {
                     cp_dst.push_back(xcache.device_slot(slot));
                     cp_src.push_back(b);
                     cp_bytes.push_back((size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer));
@@ -11549,8 +11645,10 @@ int main(int argc, char** argv) {
                 for (const Swap& s : swaps) drive.d.res_dirty_idx.push_back((int32_t) (s.layer * g.n_expert + s.out));
                 drive.d.res_dirty = true;
             }
-            if (!cp_dst.empty() && strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
-                                                            adapt_stream, dma_mode) != cudaSuccess) {
+            if (!cp_dst.empty() &&
+                (kbatch ? adapt_copy_h2d_batch(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(), adapt_stream)
+                        : strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
+                                                   adapt_stream, dma_mode)) != cudaSuccess) {
                 std::fprintf(stderr, "strata serve: adaptive swap copy failed (batched): %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
@@ -13640,6 +13738,7 @@ int main(int argc, char** argv) {
                     if (!live_ok || live.empty()) { refuse("no complete session to save"); continue; }
                     size_t bytes = 0, kept = 0;
                     double capture_ms = 0;
+                    strata::core::SessionDeltaStats dstats;
                     try {
                         // RAM PREFLIGHT for the save (not a reservation), BEFORE anything is copied: the deepest
                         // checkpoint is chosen by reference, and the copies it will take (the list below and the one
@@ -13697,10 +13796,21 @@ int main(int argc, char** argv) {
                         const strata::core::ConversationView view{live, live_imgs, disk_checks, cvec_cached};
                         strata::core::SavedConversation meta;
                         std::vector<strata::core::SessionKvSource> sources;
+                        // STRATA_SESSION_DELTA: the cells unchanged since this path's last save or restore are in
+                        // its log already (the same conversation: its ids still lead the live ones)
+                        int64_t unchanged = 0;
+                        const strata::core::SessionLog* base = nullptr;
+                        if (session_delta && lineage.path == path && lineage.log.id != 0) {
+                            const int64_t n = (int64_t) std::min(lineage.ids.size(), live.size());
+                            int64_t same = 0;
+                            while (same < n && lineage.ids[(size_t) same] == live[(size_t) same]) ++same;
+                            unchanged = std::min(lineage.unchanged, same);
+                            if (unchanged > 0) base = &lineage.log;
+                        }
                         // the live running state comes off the device in one synchronous copy
                         blocking("capture", sl.state_bytes == UINT64_MAX ? 0 : sl.state_bytes);
                         if (!strata::core::conversation_snapshot_sources(meta, sources, view, ss, g, mtp.kv_state(),
-                                                                         err)) {
+                                                                         err, base ? unchanged : 0)) {
                             refuse(err, strata::core::SessionError::io);
                             continue;
                         }
@@ -13710,10 +13820,18 @@ int main(int argc, char** argv) {
                         wo.progress = moving;
                         wo.phase = blocking;
                         strata::core::SessionStatus st;
-                        if (!strata::core::session_file_write(path, meta, sources, id, bytes, err, wo, &st)) {
+                        strata::core::SessionLog new_log;
+                        const bool wrote = session_delta
+                            ? strata::core::session_file_write_delta(path, meta, sources, id, base, new_log, dstats,
+                                                                     bytes, err, wo, &st)
+                            : strata::core::session_file_write(path, meta, sources, id, bytes, err, wo, &st);
+                        if (!wrote) {
+                            lineage = {};
                             refuse(err, st.error, st.published);
                             continue;
                         }
+                        if (session_delta) lineage = {path, std::move(new_log), (int64_t) live.size(), live};
+                        else lineage = {};
                         if (st.dir_flush_unsupported)
                             std::fprintf(stderr, "strata serve: session saved to %s; this filesystem cannot flush a "
                                                  "folder, so the new name is not flushed\n", path.c_str());
@@ -13721,9 +13839,22 @@ int main(int argc, char** argv) {
                         refuse("not enough RAM to save the session", strata::core::SessionError::memory);
                         continue;
                     }
+                    std::string delta_note;
+                    if (session_delta) {
+                        char b[256];
+                        if (dstats.appended)
+                            std::snprintf(b, sizeof b, "; delta: appended %.1f MiB to the log (now %.1f MiB), head %.1f MiB",
+                                          dstats.log_written / 1048576.0, dstats.log_bytes / 1048576.0,
+                                          dstats.head_bytes / 1048576.0);
+                        else
+                            std::snprintf(b, sizeof b, "; delta: full write (%s), log %.1f MiB, head %.1f MiB",
+                                          dstats.full_reason.c_str(), dstats.log_bytes / 1048576.0,
+                                          dstats.head_bytes / 1048576.0);
+                        delta_note = b;
+                    }
                     std::fprintf(stderr, "strata serve: session saved %zu tokens, %zu of %zu checkpoints, %zu bytes to %s "
-                                 "in %.1f ms (state %.1f ms)\n", live.size(), kept, checks.size(), bytes,
-                                 path.c_str(), ms(), capture_ms);
+                                 "in %.1f ms (state %.1f ms%s)\n", live.size(), kept, checks.size(), bytes,
+                                 path.c_str(), ms(), capture_ms, delta_note.c_str());
                     std::printf("SAVED %zu %zu %.1f\n", live.size(), bytes, ms());
                 } else {
                     // Streaming restore: the read pass parses and checks the whole file without materializing the
@@ -13732,6 +13863,7 @@ int main(int argc, char** argv) {
                     // 16 MiB blocks and the running state - not the snapshot.
                     strata::core::SavedConversation image;   // running state + K/V headers; the K/V buffers stay empty
                     std::vector<std::array<uint64_t, 5>> file_kv;   // the K/V sizes exactly as the read pass parsed them
+                    strata::core::SessionLog file_log;   // a delta file's log state (the next SAVE appends to it)
                     size_t bytes = 0;
                     try {
                         // bounds this session can ever restore (geometry, layer range, tokens, checkpoints, every
@@ -13756,7 +13888,8 @@ int main(int argc, char** argv) {
                             continue;
                         }
                         strata::core::SessionStatus st;
-                        if (!strata::core::session_file_read_streamed(path, id, image, bytes, err, limits, &file_kv, &st)) {
+                        if (!strata::core::session_file_read_streamed(path, id, image, bytes, err, limits, &file_kv, &st,
+                                                                      &file_log)) {
                             refuse(err, st.error);
                             continue;
                         }
@@ -13843,6 +13976,9 @@ int main(int argc, char** argv) {
                     for (const ConvCheckpoint& c : checks) check_clock = std::max(check_clock, c.used);
                     cvec_cached = image.cvec;
                     live_ok = true;
+                    // the pools hold the file's cells now: a delta file is the base of this path's next SAVE
+                    if (session_delta && file_log.id != 0) lineage = {path, std::move(file_log), (int64_t) live.size(), live};
+                    else lineage = {};
                     if (nan_flush) {   // #879: the file replaced the poisoned session; the parked ones go (no slots here)
                         nan_flush = false;
                         const size_t n_parked = conversations.clear();
@@ -14172,6 +14308,7 @@ int main(int argc, char** argv) {
             // conversation and every idle batch slot go, and this prompt is read from token 0 (resume == 0 below)
             if (nan_flush) {
                 nan_flush = false;
+                lineage = {};
                 if (nf_prompt_windows) {
                     nf_prompt_windows = false;
                     short_read_off_once = o.short_read > 0;
@@ -14450,6 +14587,7 @@ int main(int argc, char** argv) {
             }
             if (slot_source >= 0) {
                 lent_slot = -1;   // (a longer start than the main session's)
+                lineage = {};     // (the cells come from the slot)
                 const auto t0 = Clock::now();
                 if (!copy_from_slot(slot_source, slot_ck, err)) {
                     // the main session may be half written: read this prompt from the start
@@ -14547,6 +14685,7 @@ int main(int argc, char** argv) {
             }
             if (borrow) {
                 const auto t0 = Clock::now();
+                lineage = {};   // (the cells come from a parked conversation)
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
                 if (donor == nullptr ||
                     strata::core::conversation_snapshot_restore_prefix(*donor, parked.tokens, ss, g,
@@ -14575,6 +14714,7 @@ int main(int argc, char** argv) {
             }
             if (incoming) {
                 const auto t0 = Clock::now();
+                lineage = {};   // (the cells come from the parked conversation)
                 if (strata::core::conversation_snapshot_restore(*incoming, ss, g,
                         use_mtp && (stages.empty() || mtp_first) ? &mtp.kv_state() : nullptr, err) !=
                     strata::core::ConversationRestore::restored) {
@@ -14757,6 +14897,7 @@ int main(int argc, char** argv) {
                 mtp.set_cell_floor(resume > 0 && reread_to <= 0 ? kva_floors.floor_for(ids.data(), resume) : 0);
             const int64_t read_from = reread_to > 0 ? 0 : resume;
             conversations.limit_reuse(read_from);
+            lineage.unchanged = std::min(lineage.unchanged, read_from);   // every cell from read_from on is rewritten
             pp_total = n;
             pp_from = read_from;
             pp_reached = read_from;

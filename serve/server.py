@@ -5509,16 +5509,37 @@ class Service:
         st.update(last_event=event, last_tokens=r.get("tokens"), last_bytes=r.get("bytes"), last_ms=r.get("ms"),
                   last_at=time.time())
 
+    _DELTA_LOG = re.compile(r"(auto-.*\.bin)\.[0-9a-f]{16}\.kv")
+
     def _auto_session_files(self) -> list:
-        """The auto-*.bin files in slot_save_path, newest first: (mtime, size, path)."""
-        entries = []
+        """The auto-*.bin files in slot_save_path, newest first: (mtime, size, path).  A delta session's K/V log
+        (<name>.<16 hex>.kv, STRATA_SESSION_DELTA) counts toward its file's size."""
+        entries, logs = [], {}
         with os.scandir(self.slot_save_path) as it:
             for e in it:
-                if e.is_file() and e.name.startswith("auto-") and e.name.endswith(".bin"):
+                if not e.is_file():
+                    continue
+                m = self._DELTA_LOG.fullmatch(e.name)
+                if m:
+                    logs[m.group(1)] = logs.get(m.group(1), 0) + e.stat().st_size
+                elif e.name.startswith("auto-") and e.name.endswith(".bin"):
                     st = e.stat()
                     entries.append((st.st_mtime, st.st_size, e.path))
+        entries = [(t, size + logs.get(os.path.basename(path), 0), path) for t, size, path in entries]
         entries.sort(reverse=True)
         return entries
+
+    def _remove_auto_session(self, path: str):
+        """An auto-*.bin file and its delta K/V logs (the head first: no head is left pointing at a removed log)."""
+        folder, name = os.path.split(path)
+        with os.scandir(folder) as it:
+            logs = [e.path for e in it if self._DELTA_LOG.fullmatch(e.name) and e.name.startswith(name + ".")]
+        os.unlink(path)
+        for log in logs:
+            try:
+                os.unlink(log)
+            except OSError:
+                pass
 
     def auto_sessions_view(self) -> dict:
         """The Monitor's Auto sessions card: the limits, the conversation the engine holds, the auto-*.bin files on
@@ -5577,7 +5598,7 @@ class Service:
             if not (beyond_count or over_cap):
                 break
             try:
-                os.unlink(entries[i][2])
+                self._remove_auto_session(entries[i][2])
                 total -= entries[i][1]
                 removed += 1
             except OSError:

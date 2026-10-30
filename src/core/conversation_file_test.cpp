@@ -149,6 +149,297 @@ bool rejects(const fs::path& p, const SessionFileIdentity& id, const char* expec
     }
     return !ok && !error.empty();
 }
+
+#ifndef _WIN32
+// ---- delta session files: a fake K/V pool (layers x 5 parts) that grows and is rewritten like the engine's
+using Pool = std::vector<std::array<std::vector<uint8_t>, 5>>;
+
+Pool make_pool(size_t layers, size_t base, uint8_t seed) {
+    Pool p(layers);
+    for (size_t l = 0; l < layers; ++l)
+        for (size_t i = 0; i < 5; ++i) {
+            // part 0 > 16 MiB on layer 0, so a record spans several blocks; part 2 empty on layer 1
+            const size_t n = (l == 0 && i == 0) ? (17u << 20) + 333 : (l == 1 && i == 2) ? 0 : base * (i + 1) + l;
+            p[l][i].resize(n);
+            for (size_t j = 0; j < n; ++j) p[l][i][j] = uint8_t(j * 31u + l * 7u + i * 3u + seed);
+        }
+    return p;
+}
+
+std::vector<SessionKvSource> pool_sources(const Pool& pool, const std::vector<std::array<size_t, 5>>& stable) {
+    std::vector<SessionKvSource> out;
+    for (size_t l = 0; l < pool.size(); ++l) {
+        SessionKvSource s;
+        s.format = 1; s.cells = 100 + (int64_t) l; s.heads = 2; s.head_dim = 256; s.page_size = 4;
+        s.pooled_rows = 7; s.idx_dim = 128;
+        for (size_t i = 0; i < 5; ++i) s.sizes[i] = pool[l][i].size();
+        if (l < stable.size()) s.stable = stable[l];
+        const auto* parts = &pool[l];
+        s.read = [parts](size_t part, size_t offset, void* dst, size_t n) {
+            if (offset + n > (*parts)[part].size()) return false;
+            std::memcpy(dst, (*parts)[part].data() + offset, n);
+            return true;
+        };
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+// read pass + apply pass into fresh buffers of the head's part sizes; `calls`: how many times the sink was called
+bool pool_restore(const fs::path& p, const SessionFileIdentity& id, Pool& out, SavedConversation& meta,
+                  SessionLog& log, std::string& error, size_t* calls = nullptr) {
+    std::vector<std::array<uint64_t, 5>> sizes;
+    size_t bytes = 0;
+    if (!session_file_read_streamed(p.string(), id, meta, bytes, error, {}, &sizes, nullptr, &log)) return false;
+    out.assign(sizes.size(), {});
+    for (size_t l = 0; l < sizes.size(); ++l)
+        for (size_t i = 0; i < 5; ++i) out[l][i].assign((size_t) sizes[l][i], 0xEE);
+    size_t n_calls = 0;
+    const bool ok = session_file_apply_streamed(p.string(), id,
+        [&](size_t layer, size_t part, uint64_t offset, const void* data, size_t n) {
+            ++n_calls;
+            if (layer >= out.size() || offset + n > out[layer][part].size() || n > (16u << 20)) return false;
+            std::memcpy(out[layer][part].data() + offset, data, n);
+            return true;
+        }, sizes, error);
+    if (calls) *calls = n_calls;
+    return ok;
+}
+
+size_t count_logs(const fs::path& dir, const std::string& leaf) {
+    size_t n = 0;
+    for (const auto& e : fs::directory_iterator(dir)) {
+        const std::string f = e.path().filename().string();
+        if (f.size() > leaf.size() && f.compare(0, leaf.size() + 1, leaf + ".") == 0 &&
+            f.compare(f.size() - 3, 3, ".kv") == 0) ++n;
+    }
+    return n;
+}
+
+void flip_byte(const fs::path& p, uint64_t at) {
+    std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+    f.seekg((std::streamoff) at);
+    char c = 0;
+    f.read(&c, 1);
+    c ^= 0x5a;
+    f.seekp((std::streamoff) at);
+    f.write(&c, 1);
+}
+
+void delta_tests(const fs::path& dir, const SessionFileIdentity& id) {
+    check(session_delta_supported(), "delta: supported on POSIX");
+    SavedConversation meta = sample();
+    meta.kv.clear();
+    const fs::path head = dir / "delta.bin";
+    const std::string leaf = "delta.bin";
+    const size_t L = 3;
+    std::vector<std::array<size_t, 5>> none(L, std::array<size_t, 5>{});
+    std::string error;
+    size_t bytes = 0;
+
+    // 1. no base: a full write - a head and one log - that restores to the pool
+    Pool pool = make_pool(L, 1000, 1);
+    SessionLog log1, back;
+    SessionDeltaStats stats;
+    check(session_file_write_delta(head.string(), meta, pool_sources(pool, none), id, nullptr, log1, stats, bytes,
+                                   error), "delta: full write succeeds");
+    check(!stats.appended && stats.full_reason == "no base", "delta: no base is a full write");
+    check(log1.id != 0 && log1.bytes % 4096 == 0 && log1.parts.size() == L, "delta: log state after a full write");
+    check(fs::exists(session_delta_log_path(head.string(), log1.id)) && count_logs(dir, leaf) == 1,
+          "delta: the log sits beside the head");
+    check(bytes == stats.head_bytes + stats.log_written, "delta: bytes written = head + log");
+    Pool got;
+    SavedConversation m;
+    check(pool_restore(head, id, got, m, back, error) && got == pool, "delta: full write restores the pool");
+    check(same_checkpoint(m.live, meta.live) && m.checkpoints.size() == meta.checkpoints.size() && m.kv.size() == L,
+          "delta: the head keeps the running state and the K/V headers");
+    check(back.id == log1.id && back.bytes == log1.bytes && back.parts == log1.parts &&
+          back.hash.total == log1.hash.total && back.hash.lane == log1.hash.lane, "delta: the read gives the log state");
+    {   // a v1 file reads with no log state
+        SavedConversation v1m;
+        SessionLog none_log;
+        std::vector<std::array<uint64_t, 5>> sz;
+        size_t b = 0;
+        check(session_file_read_streamed((dir / "good.bin").string(), id, v1m, b, error, {}, &sz, nullptr, &none_log) &&
+              none_log.id == 0, "delta: a v1 file has no log state");
+    }
+
+    // 2. the conversation grows: the parts get longer, the last 100 bytes of each old part are rewritten (the
+    // partial page); only the bytes past `stable` are appended, and the restore holds the new bytes
+    Pool pool2 = pool;
+    std::vector<std::array<size_t, 5>> stable2(L);
+    for (size_t l = 0; l < L; ++l)
+        for (size_t i = 0; i < 5; ++i) {
+            auto& v = pool2[l][i];
+            const size_t old = v.size();
+            stable2[l][i] = old >= 100 ? old - 100 : 0;
+            for (size_t j = stable2[l][i]; j < old; ++j) v[j] ^= 0xA5;
+            if (old) for (size_t j = 0; j < 777 + l; ++j) v.push_back(uint8_t(j * 13u + i));
+        }
+    SessionLog log2;
+    check(session_file_write_delta(head.string(), meta, pool_sources(pool2, stable2), id, &log1, log2, stats, bytes,
+                                   error), "delta: append succeeds");
+    check(stats.appended && stats.full_reason.empty() && log2.id == log1.id && log2.bytes > log1.bytes &&
+          log2.bytes % 4096 == 0, "delta: an append keeps the log and grows it");
+    check(stats.log_written < (64u << 10), "delta: an append writes only the new bytes");
+    check(pool_restore(head, id, got, m, back, error) && got == pool2, "delta: append restores the grown pool");
+
+    // 3. a rewind: parts shrink below the base (stable at the new end, minus a rewritten tail)
+    Pool pool3 = pool2;
+    std::vector<std::array<size_t, 5>> stable3(L);
+    for (size_t l = 0; l < L; ++l)
+        for (size_t i = 0; i < 5; ++i) {
+            auto& v = pool3[l][i];
+            if (v.size() > 2000) v.resize(v.size() - 1500);
+            stable3[l][i] = v.size() >= 50 ? v.size() - 50 : 0;
+            for (size_t j = stable3[l][i]; j < v.size(); ++j) v[j] = uint8_t(j + 99);
+        }
+    SessionLog log3;
+    check(session_file_write_delta(head.string(), meta, pool_sources(pool3, stable3), id, &log2, log3, stats, bytes,
+                                   error) && stats.appended, "delta: append after a rewind");
+    check(pool_restore(head, id, got, m, back, error) && got == pool3, "delta: a shrunk pool restores");
+    {   // many small appends (one record per part each): the apply merges each part's records, so the sink is called
+        // about once per part, not once per record
+        Pool many = pool3;
+        SessionLog lm = log3, ln;
+        for (int k = 0; k < 20; ++k) {
+            std::vector<std::array<size_t, 5>> st(L);
+            for (size_t l = 0; l < L; ++l)
+                for (size_t i = 0; i < 5; ++i) {
+                    st[l][i] = many[l][i].size() >= 10 ? many[l][i].size() - 10 : 0;   // (a rewritten tail too)
+                    for (size_t j = st[l][i]; j < many[l][i].size(); ++j) many[l][i][j] ^= 0x3C;
+                    if (!many[l][i].empty()) for (int j = 0; j < 300; ++j) many[l][i].push_back(uint8_t(k * 7 + j));
+                }
+            check(session_file_write_delta(head.string(), meta, pool_sources(many, st), id, &lm, ln, stats, bytes,
+                                           error) && stats.appended, "delta: a small append");
+            lm = ln;
+        }
+        size_t calls = 0;
+        check(pool_restore(head, id, got, m, back, error, &calls) && got == many, "delta: 20 small appends restore");
+        check(calls <= 3 * 5 + 6, "delta: 20 small appends cost about one sink call per part");
+        // more small records than the merge arena holds (48 MiB): handed over when it fills, still in order
+        for (int k = 0; k < 16; ++k) {
+            std::vector<std::array<size_t, 5>> st(L);
+            for (size_t l = 0; l < L; ++l)
+                for (size_t i = 0; i < 5; ++i) st[l][i] = many[l][i].size();
+            auto& v = many[0][1];
+            st[0][1] = v.size() - 50;
+            for (size_t j = st[0][1]; j < v.size(); ++j) v[j] = uint8_t(j + k);
+            v.resize(v.size() + (7u << 19), uint8_t(k + 1));   // + 3.5 MiB
+            check(session_file_write_delta(head.string(), meta, pool_sources(many, st), id, &lm, ln, stats, bytes,
+                                           error) && stats.appended, "delta: a 3.5 MiB append");
+            lm = ln;
+        }
+        check(pool_restore(head, id, got, m, back, error) && got == many, "delta: appends past the merge arena restore");
+        log3 = lm;
+        pool3 = many;
+        for (size_t l = 0; l < L; ++l)
+            for (size_t i = 0; i < 5; ++i) stable3[l][i] = pool3[l][i].size();
+    }
+
+    // 4. a torn tail past the committed length is ignored, and the next append cuts it
+    const fs::path logp = session_delta_log_path(head.string(), log3.id);
+    {
+        std::ofstream f(logp, std::ios::binary | std::ios::app);
+        f << std::string(5000, 'x');
+    }
+    check(pool_restore(head, id, got, m, back, error) && got == pool3, "delta: bytes past the commit are ignored");
+    SessionLog log4;
+    check(session_file_write_delta(head.string(), meta, pool_sources(pool3, stable3), id, &log3, log4, stats, bytes,
+                                   error) && stats.appended && fs::file_size(logp) == log4.bytes,
+          "delta: the next append cuts a torn tail");
+    check(pool_restore(head, id, got, m, back, error) && got == pool3, "delta: restore after a cut tail");
+
+    // 5. a head publish that fails after the log append: the old head and its committed prefix still restore,
+    // and the old base still appends
+    {
+        Pool pool5 = pool3;
+        for (auto& layer : pool5) for (auto& v : layer) if (!v.empty()) v.push_back(7);
+        std::vector<std::array<size_t, 5>> st5(L);
+        for (size_t l = 0; l < L; ++l) for (size_t i = 0; i < 5; ++i) st5[l][i] = pool3[l][i].size();
+        SessionWriteOptions o;
+        o.fault = [](const char* step) { return std::strcmp(step, "rename") == 0 ? EIO : 0; };
+        SessionLog unused;
+        check(!session_file_write_delta(head.string(), meta, pool_sources(pool5, st5), id, &log4, unused, stats,
+                                        bytes, error, o), "delta: a failed head publish fails the save");
+        check(fs::file_size(logp) > log4.bytes, "delta: the appended bytes are past the old commit");
+        check(pool_restore(head, id, got, m, back, error) && got == pool3, "delta: the old head still restores");
+        SessionLog log5;
+        check(session_file_write_delta(head.string(), meta, pool_sources(pool5, st5), id, &log4, log5, stats, bytes,
+                                       error) && stats.appended, "delta: the old base appends again");
+        check(pool_restore(head, id, got, m, back, error) && got == pool5, "delta: and restores the new pool");
+        log4 = log5;
+        pool3 = pool5;
+    }
+
+    // 6. a corrupted committed byte: the read pass refuses; a byte changed between the passes: apply refuses
+    {
+        flip_byte(logp, 4096 + 100);
+        Pool g6;
+        check(!pool_restore(head, id, g6, m, back, error) && error.find("checksum") != std::string::npos,
+              "delta: a corrupted log byte is refused");
+        flip_byte(logp, 4096 + 100);   // back
+        std::vector<std::array<uint64_t, 5>> sizes;
+        check(session_file_read_streamed(head.string(), id, m, bytes, error, {}, &sizes), "delta: read pass");
+        flip_byte(logp, 300);
+        check(!session_file_apply_streamed(head.string(), id, [](size_t, size_t, uint64_t, const void*, size_t) {
+                  return true;
+              }, sizes, error) && error.find("changed since the read pass") != std::string::npos,
+              "delta: a log changed after the read pass ends the apply");
+        flip_byte(logp, 300);
+        check(pool_restore(head, id, got, m, back, error) && got == pool3, "delta: restored after the flips");
+    }
+
+    // 7. the base no longer matches the disk (a v1 save replaced the head): a full write, old logs removed
+    {
+        SavedConversation v1 = sample();
+        check(session_file_write(head.string(), v1, id, bytes, error), "delta: a v1 save over the head");
+        SessionLog log7;
+        check(session_file_write_delta(head.string(), meta, pool_sources(pool3, stable3), id, &log4, log7, stats,
+                                       bytes, error), "delta: write after the head changed");
+        check(!stats.appended && stats.full_reason.find("head on disk") != std::string::npos && log7.id != log4.id,
+              "delta: a changed head forces a full write with a new log");
+        check(count_logs(dir, leaf) == 1 && !fs::exists(logp), "delta: the old log is removed after a full write");
+        check(pool_restore(head, id, got, m, back, error) && got == pool3, "delta: restores after the full write");
+        log4 = log7;
+    }
+
+    // 8. an append that would grow the log past 1.25x the K/V + 64 MiB is a full write instead
+    {
+        Pool big = make_pool(L, 1000, 9);
+        for (auto& layer : big) for (auto& v : layer) if (v.size() > (1u << 20)) v.resize(80u << 20, 3);
+        SessionLog a, b, c, d;
+        check(session_file_write_delta(head.string(), meta, pool_sources(big, none), id, nullptr, a, stats, bytes,
+                                       error), "delta: big full write");
+        check(session_file_write_delta(head.string(), meta, pool_sources(big, none), id, &a, b, stats, bytes, error) &&
+              stats.appended, "delta: a full re-append fits once");
+        check(session_file_write_delta(head.string(), meta, pool_sources(big, none), id, &b, c, stats, bytes, error) &&
+              !stats.appended && stats.full_reason.find("too large") != std::string::npos && c.id != b.id,
+              "delta: an oversized log is rewritten");
+        check(count_logs(dir, leaf) == 1, "delta: one log after the rewrite");
+        check(pool_restore(head, id, got, m, back, error) && got == big, "delta: restores after the rewrite");
+        // stale base (an older log state of the same id) is refused by its length
+        check(session_file_write_delta(head.string(), meta, pool_sources(big, none), id, &a, d, stats, bytes, error) &&
+              !stats.appended, "delta: a stale base is not appended to");
+    }
+
+    // 9. a read whose head is fine but whose log is gone is refused
+    {
+        SessionLog lg;
+        check(session_file_write_delta(head.string(), meta, pool_sources(pool, none), id, nullptr, lg, stats, bytes,
+                                       error), "delta: write before removing the log");
+        fs::remove(session_delta_log_path(head.string(), lg.id));
+        Pool g9;
+        check(!pool_restore(head, id, g9, m, back, error) && error.find("K/V log") != std::string::npos,
+              "delta: a missing log is refused");
+        SavedConversation full;
+        size_t b9 = 0;
+        check(!session_file_read(head.string(), id, full, b9, error) && error.find("streamed") != std::string::npos,
+              "delta: the materializing read refuses a delta head");
+    }
+    check(no_temp(dir), "delta: no temporary file left");
+}
+#endif
 } // namespace
 
 int main() {
@@ -245,10 +536,18 @@ int main() {
     // wrong version: header field patched and header hash recomputed so only the version differs
     {
         auto d = image;
-        uint32_t v = 2; std::memcpy(d.data() + 8, &v, 4);
+        uint32_t v = 3; std::memcpy(d.data() + 8, &v, 4);
         const uint64_t h = session_hash64(d.data(), 56, 0); std::memcpy(d.data() + 56, &h, 8);
         const fs::path p = dir / "ver.bin"; spit(p, d);
         check(rejects(p, id, "version"), "unknown version rejected");
+    }
+    // version 2 (a delta head) without its log reference in the header
+    {
+        auto d = image;
+        uint32_t v = 2; std::memcpy(d.data() + 8, &v, 4);
+        const uint64_t h = session_hash64(d.data(), 56, 0); std::memcpy(d.data() + 56, &h, 8);
+        const fs::path p = dir / "ver2.bin"; spit(p, d);
+        check(rejects(p, id, "header fields"), "a delta header without a log reference rejected");
     }
     // a corrupted element count with a recomputed payload hash must fail on bounds, not allocate
     {
@@ -1032,6 +1331,9 @@ int main() {
         struct stat st {};
         check(::stat(link.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600, "the session file is mode 0600");
     }
+#endif
+#ifndef _WIN32
+    delta_tests(dir, id);
 #endif
 
     fs::remove_all(dir);

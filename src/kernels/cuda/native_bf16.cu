@@ -3,9 +3,12 @@
 #include "s26_tsum.cuh"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/pdl.hpp"
+#include "strata/kernels/native_router.hpp"
+#include "router_w64.cuh"
 
 #include <cuda_runtime.h>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -229,6 +232,219 @@ __global__ void bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t l
                     if (k < n_tok) y[(size_t) k * ldy + o0 + r] = acc[r][k];
 }
 
+#if defined(STRATA_HIP_GFX906)
+// gfx906 STRATA_GFX906_ROUTER_GEMV=RPB (1, 2 or 4): the router's 512 x 2560 BF16 GEMV, bitwise
+// bf16_f32_mmvf_rows_kernel<256, NT, RPB> (= one bf16_f32_mmvf_kernel<256> launch per output).  Thread t still owns
+// pairs t + 256 i (i = 0..4) with the two ordered FMAs; what changes is only how the work is issued:
+//   * the five iterations are unrolled and every weight and activation load is issued before the first FMA (the
+//     rows kernel issues them per iteration, ~2 waves per SIMD that mostly wait);
+//   * the 32-lane butterfly (xor 16, 8, 4, 2, 1) adds the same operands without LDS round trips: xor 16 is a
+//     ds_swizzle, xor 8 / 4 are DPP row_ror 8 / 4 (after the xor 16 and xor 8 steps the lanes row_ror reads hold
+//     the same partials as lane ^ 8 / lane ^ 4), xor 2 / 1 are DPP quad_perm.  Float adds commute, so each lane's
+//     sum is the __shfl_xor butterfly's bits.
+template <int CTRL>
+__device__ __forceinline__ float r906_dpp(float v) {
+    return __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), CTRL, 0xf, 0xf, false));
+}
+__device__ __forceinline__ float r906_sum32(float v) {
+    v += __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(v), 0x1f | (16 << 10)));   // xor 16
+    v += r906_dpp<0x128>(v);   // row_ror 8  = xor 8
+    v += r906_dpp<0x124>(v);   // row_ror 4  ~ xor 4 (differs only in bit 3, already reduced)
+    v += r906_dpp<0x4e>(v);    // quad_perm [2,3,0,1] = xor 2
+    v += r906_dpp<0xb1>(v);    // quad_perm [1,0,3,2] = xor 1
+    return v;
+}
+// one block's RPB outputs for NT tokens (threadIdx.x 0..255); thread 0 writes them.  No return before the end: the
+// fused kernel below goes on after it.
+template <int NT, int RPB>
+__device__ __forceinline__ void router_gemv_906_block(const float* __restrict__ x, const uint16_t* __restrict__ w,
+                                                      float* __restrict__ y, int o0) {
+    constexpr int NI = 2560, NO = 512, P = NI / 2, IT = P / 256;
+    const int t = threadIdx.x;
+    __shared__ float partials[RPB][NT][32];
+    if (t < 32)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r)
+#pragma unroll
+            for (int k = 0; k < NT; ++k) partials[r][k][t] = 0.0f;
+    uint32_t wv[IT][RPB];
+    float2 in[IT][NT];
+#pragma unroll
+    for (int i = 0; i < IT; ++i)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r) wv[i][r] = __ldg(reinterpret_cast<const uint32_t*>(w + (size_t) (o0 + r) * NI) + t + 256 * i);
+#pragma unroll
+    for (int i = 0; i < IT; ++i)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) in[i][k] = __ldg(reinterpret_cast<const float2*>(x + (size_t) k * NI) + t + 256 * i);
+    float acc[RPB][NT];
+#pragma unroll
+    for (int r = 0; r < RPB; ++r)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) acc[r][k] = 0.0f;
+#pragma unroll
+    for (int i = 0; i < IT; ++i)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r) {
+            const float w0 = f32_from_bf16((uint16_t) wv[i][r]), w1 = f32_from_bf16((uint16_t) (wv[i][r] >> 16));
+#pragma unroll
+            for (int k = 0; k < NT; ++k) {
+                acc[r][k] = __fmaf_rn(w0, in[i][k].x, acc[r][k]);
+                acc[r][k] = __fmaf_rn(w1, in[i][k].y, acc[r][k]);
+            }
+        }
+#pragma unroll
+    for (int r = 0; r < RPB; ++r)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) acc[r][k] = r906_sum32(acc[r][k]);
+    __syncthreads();   // the zeroed partials
+    if ((t & 31) == 0)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r)
+#pragma unroll
+            for (int k = 0; k < NT; ++k) partials[r][k][t / 32] = acc[r][k];
+    __syncthreads();
+    if (t < 32)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r)
+#pragma unroll
+            for (int k = 0; k < NT; ++k) {
+                const float v = r906_sum32(partials[r][k][t]);
+                if (t == 0) y[(size_t) k * NO + o0 + r] = v;
+            }
+}
+template <int NT, int RPB>
+__global__ void __launch_bounds__(256) router_gemv_906_kernel(const float* __restrict__ x, const uint16_t* __restrict__ w,
+                                                              float* __restrict__ y) {
+    const int o0 = blockIdx.x * RPB;
+    if (o0 >= 512) return;   // the padding blocks (doubr 57fa6d85: a grid of exactly 512 blocks runs ~7x slower on MI50)
+    router_gemv_906_block<NT, RPB>(x, w, y, o0);
+}
+
+// gfx906 STRATA_GFX906_ROUTER_FUSED=1: verify's router stage - the GEMV above, native_router_top10_multi and
+// doorbell_publish_res - as ONE launch (was 3 graph nodes a layer).  The GEMV blocks are router_gemv_906_block; the
+// last block to finish (a ticket counter: __threadfence, atomicAdd, __threadfence) runs the top-10 with
+// router_w64.cuh's routine, one wave a token, then doorbell_publish_res_kernel's publish with 256 threads instead of
+// 1024 (the same ids, the same x copy on a miss, the same fences and ring increment).  Every logit, id, weight and
+// published byte is the three kernels' (the top-10 is route_multi's bits, router_w64_parity).  The counter is the
+// caller's (one uint32, zero; the last block puts it back to zero), so launches on one stream may share it.
+template <int NT, int RPB>
+__global__ void __launch_bounds__(256) router_fused_906_kernel(RouterFused906 a) {
+    constexpr int NO = 512, NB = NO / RPB, K = NT * 10, N = NT * 2560;
+    const int t = threadIdx.x, o0 = blockIdx.x * RPB;
+    if (o0 >= NO) return;   // the padding blocks: they take no ticket
+    router_gemv_906_block<NT, RPB>(a.x, a.w, a.logits, o0);
+    __shared__ unsigned last;
+    __shared__ int32_t sid[K];
+    __threadfence();   // this block's logits, before its ticket
+    __syncthreads();
+    if (t == 0) last = atomicAdd(a.counter, 1u) == (unsigned) (NB - 1);
+    __syncthreads();
+    if (!last) return;
+    __threadfence();   // every block's logits are visible (acquire: the L1 is invalidated)
+    const int wave = t >> 6;
+    if (wave < NT) w64::route_w64_token(a.logits + wave * 512, a.ids + wave * 10, a.weights + wave * 10, sid + wave * 10);
+    __syncthreads();
+    // doorbell_publish_res_kernel
+    int any_miss = 0;
+    if (t < K) {
+        const int32_t id = sid[t];
+        a.ids_out[t] = id;
+        if (a.d_res == nullptr || id < 0 || id >= a.n_expert || a.d_res[id] < 0) any_miss = 1;
+    }
+    if (__syncthreads_or(any_miss)) {
+        const float4* x4 = reinterpret_cast<const float4*>(a.x);
+        float4* o4 = reinterpret_cast<float4*>(a.x_out);
+        for (int i = t; i < N / 4; i += 256) o4[i] = x4[i];
+        __threadfence_system();
+    } else if (t < K) {
+        __threadfence_system();
+    }
+    __syncthreads();
+    if (t == 0) {
+        *(volatile uint32_t*) a.seq = *(volatile uint32_t*) a.seq + 1u;
+        __threadfence_system();   // #697 (HIP)
+        *a.counter = 0u;
+    }
+}
+bool getenv_tsum() {
+    static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+    return ts;
+}
+// STRATA_GFX906_ROUTER_GEMV=1|2|4 fixes the rows a block; =auto takes router_chain_bench's best per T on the MI50
+// (T1 11.6 -> 5.9 us at 1, T2 10.2 -> 7.9 and T3 15.1 -> 9.5 at 2, T4 16.5 -> 11.0 at 4)
+int router_gemv_906_rpb(int n_tok) {
+    static const int v = [] {
+        const char* e = std::getenv("STRATA_GFX906_ROUTER_GEMV");
+        if (e && std::strcmp(e, "auto") == 0) return -1;
+        const int r = e ? std::atoi(e) : 0;
+        return r == 1 || r == 2 || r == 4 ? r : 0;
+    }();
+    if (v >= 0) return v;
+    return n_tok == 1 ? 1 : n_tok <= 3 ? 2 : 4;
+}
+// x [n_tok][2560] (ldx 2560), y [n_tok][512] (ldy 512), 1 <= n_tok <= 4
+bool router_gemv_906(const float* x, const uint16_t* w, float* y, int n_tok, cudaStream_t st) {
+    const int rpb = router_gemv_906_rpb(n_tok);
+    if (rpb == 0 || n_tok < 1 || n_tok > 4) return false;
+#define R906(NT) \
+    if (rpb == 1) router_gemv_906_kernel<NT, 1><<<512 + 64, 256, 0, st>>>(x, w, y); \
+    else if (rpb == 2) router_gemv_906_kernel<NT, 2><<<256 + 64, 256, 0, st>>>(x, w, y); \
+    else router_gemv_906_kernel<NT, 4><<<128 + 64, 256, 0, st>>>(x, w, y);
+    switch (n_tok) {
+        case 1: R906(1) break;
+        case 2: R906(2) break;
+        case 3: R906(3) break;
+        default: R906(4) break;
+    }
+#undef R906
+    const cudaError_t result = cudaGetLastError();
+    if (result != cudaSuccess) throw std::runtime_error(std::string("router_gemv_906 launch: ") + cudaGetErrorString(result));
+    return true;
+}
+#endif
+}  // namespace
+
+bool router_fused_906_enabled() {
+#if defined(STRATA_HIP_GFX906)
+    static const bool on = [] { const char* e = std::getenv("STRATA_GFX906_ROUTER_FUSED"); return e && e[0] == '1' && e[1] == 0; }();
+    return on;
+#else
+    return false;
+#endif
+}
+
+bool router_fused_906(const RouterFused906& a, int n_tok, void* stream) {
+#if defined(STRATA_HIP_GFX906)
+    if (!router_fused_906_enabled() || n_tok < 1 || n_tok > 4 || a.counter == nullptr || a.seq == nullptr ||
+        (reinterpret_cast<uintptr_t>(a.x) & 15u) != 0 || (reinterpret_cast<uintptr_t>(a.x_out) & 15u) != 0)
+        return false;
+    // rows a block: STRATA_GFX906_ROUTER_GEMV if set to 1 / 2 / 4, else the auto table
+    int rpb = router_gemv_906_rpb(n_tok);
+    if (rpb == 0) rpb = n_tok == 1 ? 1 : n_tok <= 3 ? 2 : 4;
+    const cudaStream_t st = (cudaStream_t) stream;
+#define RF906(NT) \
+    if (rpb == 1) router_fused_906_kernel<NT, 1><<<512 + 64, 256, 0, st>>>(a); \
+    else if (rpb == 2) router_fused_906_kernel<NT, 2><<<256 + 64, 256, 0, st>>>(a); \
+    else router_fused_906_kernel<NT, 4><<<128 + 64, 256, 0, st>>>(a);
+    switch (n_tok) {
+        case 1: RF906(1) break;
+        case 2: RF906(2) break;
+        case 3: RF906(3) break;
+        default: RF906(4) break;
+    }
+#undef RF906
+    const cudaError_t result = cudaGetLastError();
+    if (result != cudaSuccess) throw std::runtime_error(std::string("router_fused_906 launch: ") + cudaGetErrorString(result));
+    return true;
+#else
+    (void) a; (void) n_tok; (void) stream;
+    return false;
+#endif
+}
+
+namespace {
+
 template <int B>
 void launch_rows(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy, int n_in, int n_out, int n_tok,
                  cudaStream_t st, const uint16_t* w_aux = nullptr, float* y_aux = nullptr, int64_t ldy_aux = 0) {
@@ -305,6 +521,8 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
 #if defined(STRATA_HIP_GFX906)
         // Exact router T2: omit only the two inactive columns of the existing NT=4 rows kernel.
         // Live output pair/FMA/XOR32 order is unchanged. Other shapes, strides and TSUM keep baseline.
+        if (n_in == 2560 && n_out == 512 && ldx == n_in && ldy == n_out && !getenv_tsum() && router_gemv_906(x, w, y, n_tok, st))
+            return;
         if (n_tok == 2 && n_in == 2560 && n_out == 512 && ldx == n_in && ldy == n_out) {
             static const bool exact_t2 = [] { const char* v = std::getenv("STRATA_GFX906_ROUTER_T2_EXACT"); return v && v[0] == '1' && v[1] == 0; }();
             static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
@@ -386,6 +604,7 @@ void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
     static const bool rows = [] { const char* v = std::getenv("STRATA_MMVF_ROWS"); return v && v[0] == '1'; }();
     static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
     static const bool router_t1_rows = [] { const char* v = std::getenv("STRATA_GFX906_ROUTER_T1_ROWS"); return v && v[0] == '1' && v[1] == 0; }();
+    if (rows && !ts && n_in == 2560 && n_out == 512 && router_gemv_906(x, w, y, 1, st)) return;
     if (router_t1_rows && rows && !ts && n_in == 2560 && n_out == 512) {
         bf16_f32_mmvf_rows_kernel<256, 1, 4><<<128, 256, 0, st>>>(x, n_in, w, y, n_out, 2560, 512, 1);
         const cudaError_t result = cudaGetLastError();
