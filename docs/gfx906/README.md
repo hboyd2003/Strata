@@ -53,7 +53,7 @@ default that is on in this build:
 | Switch(es) | Branch | Output |
 | --- | --- | --- |
 | `SIDE_MIXER=2`, `EXP_MODE=8`, `MMVF_ROWS=1`, `ATTN_MERGE_V2=1`, `GFX906_ATTN_QUERY_SWIZZLE=1`, `GFX906_ATTN_REDUCE12=1`, `GR_NORM_FAST=1`, `VERIFY_QDEDUP=1` | upstream (off by default on gfx906) | exact |
-| `GFX906_ROUTER_T1_ROWS=1`, `GFX906_ROUTER_T2_EXACT=1`, `GFX906_TOPK_SPLIT=1` | `perf/topk-router` | exact |
+| `GFX906_TOPK_SPLIT=1`; `GFX906_ROUTER_T1_ROWS=1`, `GFX906_ROUTER_T2_EXACT=1` (set, but `ROUTER_GEMV=auto` now takes those calls) | `perf/topk-router` | exact |
 | `MMVQ_WAVE_ROWS=2` | `gfx906/mmvq-wave-rows` | exact |
 | `MMVQ_MUL24=1`, `POST_COPY_WIDE=1` | `perf/gfx906-decode-kernels` | exact |
 | `DOWN_LPR=4`, `MMVQ_IACC=1` | `perf/gfx906-decode-kernels` | rounding only |
