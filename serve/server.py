@@ -931,7 +931,8 @@ def request_params(req: dict) -> dict:
         p["thinking"] = "enabled" if kw["enable_thinking"] else "disabled"
     choice = req.get("tool_choice")
     if isinstance(choice, dict):
-        p["tool_choice"] = (choice.get("function") or {}).get("name") or choice.get("name") or choice.get("type")
+        fn = choice.get("function")
+        p["tool_choice"] = (fn.get("name") if isinstance(fn, dict) else None) or choice.get("name") or choice.get("type")
     tools = req.get("tools")
     if isinstance(tools, list) and tools:
         names = [(t.get("function") if isinstance(t.get("function"), dict) else t).get("name")
