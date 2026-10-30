@@ -6113,7 +6113,11 @@ __global__ void __launch_bounds__(256) native_down_sub_kernel(const unsigned lon
             for (int j = 0; j < NTC; ++j) {
                 float v = acc[j];
 #pragma unroll
+#if defined(__HIPCC__)
                 for (int o = LPR / 2; o > 0; o >>= 1) v += __shfl_xor(v, o, 64);
+#else
+                for (int o = LPR / 2; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);   // LPR <= 16: in a warp
+#endif
                 if (live && sl == 0) out[(size_t) ent_dst[c0 + j] * L.n_embd + r] = v;
             }
         };
