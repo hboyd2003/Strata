@@ -1,3 +1,34 @@
+> [!WARNING]
+> **This is a personal fork, and most of it was written by Claude** (Anthropic's model, through Claude Code),
+> with me directing and reviewing. Read and test it before you rely on any of it.
+>
+> **Performance changes are kept only if they measurably help on my hardware.** Every performance change
+> (my own, upstream PRs, or commits from other forks) is built, checked for output parity and A/B-timed on one box
+> with the fork's benchmark harness ([`bench/gfx906/ab.py`](docs/gfx906/branches/gfx906-ab.md), which you can run too).
+> If it could not be shown to make that box faster, it was left out, however promising it looked. The box:
+>
+> - **GPU:** one AMD Instinct MI50 (gfx906, wave64) with 32 GiB HBM2 VRAM, 225 W cap, on PCIe 4.0 x16
+> - **CPU / RAM:** AMD Ryzen 9 7945HX (16C/32T), 64 GiB DDR5
+> - **Workload:** a single Qwen model, one request slot, MTP speculative decoding, long agent conversations (median ~145K tokens of context)
+>
+> A change that was left out may still help a different GPU, several GPUs, batching or a different model.
+> Nothing here is tuned or tested for those.
+>
+> Details: [start page](docs/gfx906/README.md), [what was tried and not kept](docs/gfx906/tested.md),
+> [how the fork is maintained](docs/gfx906/maintenance.md).
+>
+> **How this fork is maintained:** `main` is never developed on directly. It is rebuilt from scratch:
+> the latest [upstream](https://github.com/Niko1221/Strata) `main`, plus `--no-ff` merges of a fixed list of branches,
+> in a fixed order:
+>
+> - `rebased/*`: other forks' branches and upstream PRs, rebased onto upstream
+> - `gfx906/*`, `perf/*`, `serve/*`, `fix/*`: my own changes
+> - `docs`: this README and the fork's other docs
+>
+> Each time upstream moves, every one of those branches is rebased onto it and `main` is rebuilt from them.
+> **Expect force pushes, often, to `main` and to every branch.** Commit hashes do not survive a rebuild.
+> If you build on this fork, pin a commit you have fetched, and rebase your work rather than merging.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
