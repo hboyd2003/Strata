@@ -25,7 +25,7 @@ Numbers below are as of 2026-10-30.
 
 Things about this card that shaped the work:
 
-- **Decode is latency bound, not bandwidth bound.** About 80% of a decode window is the host waiting for
+- **Decode is latency bound, not bandwidth bound.** About 70% of a decode window is the host waiting for
   the GPU to get through many small kernels (gemv, router, hc, experts). Power sits around 150 W during decode.
   Wins come from fewer, faster small kernels, not from the CPU side.
 - **The SDMA engine caps host-to-device copies at ~13 GB/s** on this card, while a kernel reading mapped host
@@ -38,13 +38,17 @@ Things about this card that shaped the work:
 
 ## What runs in production
 
-**Model:** Qwen3.8-Flash-Next at IQ3_S (experts IQ2_S / IQ3_XXS / IQ3_S gate/up, IQ4_NL down), int8 KV cache,
+**Model:** Qwen3.8-Flash-Next at IQ3_S (experts IQ2_S / IQ3_XXS / IQ3_S gate/up, IQ4_NL down, Q2_0 down in 9 layers), int8 KV cache,
 up to 262,144 tokens of context, MTP speculative decoding.
 
-**Engine flags:** `--spec 4 --spec-min-p 0.6`, `--expert-cache auto`, `--pcie-frac 0`,
-`--adapt-swaps 80`, `--conversation-cache-min-free-mib 1536`, auto sessions saved to disk.
+**Engine flags:** `--spec 4 --spec-min-p 0.6`, `--expert-cache auto`, `--pcie-frac 0`, `--prefill auto:32768`,
+`--adapt-every 1 --adapt-swaps 80 --adapt-decay 0.97`, `--conversation-cache-min-free-mib 1536`.
 
-**Environment switches** (all off by default in the code; this is what the box sets):
+**Server config:** `"auto_sessions": true` (conversations saved to disk on a switch), `"qwen_code_tail": true`,
+`"gpu_temp_sensor": "junction"`.
+
+**Environment switches** the box sets. Most turn on something that is off by default; the `=0` rows turn off a
+default that is on in this build:
 
 | Switch(es) | Branch | Output |
 | --- | --- | --- |
@@ -55,17 +59,21 @@ up to 262,144 tokens of context, MTP speculative decoding.
 | `DOWN_LPR=4`, `MMVQ_IACC=1` | `perf/gfx906-decode-kernels` | rounding only |
 | `GFX906_ROUTER_W64=1`, `GFX906_ROUTER_GEMV=auto` | `perf/gfx906-router` | exact |
 | `GU16=1` / `GR_UP_EXACT_T=1` | `perf/gfx906-gu16` | rounding only / exact |
-| `HIP_ADAPT_KERNEL_COPY=1` (+ upstream `ADAPT_ASYNC=0`) | `perf/gfx906-adapt-copy` | exact |
+| `HIP_ADAPT_KERNEL_COPY=1` | upstream switch, built for gfx906 by `perf/gfx906-adapt-copy` | exact |
+| `ADAPT_ASYNC=0` (the async adapt tier is armed by default here) | upstream | exact |
+| `ROUTE_TAIL_SKIP=0` (upstream's approximate tail skip is on by default here) | upstream | keeps the output exact |
 | `ADAPT_COPY_BLOCKS=16` | `perf/gfx906-draft-copy` | exact |
 | `PREFILL_CPU_SHARE=auto`, `PREFILL_CPU_SHARE_MAX=8192` / `PREFILL_CPU_TOKENS=16` | upstream / `perf/prefill-cpu-tokens` | rounding only |
 | `SELECT_SIMT=1` (prefill only) | upstream | rounding only |
 | `SESSION_DELTA=1` | `serve/session-delta` | exact |
 
+`DECODE_TIMING=1` is also set: it only logs per-window timings and does not change speed or output.
+
 All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did not change; "rounding only"
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
-**Speed:** about 83 tok/s decode on short prompts, ~75 tok/s at 80K context; prefill ~740 tok/s at 16K and
+**Speed:** about 83 tok/s decode on short prompts; prefill ~740 tok/s at 16K and
 ~720 tok/s at 100K. The fork started at ~59 tok/s decode on the same box and model.
 
 ## Branches merged into `main`
@@ -82,19 +90,19 @@ In merge order. "Source" says where the code came from.
 | [`gfx906/local`](branches/gfx906-local.md) | own | gfx906 image fixes (AVX-512 host CPU code, ROCm libomp) and notes on the ported PRs |
 | [`gfx906/mmvq-wave-rows`](branches/gfx906-mmvq-wave-rows.md) | own | two rows per wave in the wave64 MMVQ kernel |
 | [`serve/gpu-temp-sensor`](branches/serve-gpu-temp-sensor.md) | own | picks the AMD card's temperature probe for the monitor |
-| [`perf/topk-router`](branches/perf-topk-router.md) | own + MarcoSon (PR #3987) | gfx906 1- and 2-token router kernels, two-stage decode top-k |
+| [`perf/topk-router`](branches/perf-topk-router.md) | own + 0FL01 + MarcoSon (PR #3987) | gfx906 1- and 2-token router kernels, two-stage decode top-k |
 | [`serve/auto-sessions-monitor`](branches/serve-auto-sessions-monitor.md) | own | an Auto sessions card in the monitor |
 | [`serve/request-transcripts`](branches/serve-request-transcripts.md) | own | read a recent request as a chat in the monitor |
-| [`perf/pcie-off-graph`](branches/perf-pcie-off-graph.md) | own (idea from ramanuj) | `--pcie-frac 0` drops the PCIe branch from the verify graph |
+| [`perf/pcie-off-graph`](branches/perf-pcie-off-graph.md) | own (idea from ramanujbhattacharjee93) | `--pcie-frac 0` drops the PCIe branch from the verify graph |
 | [`fix/session-restore-real-peak`](branches/fix-session-restore-real-peak.md) | own | session restores price the metadata the file declares, not the worst case |
 | [`serve/qwen-code-tail`](branches/serve-qwen-code-tail.md) | own | keeps Qwen Code's per-turn reminder out of the prompt cache checkpoint |
 | [`perf/prefill-cpu-tokens`](branches/perf-prefill-cpu-tokens.md) | own (from baptisterajaut) | CPU share for short prefill chunks |
 | `rebased/pr-4411` | upstream PR #4411 | pipelined session-file saves |
 | [`perf/gfx906-decode-kernels`](branches/perf-gfx906-decode-kernels.md) | own | gfx906 decode kernel switches |
-| [`perf/gfx906-router`](branches/perf-gfx906-router.md) | own | 64-lane router top-10 and router GEMV |
-| [`perf/gfx906-gu16`](branches/perf-gfx906-gu16.md) | own (partly from doubr) | 16-lane expert gate/up |
+| [`perf/gfx906-router`](branches/perf-gfx906-router.md) | own (partly from VlDubr) | 64-lane router top-10 and router GEMV |
+| [`perf/gfx906-gu16`](branches/perf-gfx906-gu16.md) | own (partly from VlDubr) | 16-lane expert gate/up |
 | [`perf/gfx906-adapt-copy`](branches/perf-gfx906-adapt-copy.md) | own | kernel copies for adaptive expert swaps |
-| [`perf/gfx906-draft-copy`](branches/perf-gfx906-draft-copy.md) | own (partly from doubr) | smaller swap-copy grid so copies stop crowding the MTP draft |
+| [`perf/gfx906-draft-copy`](branches/perf-gfx906-draft-copy.md) | own (partly from VlDubr) | smaller swap-copy grid so copies stop crowding the MTP draft |
 | [`serve/session-delta`](branches/serve-session-delta.md) | own | delta session files: append a turn's new K/V instead of rewriting the file |
 | `docs` | own | these docs and the README banner |
 
