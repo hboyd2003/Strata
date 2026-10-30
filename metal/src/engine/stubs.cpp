@@ -284,6 +284,9 @@ namespace strata::kernels { void native_rope_apply(const float * p0, float * p1,
 namespace strata::kernels { void native_route_resident(const float * p0, int32_t * p1, float * p2, const int32_t * p3, int p4, float p5, int p6, int p7, unsigned long long * p8, void * p9) { strata::metal_engine::missing("strata::kernels::native_route_resident"); } }
 namespace strata::kernels { void native_router_top10(const float * p0, int32_t * p1, float * p2, void * p3) { strata::metal_engine::missing("strata::kernels::native_router_top10"); } }
 namespace strata::kernels { void native_router_top10_multi(const float * p0, int32_t * p1, float * p2, int p3, void * p4) { strata::metal_engine::missing("strata::kernels::native_router_top10_multi"); } }
+// the gfx906 fused router: off here (verify.cpp asks on every window), never called
+namespace strata::kernels { bool router_fused_906_enabled() { return false; } }
+namespace strata::kernels { bool router_fused_906(const RouterFused906 & p0, int p1, void * p2) { strata::metal_engine::missing("strata::kernels::router_fused_906"); return {}; } }
 namespace strata::kernels { bool & pdl_scope() { strata::metal_engine::missing("strata::kernels::pdl_scope"); static std::remove_cv_t<std::remove_reference_t<bool &>> s{}; return s; } }
 namespace strata::kernels { bool pdl_supported() { strata::metal_engine::missing("strata::kernels::pdl_supported"); return {}; } }
 namespace strata::kernels { void ple_block(const float * p0, const float * p1, const float * p2, const PleWeights & p3, PleOut & p4, void * p5, void * p6) { strata::metal_engine::missing("strata::kernels::ple_block"); } }
