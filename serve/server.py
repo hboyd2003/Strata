@@ -62,7 +62,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
                             forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages, require_messages,
-                            tool_choice_of, unmark_think_literals)
+                            tool_choice_of, unmark_think_literals, without_moved_lines)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from serve.webfiles import subtree_file as web_subtree_file  # noqa: E402
@@ -859,10 +859,28 @@ def conversation_slots(engine) -> int | None:
     return slots if isinstance(slots, int) else None
 
 
-def conversation_key(messages) -> str | None:
+# Auto sessions: the ids clients send for a conversation (Codex: session-id + thread-id; opencode:
+# x-opencode-session-id and X-Session-Id; any client can be set up to send x-session-id)
+CLIENT_SESSION_HEADERS = ("session-id", "thread-id", "x-opencode-session-id", "x-session-id")
+
+
+def client_conversation_id(headers, req) -> str | None:
+    """The conversation id a client sent with a request (the headers above, or the body's prompt_cache_key, which
+    Qwen Code's Responses wire sets to its session), or None."""
+    parts = [f"{h}={headers.get(h)}" for h in CLIENT_SESSION_HEADERS if headers.get(h)]
+    pck = req.get("prompt_cache_key") if isinstance(req, dict) else None
+    if isinstance(pck, str) and pck:
+        parts.append(f"prompt_cache_key={pck}")
+    return "\n".join(parts) or None
+
+
+def conversation_key(messages, client: str | None = None) -> str | None:
     """Auto sessions: which conversation a chat request continues - the text of its first user message, which
     every later turn of the same chat carries unchanged (a client that rewrites it starts a new conversation, as
-    the prompt cache sees it too).  None when the request carries no user text: auto sessions leave it alone."""
+    the prompt cache sees it too), without what system_to_user moved there.  `client`: the client's own id for the
+    conversation (client_conversation_id), when it sends one: two chats that open with the same message (a fixed
+    preamble, a side agent's set prompt) then get their own keys.  None when the request carries no user text:
+    auto sessions leave it alone."""
     for m in messages or []:
         if not isinstance(m, dict) or m.get("role") != "user":
             continue
@@ -871,7 +889,10 @@ def conversation_key(messages) -> str | None:
             content = "".join(p.get("text") or "" for p in content
                               if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
         if isinstance(content, str) and content.strip():
-            return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:16]
+            text = without_moved_lines(content)
+            if client:
+                text = client + "\n\n" + text
+            return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
     return None
 
 
@@ -4583,6 +4604,9 @@ class Service:
         why = slot_filename_problem(filename)
         if why:
             return error(400, f"filename {why}")
+        if action == "save" and self.auto_sessions and filename.startswith("auto-"):
+            # auto sessions own every auto-* file here and prune them: a hand-saved one would be deleted
+            return error(400, "filename must not start with auto- while auto sessions are on (their files use it)")
         path = os.path.join(self.slot_save_path, filename)
         if action == "restore":
             try:
@@ -5382,7 +5406,8 @@ class Service:
         prompt; with thinking, Service.run writes it once the thinking is over."""
         # `cancel` (#1999): set when the client hangs up; the downloads, the wait for the turn and the encodes stop
         # between pictures and raise ClientGone
-        self.auto_tls.key = conversation_key(messages)   # auto sessions: this request's conversation (or None)
+        # auto sessions: this request's conversation (or None)
+        self.auto_tls.key = conversation_key(messages, getattr(self.auto_tls, "client", None))
         # Cached tool images are references in browser history, never arbitrary file paths or huge base64 strings.
         for message in messages:
             for part in message.get("content", []) if isinstance(message.get("content"), list) else []:
@@ -5677,7 +5702,7 @@ class Service:
             # it may not block the incoming restore (minutes of re-read on a long conversation).
             if cur is not None and int(cur.get("tokens") or 0) >= self.auto_sessions_min_tokens:
                 try:
-                    self._auto_session_save(cur["key"])
+                    self._auto_session_save(cur["key"], spare=key)
                 except SessionRefused as e:
                     if e.kind != "invalid" and not cur.get("cancelled"):
                         raise
@@ -5689,13 +5714,14 @@ class Service:
             self.auto_stats.update(failures=self.auto_stats["failures"] + 1, last_error=str(e)[:200])
         self.auto_conv = {"key": key, "tokens": len(ids)}
 
-    def _auto_session_save(self, key):
+    def _auto_session_save(self, key, spare=None):
+        """`spare`: the key of the conversation about to be restored; the prune after the save leaves its file."""
         name = f"auto-{key}.bin"
         r = self.engine.session_file("save", os.path.join(self.slot_save_path, name))
         print(f"[strata] auto sessions: saved {r.get('tokens')} tokens ({r.get('bytes', 0) / 1e9:.2f} GB) to "
               f"{name} in {float(r.get('ms') or 0):.0f} ms", flush=True)
         self._auto_session_note("saved", r)
-        self._auto_session_prune()
+        self._auto_session_prune(spare)
 
     def _auto_session_restore(self, key):
         name = f"auto-{key}.bin"
@@ -5792,9 +5818,10 @@ class Service:
         finally:
             self.fifo.release()
 
-    def _auto_session_prune(self):
+    def _auto_session_prune(self, spare=None):
         """Keep the newest auto_sessions_keep files and at most auto_sessions_max_gb of them (0: no such limit).
-        Only auto-*.bin files are ever deleted: a file saved by hand through /slots/0 is not touched."""
+        Only auto-*.bin files are ever deleted: a file saved by hand through /slots/0 is not touched (/slots/0
+        refuses auto-* names while auto sessions are on).  `spare`: a key whose file stays (it is restored next)."""
         keep = int(self.auto_sessions_keep or 0)
         cap = int(float(self.auto_sessions_max_gb or 0) * (1 << 30))
         try:
@@ -5808,6 +5835,8 @@ class Service:
         except OSError as e:
             print(f"[strata] auto sessions: cannot prune ({e})", flush=True)
             return
+        if spare is not None:
+            entries = [e for e in entries if os.path.basename(e[2]) != f"auto-{spare}.bin"]
         total = sum(size for _, size, _ in entries)
         removed = 0
         for i in range(len(entries) - 1, -1, -1):     # oldest first
@@ -6010,6 +6039,8 @@ class Service:
                             self.ensure_loaded()
                     if self.auto_sessions and not par:    # opt-in: save the held conversation / restore this one
                         self._auto_session_turn(ids)
+                        if not self.loaded():             # the save or restore ended the engine (logged): start it again
+                            self.ensure_loaded()
                     with self.status_lock:
                         if par:
                             self.status["queued"] -= 1
@@ -7866,6 +7897,7 @@ def make_handler(svc: Service):
                 req = json.loads(self._body() or b"{}")
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
+                svc.auto_tls.client = client_conversation_id(self.headers, req)   # (prepare keys auto sessions on it)
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
                     self._json(404, responses_error_body("this server keeps no responses (stateless); send the "
                                                          "whole conversation to POST /v1/responses", code="not_found"))
