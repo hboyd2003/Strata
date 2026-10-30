@@ -6,7 +6,8 @@ are real wins on other GPUs, on several GPUs, or with batching.
 
 What *was* kept is documented on its own branch (`docs/gfx906/branches/<branch>.md`).
 
-Every result was measured with the fork's A/B harness ([`bench/gfx906/ab.py`](branches/gfx906-ab.md)), each
+Every result was measured with the fork's A/B harness ([`bench/gfx906/ab.py`](branches/gfx906-ab.md), or before
+2026-10-30 the in-house script it was cut from), each
 variant against the build running at the time with a repeat of the base as the noise control. Kernel numbers (µs)
 come from the parity tests' `--bench` modes.
 

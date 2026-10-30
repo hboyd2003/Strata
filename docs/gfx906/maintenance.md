@@ -70,7 +70,8 @@ Every candidate (an upstream PR, a commit from another fork, or my own idea) goe
 5. **A/B** with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), against the running build, with a repeat of the
    base as a noise control: decode tok/s and ms per window, every decode stage, prefill at several lengths,
    long-context turns where relevant, and the greedy output hashes. On the box a small wrapper restarts the server
-   with each variant's config and runs the harness, so every number comes from the same code anyone can run.
+   with each variant's config and runs the harness. (Before 2026-10-30 the harness and the restarts were one in-house
+   script; the published tool is that script's measuring part, unchanged in what it measures.)
 6. **Classify the output effect**: exact, rounding only, or quality-reducing. Quality-reducing changes are
    not taken, whatever the speed.
 7. **Keep or drop.** A keeper gets a real branch name, is merged into `main` and deployed, and is documented
