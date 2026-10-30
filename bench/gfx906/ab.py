@@ -639,6 +639,23 @@ def cmd_run():
           f"pf16k {a.get('prefill.pf16k_api_tps')} tok/s -> {out}/summary.md", flush=True)
 
 
+# options that name the run or say where to measure, not what: runs that differ only in these are comparable
+NOT_MEASURED = {"--label", "--log", "--url", "--model", "--api-key", "--card"}
+
+
+def measured_options(opts):
+    """A run's options without NOT_MEASURED and their values."""
+    out, skip = [], False
+    for o in opts:
+        if skip:
+            skip = False
+        elif o in NOT_MEASURED:
+            skip = True
+        else:
+            out.append(o)
+    return out
+
+
 def cmd_compare():
     dirs = [a for a in sys.argv[2:] if not a.startswith("-") and a != arg("-o")]
     runs = [json.loads((Path(d) / "results.json").read_text()) for d in dirs]
@@ -647,8 +664,9 @@ def cmd_compare():
         warn.append("- The runs come from different harness versions (different prompts): compare only the rows they share.")
     if len({json.dumps(r["corpus"], sort_keys=True) for r in runs}) > 1:
         warn.append("- The runs used different prompt text: their prefill numbers aren't comparable.")
-    if len({r["suite"] + json.dumps(r["options"]) for r in runs}) > 1:
-        warn.append("- The runs used different options: " + "; ".join(f"`{r['label']}` {r['suite']} {' '.join(r['options'])}" for r in runs))
+    if len({r["suite"] + json.dumps(measured_options(r["options"])) for r in runs}) > 1:
+        warn.append("- The runs used different options: " + "; ".join(
+            f"`{r['label']}` {r['suite']} {' '.join(measured_options(r['options']))}" for r in runs))
     lines = ["# Comparison", "", f"Reference: `{runs[0]['label']}`. Cells: value (Δ% vs the reference).", ""]
     lines += [f"- `{r['label']}`: {r['started']}, {r['suite']}, GPU {r['system']['gpu'].get('product') or r['system']['gpu'].get('device_id', '?')}, "
               f"CPU {r['system'].get('cpu', '?')}" for r in runs]
