@@ -15,7 +15,7 @@ Each branch is one of these kinds:
 | --- | --- | --- | --- |
 | Fork copy | `rebased/<fork>` | another fork's branch, rebased onto upstream | upstream |
 | PR copy | `rebased/pr-<N>` | an upstream PR's commits, rebased onto upstream | upstream |
-| Own | `gfx906/*`, `perf/*`, `serve/*`, `fix/*`, `docs` | my changes, independent of the others | upstream |
+| Own | `gfx906/*`, `perf/*`, `serve/*`, `fix/*`, `docs` | my changes, independent of the others | upstream (or the fork/PR copy it extends) |
 | Stacked | same prefixes | my changes that need code from earlier merges | `main` as it was at that branch's slot |
 | Parked | `gfx906/dsv41`, `build/dsv41-serve` | kept rebased but not merged (DeepSeek work, paused) | `main` |
 
