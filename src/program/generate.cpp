@@ -14219,9 +14219,9 @@ int main(int argc, char** argv) {
             }
             if (correctness_trace) {
                 const auto trace_error = req_trace_id.validate(true);
-                bool duplicate = false;
+                bool duplicate = false;   // a BSTOP-ed slot still draining is this request's previous leg, not a twin
                 for (const BSlot& slot : bs)
-                    duplicate = duplicate || (slot.active && slot.trace_id == req_trace_id.value());
+                    duplicate = duplicate || (slot.active && !slot.stop && slot.trace_id == req_trace_id.value());
                 if (trace_error != strata::program::NativeTraceId::Error::none || duplicate) {
                     const char* why = duplicate ? "duplicate" : strata::program::NativeTraceId::error_text(trace_error);
                     std::printf("ERR %s correctness trace request ID\n", why);
