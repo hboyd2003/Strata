@@ -185,21 +185,25 @@ std::vector<SessionKvSource> pool_sources(const Pool& pool, const std::vector<st
     return out;
 }
 
-// read pass + apply pass into fresh buffers of the head's part sizes
+// read pass + apply pass into fresh buffers of the head's part sizes; `calls`: how many times the sink was called
 bool pool_restore(const fs::path& p, const SessionFileIdentity& id, Pool& out, SavedConversation& meta,
-                  SessionLog& log, std::string& error) {
+                  SessionLog& log, std::string& error, size_t* calls = nullptr) {
     std::vector<std::array<uint64_t, 5>> sizes;
     size_t bytes = 0;
     if (!session_file_read_streamed(p.string(), id, meta, bytes, error, {}, &sizes, nullptr, &log)) return false;
     out.assign(sizes.size(), {});
     for (size_t l = 0; l < sizes.size(); ++l)
         for (size_t i = 0; i < 5; ++i) out[l][i].assign((size_t) sizes[l][i], 0xEE);
-    return session_file_apply_streamed(p.string(), id,
+    size_t n_calls = 0;
+    const bool ok = session_file_apply_streamed(p.string(), id,
         [&](size_t layer, size_t part, uint64_t offset, const void* data, size_t n) {
-            if (layer >= out.size() || offset + n > out[layer][part].size()) return false;
+            ++n_calls;
+            if (layer >= out.size() || offset + n > out[layer][part].size() || n > (16u << 20)) return false;
             std::memcpy(out[layer][part].data() + offset, data, n);
             return true;
         }, sizes, error);
+    if (calls) *calls = n_calls;
+    return ok;
 }
 
 size_t count_logs(const fs::path& dir, const std::string& leaf) {
@@ -294,6 +298,44 @@ void delta_tests(const fs::path& dir, const SessionFileIdentity& id) {
     check(session_file_write_delta(head.string(), meta, pool_sources(pool3, stable3), id, &log2, log3, stats, bytes,
                                    error) && stats.appended, "delta: append after a rewind");
     check(pool_restore(head, id, got, m, back, error) && got == pool3, "delta: a shrunk pool restores");
+    {   // many small appends (one record per part each): the apply merges each part's records, so the sink is called
+        // about once per part, not once per record
+        Pool many = pool3;
+        SessionLog lm = log3, ln;
+        for (int k = 0; k < 20; ++k) {
+            std::vector<std::array<size_t, 5>> st(L);
+            for (size_t l = 0; l < L; ++l)
+                for (size_t i = 0; i < 5; ++i) {
+                    st[l][i] = many[l][i].size() >= 10 ? many[l][i].size() - 10 : 0;   // (a rewritten tail too)
+                    for (size_t j = st[l][i]; j < many[l][i].size(); ++j) many[l][i][j] ^= 0x3C;
+                    if (!many[l][i].empty()) for (int j = 0; j < 300; ++j) many[l][i].push_back(uint8_t(k * 7 + j));
+                }
+            check(session_file_write_delta(head.string(), meta, pool_sources(many, st), id, &lm, ln, stats, bytes,
+                                           error) && stats.appended, "delta: a small append");
+            lm = ln;
+        }
+        size_t calls = 0;
+        check(pool_restore(head, id, got, m, back, error, &calls) && got == many, "delta: 20 small appends restore");
+        check(calls <= 3 * 5 + 6, "delta: 20 small appends cost about one sink call per part");
+        // more small records than the merge arena holds (48 MiB): handed over when it fills, still in order
+        for (int k = 0; k < 16; ++k) {
+            std::vector<std::array<size_t, 5>> st(L);
+            for (size_t l = 0; l < L; ++l)
+                for (size_t i = 0; i < 5; ++i) st[l][i] = many[l][i].size();
+            auto& v = many[0][1];
+            st[0][1] = v.size() - 50;
+            for (size_t j = st[0][1]; j < v.size(); ++j) v[j] = uint8_t(j + k);
+            v.resize(v.size() + (7u << 19), uint8_t(k + 1));   // + 3.5 MiB
+            check(session_file_write_delta(head.string(), meta, pool_sources(many, st), id, &lm, ln, stats, bytes,
+                                           error) && stats.appended, "delta: a 3.5 MiB append");
+            lm = ln;
+        }
+        check(pool_restore(head, id, got, m, back, error) && got == many, "delta: appends past the merge arena restore");
+        log3 = lm;
+        pool3 = many;
+        for (size_t l = 0; l < L; ++l)
+            for (size_t i = 0; i < 5; ++i) stable3[l][i] = pool3[l][i].size();
+    }
 
     // 4. a torn tail past the committed length is ignored, and the next append cuts it
     const fs::path logp = session_delta_log_path(head.string(), log3.id);
