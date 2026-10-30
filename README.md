@@ -8,7 +8,7 @@
 >
 > - **GPU:** one AMD Instinct MI50 (gfx906, wave64) with 32 GiB HBM2 VRAM, 225 W cap, on PCIe 4.0 x16
 > - **CPU / RAM:** AMD Ryzen 9 7945HX (16C/32T), 64 GiB DDR5
-> - **Workload:** a single Qwen model, one request slot, MTP speculative decoding, long (~80K-token) agent contexts
+> - **Workload:** a single Qwen model, one request slot, MTP speculative decoding, long agent conversations (median ~145K tokens of context)
 >
 > A change that was left out may still help a different GPU, several GPUs, batching or a different model.
 > Nothing here is tuned or tested for those.
