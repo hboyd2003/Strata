@@ -87,6 +87,7 @@ from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
 from serve import native_trace  # noqa: E402
+from serve import session_files  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -5537,15 +5538,23 @@ class Service:
 
     def _remove_auto_session(self, path: str):
         """An auto-*.bin file and its delta K/V logs (the head first: no head is left pointing at a removed log)."""
-        folder, name = os.path.split(path)
-        with os.scandir(folder) as it:
-            logs = [e.path for e in it if self._DELTA_LOG.fullmatch(e.name) and e.name.startswith(name + ".")]
-        os.unlink(path)
-        for log in logs:
-            try:
-                os.unlink(log)
-            except OSError:
-                pass
+        session_files.remove(path, strict=True)
+
+    def _remove_orphan_auto_logs(self) -> int:
+        """Delta K/V logs whose auto-*.bin head is gone (a crash between a key's first log and its head, a failed log
+        unlink): the size cap never sees them, so they go here.  No save runs meanwhile (the FIFO is held)."""
+        removed = 0
+        with os.scandir(self.slot_save_path) as it:
+            names = {e.name: e.path for e in it if e.is_file()}
+        for name, path in names.items():
+            m = self._DELTA_LOG.fullmatch(name)
+            if m and m.group(1) not in names:
+                try:
+                    os.unlink(path)
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
 
     def auto_sessions_view(self) -> dict:
         """The Monitor's Auto sessions card: the limits, the conversation the engine holds, the auto-*.bin files on
@@ -5591,6 +5600,12 @@ class Service:
         Only auto-*.bin files are ever deleted: a file saved by hand through /slots/0 is not touched."""
         keep = int(self.auto_sessions_keep or 0)
         cap = int(float(self.auto_sessions_max_gb or 0) * (1 << 30))
+        try:
+            orphans = self._remove_orphan_auto_logs()
+        except OSError:
+            orphans = 0
+        if orphans:
+            print(f"[strata] auto sessions: removed {orphans} K/V log(s) left without their file", flush=True)
         try:
             entries = self._auto_session_files()      # newest first
         except OSError as e:

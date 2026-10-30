@@ -37,6 +37,8 @@ import threading
 import time
 from pathlib import Path
 
+from serve import session_files
+
 # Qwen-Image-2.1-Turbo's own schedule (model_index.json "sample_sigmas") plus the terminal 0, as Unsloth's card passes
 # it to sd-cli; it is an 8-step schedule, so another step count leaves the schedule to sd.cpp
 TURBO_SIGMAS = "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"
@@ -425,8 +427,7 @@ def _make_room(svc, gen: ImageGen, policy: str, need: int):
                 gen._say(f"image job: the conversation ({r.get('tokens')} tokens) saved; unloading the model")
             except Exception as e:                   # noqa: BLE001 - unloading still frees the GPU
                 gen._say(f"image job: the conversation could not be saved ({e}); unloading the model")
-                with contextlib.suppress(OSError):
-                    os.unlink(path)
+                session_files.remove(path)
         eng.unload()
         if svc.vision is not None and hasattr(svc.vision, "unload"):
             svc.vision.unload()
@@ -464,5 +465,4 @@ def restore_session(svc) -> None:
         print(f"[strata] the conversation from before the image job was not restored ({e}); the next request "
               "reads its prompt again", flush=True)
     finally:
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+        session_files.remove(path)                   # the head and, with STRATA_SESSION_DELTA, its K/V log

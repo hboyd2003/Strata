@@ -259,7 +259,7 @@ bool conversation_kv_part_sizes(const QsaState& st, const ModelGeometry& g, int6
 }
 
 bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const ModelGeometry& g,
-                            int64_t upto, bool index, std::string& error) {
+                            int64_t upto, bool index, std::string& error, int64_t /*unchanged: 0 = every byte new*/) {
     Layout l{};
     if (!layout(st, g, upto, index, l, error) || !valid(st, l, upto, error)) return false;
     SessionKvSource s;
