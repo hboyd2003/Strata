@@ -162,6 +162,9 @@ namespace strata::metal_engine { void set_model_shard(const char* shard1); }   /
 #include <set>
 #include <vector>
 
+#include "strata/program/native_trace_id.hpp"
+#include "strata/program/native_window_trace.hpp"
+
 // logprobs=K / allowed=...: one `LP` line for the token just emitted, from `ver`'s head
 // logits for the window row it came from (before sampling, penalties and temperature).
 // Format matches the SYCL port's LP line so one server-side reader serves both.
@@ -838,6 +841,12 @@ struct Options {
     /// the checkpoint goes in front of that turn instead, so it holds the conversation and not the effort text.
     /// -1 = off (the checkpoint at the last <|im_start|>, as before).
     int64_t tail_role_token = -1;
+    /// --serve (opt-in): the token ids a per-request reminder turn opens with (Qwen Code's `<system-reminder>`
+    /// memory catalog, a separate short user turn the client appends to every request and drops from its history).
+    /// When the turn before the last <|im_start|> holds these tokens right after its role header, the checkpoint
+    /// goes in front of that turn, so the next request - which renders the history without it - finds the whole
+    /// conversation.  Empty = off.
+    std::vector<int64_t> tail_reminder_ids;
     /// --serve: a text part of the prompt of at most N tokens (a chat message, the assistant header, a short tool
     /// result) goes through the verify windows, S tokens at a time, instead of the batched prompt path (0 = always
     /// the batched path)
@@ -1007,6 +1016,9 @@ void usage() {
                  "  --turn-token ID      --serve: the token that opens a chat turn (default 248045, <|im_start|>)\n"
                  "  --tail-role-token ID --serve: a turn of this role right before the last turn is left out of\n"
                  "                       the conversation checkpoint (a trailing effort turn; default -1 = off)\n"
+                 "  --tail-reminder-ids A,B,.. --serve: a short turn right before the last turn that opens with these\n"
+                 "                       token ids (a per-request <system-reminder> the client does not keep in its\n"
+                 "                       history) is left out of the conversation checkpoint (default: off)\n"
                  "  --short-read N       --serve: read at most N fresh text tokens through the decode windows instead\n"
                  "                       of the batched prompt path (default 64, 0 = off)\n"
                  "  --prefill-head-alias --serve: unload the native output head while each fresh prompt is read,\n"
@@ -2895,6 +2907,14 @@ int main(int argc, char** argv) {
     if (std::getenv("STRATA_ARENA_MMAP") && std::getenv("STRATA_ARENA_MMAP")[0] == '1')
         setenv("GPU_PINNED_MIN_XFER_SIZE", "1000000", 0);   // MiB; an explicit setting wins
 #endif
+#if defined(STRATA_HIP_GFX906) && !defined(_WIN32)
+    // gfx906: the prompt path measured on MI50 (GFX906.md) is on by default; =0 turns each part off
+    setenv("STRATA_PF_RP", "1", 0);            // MoE expert products through the repacked GEMM
+    setenv("STRATA_DENSE_MMQ", "1", 0);        // dense projections through int8 MMQ (K/V stay FP16)
+    setenv("STRATA_MMQ_KQ", "1", 0);           // the K-quant MMQ kernels for the dense Q5_K / Q6_K weights
+    setenv("STRATA_DENSE_RP", "1", 0);         // dense products through the repacked GEMM where it has the type
+    setenv("STRATA_HIP_PROMPT_F16", "1", 0);   // the prompt's 16-bit GEMMs in FP16
+#endif
     // Load every CUDA kernel when the context is created, before the expert cache takes the free VRAM.  With the
     // default lazy loading, a kernel first used mid-prompt (MMQ for IQ3_XXS at 64K+ on a 12 GB card) found no VRAM
     // left for its code and the engine ended ("out of memory: cudaFuncSetAttribute").  Costs ~30 MB of VRAM.
@@ -3208,6 +3228,16 @@ int main(int argc, char** argv) {
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
         else if (a == "--turn-token") o.turn_token = std::atoll(next("--turn-token"));
         else if (a == "--tail-role-token") o.tail_role_token = std::atoll(next("--tail-role-token"));
+        else if (a == "--tail-reminder-ids") {
+            const std::string v = next("--tail-reminder-ids");
+            o.tail_reminder_ids.clear();
+            for (size_t b = 0; b < v.size();) {
+                size_t e = v.find(',', b);
+                if (e == std::string::npos) e = v.size();
+                if (e > b) o.tail_reminder_ids.push_back(std::atoll(v.substr(b, e - b).c_str()));
+                b = e + 1;
+            }
+        }
         else if (a == "--short-read") o.short_read = std::max(0LL, std::atoll(next("--short-read")));
         else if (a == "--prefill-head-alias") o.prefill_head_alias = true;
         else if (a == "--pipeline-windows") o.pipeline_windows = std::max(0, std::min(2, std::atoi(next("--pipeline-windows"))));
@@ -3589,6 +3619,12 @@ int main(int argc, char** argv) {
     }
     const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
                                o.expert_cache_remote[2] > 0;
+    // --pcie-frac 0 given on one GPU: no expert is ever staged over PCIe (a request's own pcie_frac is ignored), so the
+    // verify graph leaves its PCIe branch out (strata::core::pcie_off).  The auto share and the multi-GPU paths keep it.
+    if (pcie_given && o.pcie_frac == 0.0 && o.layer_split.empty() && o.peer_device < 0 && !remote_caches) {
+        strata::core::set_pcie_off(true);
+        std::fprintf(stderr, "strata generate: --pcie-frac 0: no PCIe staging; the verify graph has no PCIe branch\n");
+    }
     // A layer split keeps the resident RAM mode: every stage's GPU cache is left out of the RAM copy, and an adaptive
     // swap copies an evicted expert back from the card that owns its layer (resident_stage_swaps).
     // The helper-GPU caches are allowed beside the resident RAM mode too: their experts are left out of the RAM copy
@@ -12431,6 +12467,7 @@ int main(int argc, char** argv) {
         // ---- --batch: the slots of the batch windows
         struct BSlot {
             bool active = false, stop = false;
+            std::string trace_id;          ///< opt-in correctness trace correlation; empty in the legacy protocol
             int32_t x = 0;                 ///< the token the next window feeds (not yet in the slot's state)
             std::array<int32_t, strata::kernels::kVerifyNarrowT> draft{}; ///< the slot's next MTP proposal
             bool draft_ready = false;
@@ -12491,6 +12528,21 @@ int main(int argc, char** argv) {
         };
         int admit_slot = -1;               ///< the slot the request being read will continue in (BGEN)
         long long admit_max_new = 0;
+        const char* correctness_trace_env = std::getenv("STRATA_CORRECTNESS_TRACE");
+        const bool correctness_trace = correctness_trace_env != nullptr && std::strcmp(correctness_trace_env, "1") == 0;
+        const char* window_trace_env = std::getenv("STRATA_CORRECTNESS_WINDOW_TRACE");
+        const bool correctness_window_trace = window_trace_env != nullptr && std::strcmp(window_trace_env, "1") == 0;
+        const auto window_trace_config = strata::program::validate_window_trace_config(
+            correctness_trace, correctness_window_trace, o.batch > 0, o.pipeline_windows > 0);
+        if (window_trace_config == strata::program::WindowTraceConfigError::requires_base_trace) {
+            std::fprintf(stderr, "strata serve: STRATA_CORRECTNESS_WINDOW_TRACE requires STRATA_CORRECTNESS_TRACE=1\n");
+            return 2;
+        }
+        if (window_trace_config == strata::program::WindowTraceConfigError::unsupported_execution_mode) {
+            std::fprintf(stderr, "strata serve: STRATA_CORRECTNESS_WINDOW_TRACE supports serial windows only; "
+                                 "disable --batch and --pipeline-windows\n");
+            return 2;
+        }
         auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
         auto try_next_line = [&](std::string& out) -> bool {
             std::lock_guard<std::mutex> lk(in_mu);
@@ -12811,6 +12863,9 @@ int main(int argc, char** argv) {
                                  (long long) pos[first[t]]);
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                     std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms);
+                    if (correctness_trace && !sl.trace_id.empty())
+                        std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=nonfinite produced=%lld\n",
+                                     sl.trace_id.c_str(), b, (long long) sl.produced);
                     sl.active = false;
                     sl.cached = false;
                     sl.checks.clear();
@@ -12828,6 +12883,9 @@ int main(int argc, char** argv) {
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms);
+                        if (correctness_trace && !sl.trace_id.empty())
+                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=%s produced=%lld\n",
+                                         sl.trace_id.c_str(), b, fin, (long long) sl.produced);
                         sl.active = false;
                         sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
                         break;
@@ -13201,6 +13259,9 @@ int main(int argc, char** argv) {
                                      gi * GS + t, (long long) sl.p);
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld nonfinite %.1f\n", gi * GS + t, (long long) sl.produced, ms);
+                        if (correctness_trace && !sl.trace_id.empty())
+                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=nonfinite produced=%lld\n",
+                                         sl.trace_id.c_str(), gi * GS + t, (long long) sl.produced);
                         sl.active = false;
                         sl.cached = false;
                         sl.checks.clear();
@@ -13219,6 +13280,9 @@ int main(int argc, char** argv) {
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld %s %.1f\n", gi * GS + t, (long long) sl.produced, fin, ms);
+                        if (correctness_trace && !sl.trace_id.empty())
+                            std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=%s produced=%lld\n",
+                                         sl.trace_id.c_str(), gi * GS + t, fin, (long long) sl.produced);
                         sl.active = false;
                         // a pipelined slot is a cache again (#857: a request left alone in its slot goes back to the solo path with its
                         // drafts): its state is final once its last window has left the last stage.  A later group window whose pad
@@ -13465,7 +13529,7 @@ int main(int argc, char** argv) {
                 admit_slot = (int) b;
                 admit_max_new = mn;
                 adm_drain_ms = line_drain_ms;
-                line = std::string(bimg ? "GENI 1" : "GEN 1") + e2;
+                line = strata::program::rewrite_batch_admission(bimg, e2);
             }
             // #477: every --expert-profile-save-every minutes, before the next request (at QUIT: after the loop)
             if (!heat.empty() && line != "QUIT" && o.expert_profile_save_min > 0 &&
@@ -13580,7 +13644,8 @@ int main(int argc, char** argv) {
                         // RAM PREFLIGHT for the save (not a reservation), BEFORE anything is copied: the deepest
                         // checkpoint is chosen by reference, and the copies it will take (the list below and the one
                         // in `meta`), the copied live running state with its tokens and images, the K/V source
-                        // directory and the 16 MiB write buffer are asked for above the parking floor.  Only the
+                        // directory and the two 16 MiB write buffers (the pipelined FileSink) are asked for above
+                        // the parking floor.  Only the
                         // deepest checkpoint goes to disk (the next turn's resume point); the K/V is streamed from
                         // the authoritative pools straight into the file, without a full host capture.
                         strata::core::SessionSaveLive sl;
@@ -13661,7 +13726,12 @@ int main(int argc, char** argv) {
                                  path.c_str(), ms(), capture_ms);
                     std::printf("SAVED %zu %zu %.1f\n", live.size(), bytes, ms());
                 } else {
-                    strata::core::SavedConversation image;
+                    // Streaming restore: the read pass parses and checks the whole file without materializing the
+                    // K/V (it stays on disk), the metadata is validated against this engine, then the apply pass
+                    // reads the file again and copies every K/V block into its authoritative pool.  Peak RAM is two
+                    // 16 MiB blocks and the running state - not the snapshot.
+                    strata::core::SavedConversation image;   // running state + K/V headers; the K/V buffers stay empty
+                    std::vector<std::array<uint64_t, 5>> file_kv;   // the K/V sizes exactly as the read pass parsed them
                     size_t bytes = 0;
                     try {
                         // bounds this session can ever restore (geometry, layer range, tokens, checkpoints, every
@@ -13686,7 +13756,7 @@ int main(int argc, char** argv) {
                             continue;
                         }
                         strata::core::SessionStatus st;
-                        if (!strata::core::session_file_read(path, id, image, bytes, err, limits, &st)) {
+                        if (!strata::core::session_file_read_streamed(path, id, image, bytes, err, limits, &file_kv, &st)) {
                             refuse(err, st.error);
                             continue;
                         }
@@ -13695,27 +13765,73 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     const double read_ms = ms();
-                    // the whole image against this engine, still without any device write
+                    // the whole running state against this engine, still without any device write; a K/V layer of
+                    // another geometry or extent is refused here, by its header
                     blocking("validate", bytes);
-                    if (!strata::core::conversation_snapshot_validate(image, ss, g, mtp.kv_state(), err)) {
+                    if (!strata::core::conversation_snapshot_validate_meta(image, ss, g, mtp.kv_state(), err)) {
                         refuse(err);
                         continue;
                     }
                     // the elastic K/V (--kv-grow) maps only the cells it has grown to: make room for the file's cells
                     if (!kvg_ensure((int64_t) image.live.ids.size() + 256, adapt_quiesce)) {
-                        refuse("the K/V cannot grow to the saved conversation: no VRAM is left", strata::core::SessionError::memory);
+                        refuse("the K/V cannot grow to the saved conversation: no VRAM is left",
+                               strata::core::SessionError::memory);
+                        continue;
+                    }
+                    // bind every layer's authoritative pool (validated above; this cannot fail for a good image)
+                    std::vector<strata::core::ConversationKvTarget> targets;
+                    if (!strata::core::conversation_kv_targets(image, ss, g, mtp.kv_state(), targets, err)) {
+                        refuse(err);
+                        continue;
+                    }
+                    if (cudaDeviceSynchronize() != cudaSuccess) {
+                        refuse("the device did not go quiet before the restore", strata::core::SessionError::io);
                         continue;
                     }
                     conversations.take_reuse();   // retained K/V described the outgoing session
                     live_ok = false;
-                    // host -> device in synchronous copies of the whole state: one bounded allowance
+                    // disk -> host pool in blocks of at most 16 MiB: one bounded allowance; the apply pass is bound
+                    // to the K/V sizes the read pass validated and fail-stops once it has written the first block,
+                    // while a clean refusal sets the live session back
                     blocking("transfer", bytes);
-                    if (strata::core::conversation_snapshot_restore(image, ss, g, mtp.kv_state(), err) !=
-                        strata::core::ConversationRestore::restored) {
-                        // validated above: a failure here is a transfer failure, after device writes began - never
-                        // decode from a partial state; the server starts the engine again
-                        std::fprintf(stderr, "strata serve: session restore %s: transfer failed: %s\n", path.c_str(),
-                                     err.c_str());
+                    bool touched = false;
+                    auto sink = [&](size_t layer, size_t part, uint64_t offset, const void* data, size_t n) {
+                        // belt-and-braces: the apply pass is bound to the read pass (file_kv), so this layer index
+                        // is always one of the validated targets; refuse rather than index out of range if that
+                        // ever breaks
+                        if (layer >= targets.size()) {
+                            err = "session file: K/V layer outside the validated set";
+                            return false;
+                        }
+                        touched = true;
+                        return targets[layer].apply(part, offset, data, n, err);
+                    };
+                    strata::core::SessionStatus st2;
+                    if (!strata::core::session_file_apply_streamed(path, id, sink, file_kv, err, &st2)) {
+                        if (!touched) {
+                            // the file changed or failed before the first block: the session is as it was
+                            live_ok = true;
+                            refuse(err, st2.error);
+                            continue;
+                        }
+                        // some of the K/V is written: never decode from a partial state; the server starts again
+                        std::fprintf(stderr, "strata serve: session restore %s: transfer failed: %s\n", path.c_str(), err.c_str());
+                        std::printf("FATAL restoring the session file failed after the device state was changed: %s\n", err.c_str());
+                        std::fflush(stdout);
+                        return 1;
+                    }
+                    for (auto& t : targets)
+                        if (!t.finish(err)) {
+                            std::fprintf(stderr, "strata serve: session restore %s: residency refill failed: %s\n",
+                                         path.c_str(), err.c_str());
+                            std::printf("FATAL restoring the session file failed after the device state was changed: %s\n",
+                                        err.c_str());
+                            std::fflush(stdout);
+                            return 1;
+                        }
+                    if (!strata::core::conversation_checkpoint_restore(image.live, ss, g, err)) {
+                        std::fprintf(stderr, "strata serve: session restore %s: running-state restore failed: %s\n",
+                                     path.c_str(), err.c_str());
                         std::printf("FATAL restoring the session file failed after the device state was changed: %s\n",
                                     err.c_str());
                         std::fflush(stdout);
@@ -13788,6 +13904,7 @@ int main(int argc, char** argv) {
             // in prompt order.  With them the conversation cache matches a picture by its key and grid, not by its
             // embedding floats, so a picture encoded again with other bits still matches.  Absent: the embeddings' hash.
             std::vector<uint64_t> req_img_keys;
+            strata::program::NativeTraceId req_trace_id;
             bool req_pcie_set = false;   // the request names its own share (the measured one holds meanwhile)
             if (endp != nullptr) {   // GENI takes the same keys (#75: image requests were always greedy); its
                                      // embedding file path is the first token without an =
@@ -13827,7 +13944,9 @@ int main(int argc, char** argv) {
                     else if (key == "penalty_freq") req_penalty_freq = fv;
                     else if (key == "penalty_present") req_penalty_present = fv;
                     else if (key == "seed") req_seed = std::strtoull(tok.c_str() + eq + 1, nullptr, 10);
-                    else if (key == "pcie_frac") { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
+                    else if (key == "pcie_frac") {   // ignored under --pcie-frac 0 (pcie_off: the graph has no PCIe branch)
+                        if (!strata::core::pcie_off()) { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
+                    }
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
                     else if (key == "pipe") req_pipe = std::max(0.0, (double) fv);
                     else if (key == "aux_cpus") req_aux_cpus = std::atoi(tok.c_str() + eq + 1) != 0 ? 1 : 0;
@@ -13843,7 +13962,22 @@ int main(int argc, char** argv) {
                             if (*qe != ',' && *qe != '\0') { req_img_keys.clear(); break; }
                         }
                     }
+                    else if (key == "trace_id") {
+                        req_trace_id.add(tok.substr(eq + 1));
+                    }
                     // unknown keys are skipped: the ids start at the first token without '='
+                }
+            }
+            if (correctness_trace) {
+                const auto trace_error = req_trace_id.validate(true);
+                bool duplicate = false;
+                for (const BSlot& slot : bs)
+                    duplicate = duplicate || (slot.active && slot.trace_id == req_trace_id.value());
+                if (trace_error != strata::program::NativeTraceId::Error::none || duplicate) {
+                    const char* why = duplicate ? "duplicate" : strata::program::NativeTraceId::error_text(trace_error);
+                    std::printf("ERR %s correctness trace request ID\n", why);
+                    std::fflush(stdout);
+                    continue;
                 }
             }
             strata::prefill::Prefill::set_pipe_request(req_pipe);   // every request sets it: none carries over
@@ -15584,6 +15718,29 @@ int main(int argc, char** argv) {
                         if (ids[(size_t) i + 1] == o.tail_role_token) turn_at = i;
                         break;
                     }
+            // --tail-reminder-ids (opt-in): the same for a client's per-request reminder turn, which is a user turn and
+            // so cannot be told from a real one by its role.  It is short, and its text opens with the given tokens
+            // right after "<|im_start|>role\n"; the turns before it are the conversation.  Repeated while the turn
+            // before is one too.
+            if (turn_at > 0 && !o.tail_reminder_ids.empty()) {
+                const int64_t k = (int64_t) o.tail_reminder_ids.size();
+                constexpr int64_t kReminderMaxTokens = 4096;
+                for (;;) {
+                    int64_t prev = -1;
+                    for (int64_t i = turn_at - 1; i > resume && turn_at - i <= kReminderMaxTokens; --i)
+                        if (ids[(size_t) i] == o.turn_token) { prev = i; break; }
+                    if (prev < 0) break;
+                    bool hit = false;
+                    for (int64_t j = prev + 1; j + k <= turn_at && j <= prev + 4 && !hit; ++j) {   // role, newline
+                        hit = true;
+                        for (int64_t m = 0; m < k && hit; ++m) hit = ids[(size_t) (j + m)] == o.tail_reminder_ids[(size_t) m];
+                    }
+                    if (!hit) break;
+                    std::fprintf(stderr, "strata serve: tail reminder turn of %lld tokens left out of the checkpoint\n",
+                                 (long long) (turn_at - prev));
+                    turn_at = prev;
+                }
+            }
             // A prompt read from token 0 also stops at its FIRST turn boundary: the end of the system prompt (with
             // the tools), which every new chat of the same client shares.  That checkpoint becomes the chain's root,
             // which the retention policy pins (conv_cache.hpp), so the next new chat reads only what comes after it.
@@ -15786,6 +15943,7 @@ int main(int argc, char** argv) {
             strata::core::gated::Packet proposal; // immutable through the synchronous verifier call
             bool first_window = true;
             int64_t produced_n = 0, sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
+            int64_t trace_window_index = 0;
             int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts
             int64_t t2_rej[8] = {}, t2_hit[8] = {};   // STRATA_MTP_TOP2: rejections inside the MTP drafts by depth, runner-up hits
             int64_t dp_tested[8] = {}, dp_ok[8] = {};   // STRATA_SPEC_DEPTH=1: MTP drafts tested / accepted by depth
@@ -16767,6 +16925,11 @@ int main(int argc, char** argv) {
                     std::printf("ERR %s\n", err.c_str());
                     return 1;
                 }
+                if (correctness_window_trace && !ver.wait_commit(err)) {
+                    if (adapt_thr.joinable()) adapt_thr.join();
+                    std::printf("ERR %s\n", err.c_str());
+                    return 1;
+                }
                 if (nonfinite_hit(ver, first_window ? "first decode" : "decode")) {   // #879: none of its tokens goes out
                     if (adapt_thr.joinable()) adapt_thr.join();
                     if (!adapt_ok) {
@@ -16791,7 +16954,10 @@ int main(int argc, char** argv) {
                 const bool initial_round = first_window;   // a single-row window: no proposal to learn from
                 first_window = false;
                 bool eos = false;
+                std::vector<int32_t> trace_token_ids;
+                if (correctness_window_trace) trace_token_ids.reserve((size_t) (a + 1));
                 for (int i = merged ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {   // (merged: row T-1 only)
+                    if (correctness_window_trace) trace_token_ids.push_back(outv[(size_t) i]);
                     std::printf("T %d\n", (int) outv[(size_t) i]);
                     if (req_logprobs >= 0) emit_lp_line(ver, i, outv[(size_t) i], req_logprobs, req_allowed);
                     strata::core::progress_beat();
@@ -16801,6 +16967,21 @@ int main(int argc, char** argv) {
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
                 std::fflush(stdout);
+                if (correctness_window_trace) {
+                    // Suffix lookup replaces MTP; chained tokens beyond T_mtp are not MTP decisions.  A merged
+                    // window's rows are prompt tokens, so it offers no drafts.
+                    const int64_t mtp_offered = use_mtp && !from_sfx && !merged ? T_mtp - 1 : 0;
+                    const int64_t mtp_accepted = std::min<int64_t>(a, mtp_offered);
+                    const std::string record = strata::program::serial_window_record(
+                        req_trace_id.value(), trace_window_index++, trace_token_ids,
+                        mtp_accepted, mtp_offered);
+                    if (record.empty()) {
+                        std::fprintf(stderr, "strata serve: invalid serial correctness trace window\n");
+                        return 1;
+                    }
+                    std::fprintf(stderr, "%s\n", record.c_str());
+                    std::fflush(stderr);
+                }
                 ++rounds;
                 if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
                 const Clock::time_point tw2 = Clock::now();
@@ -17100,6 +17281,9 @@ int main(int argc, char** argv) {
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                         (long long) req_offload, chain_txt, (long long) req_chunk,
                         (long long) (sp.chain_experts_streamed() - streamed0));
+            if (correctness_trace && admit_slot < 0)
+                std::fprintf(stderr, "strata correctness: request=%s slot=-1 state=native_leg_complete finish=%s produced=%lld\n",
+                             req_trace_id.value().c_str(), finish, (long long) produced_n);
             std::fflush(stdout);
             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
@@ -17124,6 +17308,7 @@ int main(int argc, char** argv) {
                     sl.p = p;
                     sl.produced = 1;
                     sl.max_new = admit_max_new;
+                    sl.trace_id = req_trace_id.value();
                     sl.t0 = Clock::now();
                     sl.ids = live;
                     if (batch_mtp) {
@@ -17196,6 +17381,9 @@ int main(int argc, char** argv) {
                     }
                 }
                 std::printf("BADM %d %d\n", admit_slot, cont ? 1 : 0);
+                if (correctness_trace && !cont)
+                    std::fprintf(stderr, "strata correctness: request=%s slot=%d state=native_leg_complete finish=%s produced=%lld\n",
+                                 req_trace_id.value().c_str(), admit_slot, finish, (long long) produced_n);
                 if (trace && piped && cont) {
                     rows_wait = "the admission";
                     rows_wait_t = Clock::now();

@@ -146,11 +146,17 @@ struct SessionWriteOptions {
     // write starts.  Not a reservation: other writers can take the space afterwards.
     uint64_t min_free_bytes = 0;
     bool durable = true;            // flush the file before the rename and (POSIX) the folder after it
-    SessionProgress progress;
+    SessionProgress progress;      // called on the caller's thread; during a pipelined write a report follows real
+                                   // movement and may lag the bytes already handed off by at most the blocks in flight
     // "flush" (the file's flush, `bytes` = the file) and "publish" (rename and folder flush), before each starts
     SessionPhase phase;
-    // tests: return an errno value to make a step fail ("write", "file_flush", "rename", "dir_flush"), 0 to go on
+    // tests: return an errno value to make a step fail ("write", "file_flush", "writer_thread", "rename",
+    // "dir_flush"), 0 to go on; "writer_thread" forces the synchronous draining fallback
     std::function<int(const char* step)> fault;
+    // tests only: one call per FULL block written to the OS by the write path; `byte_end` is the file bytes
+    // written so far and (begin_ns, end_ns) are steady_clock nanoseconds bracketing the block's write_all.
+    // Called on the writer thread - or the caller's thread when the writer could not start.
+    std::function<void(uint64_t byte_end, uint64_t begin_ns, uint64_t end_ns)> block_span;
 };
 
 // Writes a temporary file beside `path` (a unique hidden name, created exclusively: never an existing file or link;
@@ -220,6 +226,8 @@ struct SessionReadLimits {
     std::vector<std::array<uint64_t, 5>> max_kv_bytes;
     // the RAM PREFLIGHT: asked once the header and identity match and before any payload allocation, with what the
     // parse holds at its peak (session_read_peak_bytes); false refuses the file.  Not a reservation.
+    // The streaming read asks again as its metadata grows: the blocks, then the blocks plus each array the file
+    // declares, priced before that array is allocated (the last answer covers the whole parse).
     std::function<bool(uint64_t need_bytes, std::string& why)> admit;
     SessionProgress progress;
 };
@@ -234,6 +242,35 @@ uint64_t session_read_peak_bytes(uint64_t file_bytes);
 bool session_file_read(const std::string& path, const SessionFileIdentity& id, SavedConversation& image,
                        size_t& bytes, std::string& error, const SessionReadLimits& limits = {},
                        SessionStatus* status = nullptr);
+
+// ---- Streaming reads: a session whose K/V does not fit in RAM.  Two passes over one file, format v1 unchanged.
+//
+// `session_file_read_streamed` reads and validates the whole file once, without materializing the K/V: `meta` gets
+// the running state and the K/V headers (its K/V buffers stay empty), the whole payload hash is checked, and when
+// `kv_part_bytes` is given it receives each K/V layer's five part sizes exactly as this pass parsed and hashed them.
+// The caller validates `meta` against its runtime, then calls `session_file_apply_streamed`, which reads the file
+// again and hands every K/V block - at most 16 MiB, in order - to `sink`.  The apply pass is bound to the read pass
+// by `kv_part_bytes`: it refuses a file whose layer count or any part size differs BEFORE applying that part, so
+// only the bytes the read pass admitted can reach the caller's state.  It also recomputes the payload hash and
+// compares it to the file's trailer.  The first applied block is the gate: everything before it can still be
+// refused cleanly, a divergence found after it (a same-size edit, or a torn re-read) ends the caller - the caller
+// must not go on.  An atomic replacement that is itself self-consistent and keeps the same sizes is NOT detected:
+// the file must have no writer but this engine.  Peak RAM: two 16 MiB buffers and `meta`.
+//
+// `layer` counts as the save wrote them (main layers, then the draft); `part` 0..4 is k, v, k_scale, v_scale,
+// pooled; `offset` is within the part.
+using SessionKvBlock = std::function<bool(size_t layer, size_t part, uint64_t offset, const void* data, size_t n)>;
+bool session_file_read_streamed(const std::string& path, const SessionFileIdentity& id, SavedConversation& meta,
+                                size_t& bytes, std::string& error, const SessionReadLimits& limits = {},
+                                std::vector<std::array<uint64_t, 5>>* kv_part_bytes = nullptr,
+                                SessionStatus* status = nullptr);
+bool session_file_apply_streamed(const std::string& path, const SessionFileIdentity& id, const SessionKvBlock& sink,
+                                 const std::vector<std::array<uint64_t, 5>>& kv_part_bytes, std::string& error,
+                                 SessionStatus* status = nullptr);
+// The WORST CASE of the streaming read of a `file_bytes` file: the two block buffers, the small vectors and the
+// running-state metadata the limits admit; the K/V itself stays on disk.  The read itself no longer asks for this -
+// it prices the metadata the file declares, which is a fraction of it - so this is an upper bound on what it asks.
+uint64_t session_read_stream_peak_bytes(uint64_t file_bytes, const SessionReadLimits& limits);
 
 // The folder the free-space preflight asks about for `path`, by the rules of Windows or of POSIX (exposed so both can
 // be tested anywhere).  Windows: backslashes and a trailing backslash, as GetDiskFreeSpaceExW requires for a UNC

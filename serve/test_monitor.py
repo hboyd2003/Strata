@@ -261,5 +261,129 @@ class ConversationCacheCard(unittest.TestCase):
             self.assertIn(f'"{el}"', js)
 
 
+
+class RequestAsChat(unittest.TestCase):
+    """#332 "view as chat": with the API request monitor on, a request's messages (compact) and its reply are kept
+    with its record, and the Monitor's request rows say which record that is."""
+
+    def test_transcript(self):
+        from serve.server import transcript_of, TRANSCRIPT_TEXT_MAX
+        msgs = [{"role": "system", "content": "Be brief."},
+                {"role": "user", "content": [{"type": "text", "text": "What is "}, {"type": "image", "source": {}},
+                                             {"type": "text", "text": "this?"}]},
+                {"role": "assistant", "content": "", "reasoning_content": "Look.",
+                 "tool_calls": [{"function": {"name": "read", "arguments": {"path": "a.txt"}}}]},
+                {"role": "tool", "content": "x" * (TRANSCRIPT_TEXT_MAX + 10)}]
+        t = transcript_of(msgs)
+        self.assertEqual(t["omitted"], 0)
+        user, call, result = t["messages"][1], t["messages"][2], t["messages"][3]
+        self.assertEqual((user["text"], user["images"]), ("What is this?", 1))
+        self.assertEqual((call["reasoning"], call["tool_calls"]), ("Look.", [{"name": "read", "arguments": {"path": "a.txt"}}]))
+        self.assertIn("10 more characters not kept", result["text"])
+        # the next turn of the same conversation shares the messages that did not change
+        later = transcript_of(msgs + [{"role": "assistant", "content": "Done."}], [t["messages"]])
+        self.assertTrue(all(a is b for a, b in zip(later["messages"], t["messages"])))
+        self.assertEqual(later["messages"][-1]["text"], "Done.")
+        # past TRANSCRIPT_MAX characters the oldest messages are left out; the newest one always stays
+        with mock.patch("serve.server.TRANSCRIPT_MAX", 30):
+            t = transcript_of([{"role": "user", "content": "a" * 20}, {"role": "assistant", "content": "b" * 20},
+                               {"role": "user", "content": "c" * 40}])
+        self.assertEqual((t["omitted"], [m["text"][0] for m in t["messages"]]), (2, ["c"]))
+
+    def test_request_rows_link_their_messages(self):
+        tok = ByteTokenizer()
+        engine = MockEngine(tok, "Thought.</think>\nHello.", max_context=4096)
+        svc = Service(engine, tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        def chat(stream):
+            req = urllib.request.Request(base + "/v1/chat/completions", headers={"Content-Type": "application/json"},
+                                         data=json.dumps({"messages": [{"role": "system", "content": "Be brief."},
+                                                                       {"role": "user", "content": "hi"}],
+                                                          "stream": stream}).encode())
+            with urllib.request.urlopen(req, timeout=10) as r:
+                r.read()
+            with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
+                return json.loads(r.read())
+        try:
+            m = chat(False)                              # the monitor is off: nothing is kept
+            self.assertFalse(m["transcripts"])
+            self.assertIsNone(m["requests"][0]["record_id"])
+            svc.api_monitor = True
+            for stream in (False, True):
+                m = chat(stream)
+                self.assertTrue(m["transcripts"])
+                rid = m["requests"][0]["record_id"]
+                with urllib.request.urlopen(f"{base}/api/requests?id={rid}", timeout=10) as r:
+                    rec = json.loads(r.read())
+                self.assertEqual([(x["role"], x["text"]) for x in rec["transcript"]["messages"]],
+                                 [("system", "Be brief."), ("user", "hi")])
+                self.assertEqual((rec["reply"]["reasoning"].strip(), rec["reply"]["content"].strip()),
+                                 ("Thought.", "Hello."))
+                self.assertEqual(rec["params"], {})
+            with urllib.request.urlopen(base + "/api/requests", timeout=10) as r:   # the list stays light
+                self.assertNotIn("transcript", json.loads(r.read())["requests"][0])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_the_button_is_on_the_page(self):
+        web = Path(__file__).parent / "web"
+        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
+        for el in ("rv", "rv-title", "rv-chat", "rv-side", "rv-close"):
+            self.assertIn(f'id="{el}"', html)
+        self.assertIn("viewButton(r)", js)
+        self.assertIn("req-view", js)
+        self.assertIn("api/requests?id=", js)
+        self.assertIn('id="i-close"', (web / "sprite.svg").read_text(encoding="utf-8"))
+
+    def test_request_params(self):
+        from serve.server import request_params
+        p = request_params({"messages": [], "temperature": 0.7, "stream": True, "max_tokens": 512,
+                            "thinking": {"type": "enabled", "budget_tokens": 4000}, "output_config": {"effort": "high"},
+                            "tools": [{"type": "function", "function": {"name": "read"}}, {"name": "bash"}],
+                            "tool_choice": {"type": "function", "function": {"name": "read"}}})
+        self.assertEqual(p, {"temperature": 0.7, "max_tokens": 512, "thinking": "enabled", "thinking_budget": 4000,
+                             "effort": "high", "tool_choice": "read", "tools": 2, "tool_names": ["read", "bash"]})
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoSessionsCard(unittest.TestCase):
+    """/metrics' "auto_sessions": the limits, the conversation the engine holds, the auto-*.bin files on disk (not
+    the ones saved by hand) and what the switches did."""
+
+    def test_metrics(self):
+        import tempfile
+        tok = ByteTokenizer()
+        engine = MockEngine(tok, "Thought.</think>\nHello.", max_context=4096)
+        svc = Service(engine, tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        self.assertFalse(svc.auto_sessions_view()["enabled"])
+        self.assertIsNone(svc.auto_sessions_view()["files"])
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "auto-aaaa.bin").write_bytes(b"x" * 100)
+            (Path(d) / "by-hand.bin").write_bytes(b"x" * 1000)
+            svc.slot_save_path, svc.auto_sessions = d, True
+            svc.auto_conv = {"key": "aaaa", "tokens": 20000}
+            svc._auto_session_note("restored", {"tokens": 20000, "ms": 140.0})
+            httpd = serve(svc, port=0)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/metrics", timeout=10) as r:
+                    a = json.loads(r.read())["auto_sessions"]
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+        self.assertEqual((a["enabled"], a["files"], a["files_bytes"], a["keep"], a["min_tokens"]),
+                         (True, 1, 100, 12, 16000))
+        self.assertEqual((a["held_tokens"], a["held_on_disk"]), (20000, True))
+        self.assertEqual((a["restores"], a["saves"], a["last_event"], a["last_tokens"]), (1, 0, "restored", 20000))
+
+    def test_the_card_is_on_the_page(self):
+        web = Path(__file__).parent / "web"
+        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
+        for el in ("as-card", "as-files-text", "as-disk-text", "as-facts", "as-note"):
+            self.assertIn(f'id="{el}"', html)
+        self.assertIn("renderAutoSessions(m.auto_sessions)", js)
+        self.assertLess(html.index('id="cc-card"'), html.index('id="as-card"'))   # under the Conversation cache

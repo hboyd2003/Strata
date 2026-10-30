@@ -429,7 +429,8 @@ print(r.choices[0].message.content)
   token and request counters, `vllm:prefix_cache_queries_total` and `_hits_total`, `vllm:spec_decode_num_draft_tokens_total`
   and `_accepted_tokens_total`, and the time-to-first-token, inter-token and end-to-end histograms), so dashboards written
   for vLLM read this server. Strata's own facts come under `strata:` and are named after their JSON key (for example
-  `strata:live_tok_s`, `strata:last_hit_rate`, `strata:gpu_util`, `strata:ram_used_bytes`). A value the server does not have
+  `strata:live_tok_s`, `strata:last_hit_rate`, `strata:gpu_util`, `strata:ram_used_bytes`). On an AMD card
+  `strata:gpu_temp_celsius` (and the Monitor's temperature) is the hwmon probe `"gpu_temp_sensor"` names. A value the server does not have
   has no sample. With an API key, the scraper sends it as a bearer token. Ready-made files are in `docs/monitoring/`:
   `prometheus.yml`, `servicemonitor.yaml` and `grafana-strata.json`.
 - **Metadata.** `/models` and `/v1/models` list only the loaded model, with its context limit and input modalities. `/props` exposes
@@ -458,7 +459,7 @@ trained with, not a hard token limit.
 
 All are optional. Setup rewrites the config when run again and keeps keys it does not manage. The About tab's Model settings
 card edits some of them (the sampling defaults, `reasoning_budget_tokens`, `fit_max_tokens`, `anthropic_thinking`,
-`effort_position`, `aliases`, `idle_unload_s`, `lazy_load`, `engine_silence_s`, `api_monitor`, `open_browser` and
+`effort_position`, `aliases`, `idle_unload_s`, `lazy_load`, `engine_silence_s`, `api_monitor`, `open_browser`, `gpu_temp_sensor` and
 `--vram-reserve-mib`). An empty field removes the key, the earlier file is kept as `strata-<model>.json.bak`, and the change
 applies at the next start. Network, key, MCP and program keys are not editable there.
 
@@ -482,6 +483,7 @@ applies at the next start. Network, key, MCP and program keys are not editable t
 | `engine_silence_s` | `300` | Ends the engine after this many seconds without a line during a request (`0` = wait forever). While a prompt is read, each chunk may take three times the previous one's time. |
 | `parallel` | `1` | Up to N requests decoded together in batch slots ([BATCHING.md](BATCHING.md)). |
 | `api_monitor` | off | Records requests for `/api-monitor`. |
+| `gpu_temp_sensor` | `"edge"` | The AMD card's temperature probe for the Monitor and `/metrics`: `"edge"`, `"junction"` (the hottest spot on the die, what the card throttles on) or `"mem"` (the VRAM). A card without that probe reads edge; NVIDIA and Metal ignore the key. Any other value stops the server at start. |
 | `lazy_load` | off | Start without loading the model. |
 | `slot_save_path` | none | Enables session files. |
 | `host`, `api_key`, `cors_origins`, `trusted_origins`, `allowed_hosts` | local only | See [Network access](#network-access). |
@@ -752,6 +754,11 @@ curl -X POST "http://127.0.0.1:8080/slots/0?action=restore" -H "Content-Type: ap
   rope configuration, a loaded control vector and the arithmetic switches). Sampling, seeds, draft tuning and the expert
   tier are not in it. Do not change model files while their sessions are kept. The hash detects accidental corruption and does
   not authenticate a file: restore only files this engine wrote.
+- A restore does not hold the K/V in RAM: a read pass validates the whole file (running state, K/V headers, every count,
+  the payload hash), then an apply pass reads it again and copies the K/V into the pools 16 MiB at a time, so a session
+  larger than RAM restores (peak: two 16 MiB buffers and the running-state metadata). The apply pass is bound to the read
+  pass; a mismatch before the first applied block is a clean refusal, after it the engine ends rather than decode from
+  bytes it cannot vouch for.
 - Errors: `501` without `--slot-save-path` or with parallel requests; `400` for a slot other than 0, an unknown action, a refused
   file name or an invalid file; `404` for a missing file; `503` when the model is not loaded or RAM is short; `507` when the disk has
   no room; `500` for other I/O failures or an engine that ended. `error.published: true` means a save failed after its new

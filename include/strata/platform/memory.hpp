@@ -60,6 +60,30 @@ inline bool file_cache_keeps(uint64_t avail, uint64_t arena_bytes, uint64_t read
     return room >= need;
 }
 
+/// #1752: the gfx906 file tier keeps the older full-read cache rule by default. Other builds use the measured Linux
+/// hot-read rule. STRATA_FILE_CACHE_OLD_RULE=1/0 overrides that default; pass the environment value here so the
+/// selection stays independently testable without a GPU runtime.
+constexpr bool file_cache_old_rule_default() {
+#if defined(STRATA_HIP_GFX906)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// Whether the old full-read rule is in force: the compile-time default unless the override is set (non-empty).
+inline bool file_cache_old_rule(const char* old_rule_override) {
+    if (old_rule_override != nullptr && old_rule_override[0] != '\0') return old_rule_override[0] != '0';
+    return file_cache_old_rule_default();
+}
+
+inline bool file_cache_keeps_for_tier(uint64_t avail, uint64_t arena_bytes, uint64_t read_bytes,
+                                      const char* old_rule_override) {
+    return file_cache_old_rule(old_rule_override)
+        ? file_cache_keeps(avail, arena_bytes, read_bytes)
+        : file_cache_keeps(avail, arena_bytes, read_bytes, 1ull << 30, 0.05, 3ull << 29);
+}
+
 /// #3237: with the room rule saying the file cache could keep the experts that come back, but holding only
 /// `held_fraction` (< 0.5) of the read set: whether the unbuffered reads win, from a start-up timing of the drive both
 /// ways (`direct_bps`: O_DIRECT preads on the I/O threads, `cached_bps`: first touches of a mapping's pages).
