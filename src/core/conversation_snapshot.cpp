@@ -576,13 +576,22 @@ bool conversation_kv_part_sizes(const QsaState& st, const ModelGeometry& g, int6
 }
 
 bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const ModelGeometry& g,
-                            int64_t upto, bool index, std::string& error) {
+                            int64_t upto, bool index, std::string& error, int64_t unchanged) {
     Layout l{};
     if (!layout(st, g, upto, index, l, error) || !valid(st, l, upto, error)) return false;
+    if (unchanged < 0 || unchanged > upto) { error = "conversation snapshot: invalid unchanged prefix"; return false; }
     SessionKvSource s;
     s.format = l.format; s.cells = l.cells; s.heads = g.n_head_kv; s.head_dim = g.head_dim;
     s.page_size = l.page_size; s.pooled_rows = l.pooled_rows; s.idx_dim = g.idx_key_dim;
     s.sizes = {l.data, l.value_data, l.scales, l.value_scales, l.pooled};
+    // the prefix conversation_kv_save keeps for `unchanged` tokens: whole pages, and the indexer's whole rows (its
+    // moving spare row is rewritten)
+    const int64_t whole_cells = l.page_size > 0 ? (unchanged / l.page_size) * l.page_size : 0;
+    for (size_t i = 0; i < 5; ++i) {
+        const size_t keep = i == 4 ? (index ? size_t(unchanged / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * 4 : 0)
+                                   : l.cells ? (s.sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
+        s.stable[i] = std::min(keep, s.sizes[i]);
+    }
     const auto src = pools(st);
     const auto sizes = s.sizes;
     auto why = std::make_shared<std::string>();
