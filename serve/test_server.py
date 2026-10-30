@@ -921,6 +921,28 @@ class EffortAtTheEnd(unittest.TestCase):
             with self.assertRaises(ValueError):
                 effort_end_args({"effort_position": "middle"}, str(new), Tok())
 
+    def test_the_qwen_code_tail_config(self):
+        from serve.server import reminder_tail_args
+
+        class Tok:
+            def encode(self, text, parse_special=False):
+                return [27, 8678, 12]
+
+        with tempfile.TemporaryDirectory() as d:
+            new, old = Path(d) / "new.exe", Path(d) / "old.exe"
+            new.write_bytes(b"...  --tail-reminder-ids A,B --serve: ...")
+            old.write_bytes(b"... --tail-role-token ID ...")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertIsNone(reminder_tail_args({}, str(new), Tok()))
+                self.assertIsNone(reminder_tail_args({"qwen_code_tail": False}, str(new), Tok()))
+                self.assertEqual(reminder_tail_args({"qwen_code_tail": True}, str(new), Tok()),
+                                 ["--tail-reminder-ids", "27,8678,12"])
+                self.assertIsNone(reminder_tail_args({"qwen_code_tail": True}, str(old), Tok()))
+            self.assertIn("needs an engine with --tail-reminder-ids", out.getvalue())
+            with self.assertRaises(ValueError):
+                reminder_tail_args({"qwen_code_tail": "yes"}, str(new), Tok())
+
 
 class StatusNeedsTheKey(unittest.TestCase):
     """#212: /status shows the end of the answer being written, so it needs the key like /v1/*."""
@@ -5127,6 +5149,23 @@ class AmdTelemetry(unittest.TestCase):
                 self.assertEqual(t.static["gpu_name"], "AMD Radeon AI PRO R9700 + AMD Radeon AI PRO R9700")
                 self.assertEqual((s["gpu_mem_used"], s["gpu_util"], s["gpu_temp"], s["gpu_power"]),
                                  (8 << 30, 68.0, 64.0, 205.0))
+    def test_temp_sensor(self):
+        """The config's "gpu_temp_sensor" picks the hwmon probe by its label; a card without it reads edge (temp1)."""
+        from serve import telemetry
+        with tempfile.TemporaryDirectory() as d:
+            self.tree(d)
+            hw = Path(d) / "class/drm/renderD129/device/hwmon/hwmon4"
+            for n, label, temp in ((1, "edge", 51000), (2, "junction", 73000), (3, "mem", 66000)):
+                (hw / f"temp{n}_label").write_text(label + "\n")
+                (hw / f"temp{n}_input").write_text(f"{temp}\n")
+            with mock.patch.object(telemetry, "SYSFS", d):
+                self.assertEqual(telemetry.gpu_reader(0, amd=True).read()["temp"], 51.0)
+                self.assertEqual(telemetry.gpu_reader(0, amd=True, temp_sensor="junction").read()["temp"], 73.0)
+                self.assertEqual(telemetry.gpu_reader(0, amd=True, temp_sensor="mem").read()["temp"], 66.0)
+                self.assertEqual(telemetry.gpu_reader(1, amd=True, temp_sensor="junction").read()["temp"], 64.0)
+                t = telemetry.Telemetry(gpu_index=0, amd=True, temp_sensor="junction")
+                self.assertEqual(t.sample()["gpu_temp"], 73.0)
+
         with tempfile.TemporaryDirectory() as d:                    # no amdgpu: nothing, and nothing breaks
             with mock.patch.object(telemetry, "SYSFS", d):
                 self.assertFalse(telemetry.gpu_reader(0, amd=True).ok())
@@ -5203,7 +5242,7 @@ class MacTelemetry(unittest.TestCase):
         from serve import telemetry
         t = telemetry.Telemetry(extra=lambda: {"tok_s": 1.0})
         try:
-            with mock.patch.object(telemetry, "gpu_reader", lambda index=0, amd=False: self._reader()):
+            with mock.patch.object(telemetry, "gpu_reader", lambda index=0, amd=False, temp_sensor="edge": self._reader()):
                 t2 = telemetry.Telemetry(extra=lambda: {"tok_s": 1.0})
                 try:
                     self.assertEqual(t2.static["gpu_name"], "Apple M1 Max")

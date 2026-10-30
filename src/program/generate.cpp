@@ -841,6 +841,12 @@ struct Options {
     /// the checkpoint goes in front of that turn instead, so it holds the conversation and not the effort text.
     /// -1 = off (the checkpoint at the last <|im_start|>, as before).
     int64_t tail_role_token = -1;
+    /// --serve (opt-in): the token ids a per-request reminder turn opens with (Qwen Code's `<system-reminder>`
+    /// memory catalog, a separate short user turn the client appends to every request and drops from its history).
+    /// When the turn before the last <|im_start|> holds these tokens right after its role header, the checkpoint
+    /// goes in front of that turn, so the next request - which renders the history without it - finds the whole
+    /// conversation.  Empty = off.
+    std::vector<int64_t> tail_reminder_ids;
     /// --serve: a text part of the prompt of at most N tokens (a chat message, the assistant header, a short tool
     /// result) goes through the verify windows, S tokens at a time, instead of the batched prompt path (0 = always
     /// the batched path)
@@ -1010,6 +1016,9 @@ void usage() {
                  "  --turn-token ID      --serve: the token that opens a chat turn (default 248045, <|im_start|>)\n"
                  "  --tail-role-token ID --serve: a turn of this role right before the last turn is left out of\n"
                  "                       the conversation checkpoint (a trailing effort turn; default -1 = off)\n"
+                 "  --tail-reminder-ids A,B,.. --serve: a short turn right before the last turn that opens with these\n"
+                 "                       token ids (a per-request <system-reminder> the client does not keep in its\n"
+                 "                       history) is left out of the conversation checkpoint (default: off)\n"
                  "  --short-read N       --serve: read at most N fresh text tokens through the decode windows instead\n"
                  "                       of the batched prompt path (default 64, 0 = off)\n"
                  "  --prefill-head-alias --serve: unload the native output head while each fresh prompt is read,\n"
@@ -2898,6 +2907,14 @@ int main(int argc, char** argv) {
     if (std::getenv("STRATA_ARENA_MMAP") && std::getenv("STRATA_ARENA_MMAP")[0] == '1')
         setenv("GPU_PINNED_MIN_XFER_SIZE", "1000000", 0);   // MiB; an explicit setting wins
 #endif
+#if defined(STRATA_HIP_GFX906) && !defined(_WIN32)
+    // gfx906: the prompt path measured on MI50 (GFX906.md) is on by default; =0 turns each part off
+    setenv("STRATA_PF_RP", "1", 0);            // MoE expert products through the repacked GEMM
+    setenv("STRATA_DENSE_MMQ", "1", 0);        // dense projections through int8 MMQ (K/V stay FP16)
+    setenv("STRATA_MMQ_KQ", "1", 0);           // the K-quant MMQ kernels for the dense Q5_K / Q6_K weights
+    setenv("STRATA_DENSE_RP", "1", 0);         // dense products through the repacked GEMM where it has the type
+    setenv("STRATA_HIP_PROMPT_F16", "1", 0);   // the prompt's 16-bit GEMMs in FP16
+#endif
     // Load every CUDA kernel when the context is created, before the expert cache takes the free VRAM.  With the
     // default lazy loading, a kernel first used mid-prompt (MMQ for IQ3_XXS at 64K+ on a 12 GB card) found no VRAM
     // left for its code and the engine ended ("out of memory: cudaFuncSetAttribute").  Costs ~30 MB of VRAM.
@@ -3211,6 +3228,16 @@ int main(int argc, char** argv) {
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
         else if (a == "--turn-token") o.turn_token = std::atoll(next("--turn-token"));
         else if (a == "--tail-role-token") o.tail_role_token = std::atoll(next("--tail-role-token"));
+        else if (a == "--tail-reminder-ids") {
+            const std::string v = next("--tail-reminder-ids");
+            o.tail_reminder_ids.clear();
+            for (size_t b = 0; b < v.size();) {
+                size_t e = v.find(',', b);
+                if (e == std::string::npos) e = v.size();
+                if (e > b) o.tail_reminder_ids.push_back(std::atoll(v.substr(b, e - b).c_str()));
+                b = e + 1;
+            }
+        }
         else if (a == "--short-read") o.short_read = std::max(0LL, std::atoll(next("--short-read")));
         else if (a == "--prefill-head-alias") o.prefill_head_alias = true;
         else if (a == "--pipeline-windows") o.pipeline_windows = std::max(0, std::min(2, std::atoi(next("--pipeline-windows"))));
@@ -3592,6 +3619,12 @@ int main(int argc, char** argv) {
     }
     const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
                                o.expert_cache_remote[2] > 0;
+    // --pcie-frac 0 given on one GPU: no expert is ever staged over PCIe (a request's own pcie_frac is ignored), so the
+    // verify graph leaves its PCIe branch out (strata::core::pcie_off).  The auto share and the multi-GPU paths keep it.
+    if (pcie_given && o.pcie_frac == 0.0 && o.layer_split.empty() && o.peer_device < 0 && !remote_caches) {
+        strata::core::set_pcie_off(true);
+        std::fprintf(stderr, "strata generate: --pcie-frac 0: no PCIe staging; the verify graph has no PCIe branch\n");
+    }
     // A layer split keeps the resident RAM mode: every stage's GPU cache is left out of the RAM copy, and an adaptive
     // swap copies an evicted expert back from the card that owns its layer (resident_stage_swaps).
     // The helper-GPU caches are allowed beside the resident RAM mode too: their experts are left out of the RAM copy
@@ -13611,7 +13644,8 @@ int main(int argc, char** argv) {
                         // RAM PREFLIGHT for the save (not a reservation), BEFORE anything is copied: the deepest
                         // checkpoint is chosen by reference, and the copies it will take (the list below and the one
                         // in `meta`), the copied live running state with its tokens and images, the K/V source
-                        // directory and the 16 MiB write buffer are asked for above the parking floor.  Only the
+                        // directory and the two 16 MiB write buffers (the pipelined FileSink) are asked for above
+                        // the parking floor.  Only the
                         // deepest checkpoint goes to disk (the next turn's resume point); the K/V is streamed from
                         // the authoritative pools straight into the file, without a full host capture.
                         strata::core::SessionSaveLive sl;
@@ -13692,7 +13726,12 @@ int main(int argc, char** argv) {
                                  path.c_str(), ms(), capture_ms);
                     std::printf("SAVED %zu %zu %.1f\n", live.size(), bytes, ms());
                 } else {
-                    strata::core::SavedConversation image;
+                    // Streaming restore: the read pass parses and checks the whole file without materializing the
+                    // K/V (it stays on disk), the metadata is validated against this engine, then the apply pass
+                    // reads the file again and copies every K/V block into its authoritative pool.  Peak RAM is two
+                    // 16 MiB blocks and the running state - not the snapshot.
+                    strata::core::SavedConversation image;   // running state + K/V headers; the K/V buffers stay empty
+                    std::vector<std::array<uint64_t, 5>> file_kv;   // the K/V sizes exactly as the read pass parsed them
                     size_t bytes = 0;
                     try {
                         // bounds this session can ever restore (geometry, layer range, tokens, checkpoints, every
@@ -13717,7 +13756,7 @@ int main(int argc, char** argv) {
                             continue;
                         }
                         strata::core::SessionStatus st;
-                        if (!strata::core::session_file_read(path, id, image, bytes, err, limits, &st)) {
+                        if (!strata::core::session_file_read_streamed(path, id, image, bytes, err, limits, &file_kv, &st)) {
                             refuse(err, st.error);
                             continue;
                         }
@@ -13726,27 +13765,73 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     const double read_ms = ms();
-                    // the whole image against this engine, still without any device write
+                    // the whole running state against this engine, still without any device write; a K/V layer of
+                    // another geometry or extent is refused here, by its header
                     blocking("validate", bytes);
-                    if (!strata::core::conversation_snapshot_validate(image, ss, g, mtp.kv_state(), err)) {
+                    if (!strata::core::conversation_snapshot_validate_meta(image, ss, g, mtp.kv_state(), err)) {
                         refuse(err);
                         continue;
                     }
                     // the elastic K/V (--kv-grow) maps only the cells it has grown to: make room for the file's cells
                     if (!kvg_ensure((int64_t) image.live.ids.size() + 256, adapt_quiesce)) {
-                        refuse("the K/V cannot grow to the saved conversation: no VRAM is left", strata::core::SessionError::memory);
+                        refuse("the K/V cannot grow to the saved conversation: no VRAM is left",
+                               strata::core::SessionError::memory);
+                        continue;
+                    }
+                    // bind every layer's authoritative pool (validated above; this cannot fail for a good image)
+                    std::vector<strata::core::ConversationKvTarget> targets;
+                    if (!strata::core::conversation_kv_targets(image, ss, g, mtp.kv_state(), targets, err)) {
+                        refuse(err);
+                        continue;
+                    }
+                    if (cudaDeviceSynchronize() != cudaSuccess) {
+                        refuse("the device did not go quiet before the restore", strata::core::SessionError::io);
                         continue;
                     }
                     conversations.take_reuse();   // retained K/V described the outgoing session
                     live_ok = false;
-                    // host -> device in synchronous copies of the whole state: one bounded allowance
+                    // disk -> host pool in blocks of at most 16 MiB: one bounded allowance; the apply pass is bound
+                    // to the K/V sizes the read pass validated and fail-stops once it has written the first block,
+                    // while a clean refusal sets the live session back
                     blocking("transfer", bytes);
-                    if (strata::core::conversation_snapshot_restore(image, ss, g, mtp.kv_state(), err) !=
-                        strata::core::ConversationRestore::restored) {
-                        // validated above: a failure here is a transfer failure, after device writes began - never
-                        // decode from a partial state; the server starts the engine again
-                        std::fprintf(stderr, "strata serve: session restore %s: transfer failed: %s\n", path.c_str(),
-                                     err.c_str());
+                    bool touched = false;
+                    auto sink = [&](size_t layer, size_t part, uint64_t offset, const void* data, size_t n) {
+                        // belt-and-braces: the apply pass is bound to the read pass (file_kv), so this layer index
+                        // is always one of the validated targets; refuse rather than index out of range if that
+                        // ever breaks
+                        if (layer >= targets.size()) {
+                            err = "session file: K/V layer outside the validated set";
+                            return false;
+                        }
+                        touched = true;
+                        return targets[layer].apply(part, offset, data, n, err);
+                    };
+                    strata::core::SessionStatus st2;
+                    if (!strata::core::session_file_apply_streamed(path, id, sink, file_kv, err, &st2)) {
+                        if (!touched) {
+                            // the file changed or failed before the first block: the session is as it was
+                            live_ok = true;
+                            refuse(err, st2.error);
+                            continue;
+                        }
+                        // some of the K/V is written: never decode from a partial state; the server starts again
+                        std::fprintf(stderr, "strata serve: session restore %s: transfer failed: %s\n", path.c_str(), err.c_str());
+                        std::printf("FATAL restoring the session file failed after the device state was changed: %s\n", err.c_str());
+                        std::fflush(stdout);
+                        return 1;
+                    }
+                    for (auto& t : targets)
+                        if (!t.finish(err)) {
+                            std::fprintf(stderr, "strata serve: session restore %s: residency refill failed: %s\n",
+                                         path.c_str(), err.c_str());
+                            std::printf("FATAL restoring the session file failed after the device state was changed: %s\n",
+                                        err.c_str());
+                            std::fflush(stdout);
+                            return 1;
+                        }
+                    if (!strata::core::conversation_checkpoint_restore(image.live, ss, g, err)) {
+                        std::fprintf(stderr, "strata serve: session restore %s: running-state restore failed: %s\n",
+                                     path.c_str(), err.c_str());
                         std::printf("FATAL restoring the session file failed after the device state was changed: %s\n",
                                     err.c_str());
                         std::fflush(stdout);
@@ -13859,7 +13944,9 @@ int main(int argc, char** argv) {
                     else if (key == "penalty_freq") req_penalty_freq = fv;
                     else if (key == "penalty_present") req_penalty_present = fv;
                     else if (key == "seed") req_seed = std::strtoull(tok.c_str() + eq + 1, nullptr, 10);
-                    else if (key == "pcie_frac") { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
+                    else if (key == "pcie_frac") {   // ignored under --pcie-frac 0 (pcie_off: the graph has no PCIe branch)
+                        if (!strata::core::pcie_off()) { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
+                    }
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
                     else if (key == "pipe") req_pipe = std::max(0.0, (double) fv);
                     else if (key == "aux_cpus") req_aux_cpus = std::atoi(tok.c_str() + eq + 1) != 0 ? 1 : 0;
@@ -15631,6 +15718,29 @@ int main(int argc, char** argv) {
                         if (ids[(size_t) i + 1] == o.tail_role_token) turn_at = i;
                         break;
                     }
+            // --tail-reminder-ids (opt-in): the same for a client's per-request reminder turn, which is a user turn and
+            // so cannot be told from a real one by its role.  It is short, and its text opens with the given tokens
+            // right after "<|im_start|>role\n"; the turns before it are the conversation.  Repeated while the turn
+            // before is one too.
+            if (turn_at > 0 && !o.tail_reminder_ids.empty()) {
+                const int64_t k = (int64_t) o.tail_reminder_ids.size();
+                constexpr int64_t kReminderMaxTokens = 4096;
+                for (;;) {
+                    int64_t prev = -1;
+                    for (int64_t i = turn_at - 1; i > resume && turn_at - i <= kReminderMaxTokens; --i)
+                        if (ids[(size_t) i] == o.turn_token) { prev = i; break; }
+                    if (prev < 0) break;
+                    bool hit = false;
+                    for (int64_t j = prev + 1; j + k <= turn_at && j <= prev + 4 && !hit; ++j) {   // role, newline
+                        hit = true;
+                        for (int64_t m = 0; m < k && hit; ++m) hit = ids[(size_t) (j + m)] == o.tail_reminder_ids[(size_t) m];
+                    }
+                    if (!hit) break;
+                    std::fprintf(stderr, "strata serve: tail reminder turn of %lld tokens left out of the checkpoint\n",
+                                 (long long) (turn_at - prev));
+                    turn_at = prev;
+                }
+            }
             // A prompt read from token 0 also stops at its FIRST turn boundary: the end of the system prompt (with
             // the tools), which every new chat of the same client shares.  That checkpoint becomes the chain's root,
             // which the retention policy pins (conv_cache.hpp), so the next new chat reads only what comes after it.
@@ -16858,8 +16968,9 @@ int main(int argc, char** argv) {
                 }
                 std::fflush(stdout);
                 if (correctness_window_trace) {
-                    // Suffix lookup replaces MTP; chained tokens beyond T_mtp are not MTP decisions.
-                    const int64_t mtp_offered = use_mtp && !from_sfx ? T_mtp - 1 : 0;
+                    // Suffix lookup replaces MTP; chained tokens beyond T_mtp are not MTP decisions.  A merged
+                    // window's rows are prompt tokens, so it offers no drafts.
+                    const int64_t mtp_offered = use_mtp && !from_sfx && !merged ? T_mtp - 1 : 0;
                     const int64_t mtp_accepted = std::min<int64_t>(a, mtp_offered);
                     const std::string record = strata::program::serial_window_record(
                         req_trace_id.value(), trace_window_index++, trace_token_ids,

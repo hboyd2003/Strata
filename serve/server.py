@@ -844,6 +844,22 @@ def conversation_slots(engine) -> int | None:
     return slots if isinstance(slots, int) else None
 
 
+def conversation_key(messages) -> str | None:
+    """Auto sessions: which conversation a chat request continues - the text of its first user message, which
+    every later turn of the same chat carries unchanged (a client that rewrites it starts a new conversation, as
+    the prompt cache sees it too).  None when the request carries no user text: auto sessions leave it alone."""
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, list):                 # the parts form (a message with pictures)
+            content = "".join(p.get("text") or "" for p in content
+                              if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
+        if isinstance(content, str) and content.strip():
+            return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:16]
+    return None
+
+
 def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) -> dict:
     """#596: the Monitor's Conversation cache card: the parked conversations (the engine's opt-in
     --conversation-cache-mib: budget, slots, what its log says) and how much of the prompts the cache gave back."""
@@ -855,6 +871,99 @@ def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) 
             "reused_tokens": totals.get("reused", 0), "prompt_tokens": totals.get("prompt_tokens", 0),
             "last_reused": last.get("reused") if last else None,
             "last_prompt": last.get("prompt_tokens") if last else None}
+
+
+TRANSCRIPT_TEXT_MAX = 65536                         # one message's text (or a call's arguments) in a transcript
+TRANSCRIPT_MAX = 1 << 21                            # a transcript's characters; past it the oldest messages are left out
+
+
+def _clip(text: str, limit: int = TRANSCRIPT_TEXT_MAX) -> str:
+    return text if len(text) <= limit else text[:limit] + f"\n\u2026 ({len(text) - limit:,} more characters not kept)"
+
+
+def transcript_of(messages, previous=()) -> dict:
+    """The Monitor's "view as chat" (with "api_monitor" on): a request's messages as the template saw them, compact -
+    role, text, a count of pictures, reasoning and tool calls; a long text is cut, and past TRANSCRIPT_MAX characters
+    the oldest messages are left out ("omitted").  `previous`: the transcripts kept before it, newest first; the
+    messages it shares with the latest one of the same conversation are that one's objects, so an agent's 100 turns
+    keep its history once rather than 100 times."""
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content, images = m.get("content"), 0
+        if isinstance(content, list):               # the parts form: text items and pictures
+            text = "".join(p.get("text") or "" for p in content
+                           if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
+            images = sum(1 for p in content if isinstance(p, dict) and p.get("type") not in ("text", "input_text"))
+        else:
+            text = content if isinstance(content, str) else ""
+        c = {"role": m.get("role"), "text": _clip(text)}
+        if images:
+            c["images"] = images
+        if m.get("reasoning_content"):
+            c["reasoning"] = _clip(str(m["reasoning_content"]))
+        if m.get("tool_calls"):
+            c["tool_calls"] = [tool_call_view((t.get("function") or t).get("name"),
+                                              (t.get("function") or t).get("arguments"))
+                               for t in m["tool_calls"] if isinstance(t, dict)]
+        out.append(c)
+    for prev in previous:
+        if prev and out and prev[0] == out[0]:      # the same conversation: share what did not change
+            for i in range(min(len(prev), len(out))):
+                if prev[i] != out[i]:
+                    break
+                out[i] = prev[i]
+            break
+    keep, size = len(out), 0
+    while keep > 0:
+        m = out[keep - 1]
+        size += len(m["text"]) + len(m.get("reasoning", "")) + \
+            sum(len(str(t["arguments"])) for t in m.get("tool_calls", ()))
+        if size > TRANSCRIPT_MAX and keep < len(out):
+            break
+        keep -= 1
+    return {"messages": out[keep:], "omitted": keep}
+
+
+REQUEST_PARAMS = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "repetition_penalty",
+                  "seed", "max_tokens", "max_completion_tokens", "max_output_tokens", "reasoning_effort", "tool_choice")
+
+
+def request_params(req: dict) -> dict:
+    """#332: the settings a request came with, as the client sent them (no messages, no headers) - the "view as chat"
+    popup's facts.  The tools are a count and their names."""
+    p = {k: req[k] for k in REQUEST_PARAMS
+         if isinstance(req.get(k), (int, float, str)) and not isinstance(req.get(k), bool)}
+    thinking = req.get("thinking")                      # Anthropic: {"type": "enabled", "budget_tokens": N}
+    if isinstance(thinking, dict) and isinstance(thinking.get("type"), str):
+        p["thinking"] = thinking["type"]
+        if isinstance(thinking.get("budget_tokens"), int):
+            p["thinking_budget"] = thinking["budget_tokens"]
+    for k in ("output_config", "reasoning"):            # Anthropic's and the Responses API's effort
+        if isinstance(req.get(k), dict) and isinstance(req[k].get("effort"), str):
+            p["effort"] = req[k]["effort"]
+    kw = req.get("chat_template_kwargs")
+    if isinstance(kw, dict) and "enable_thinking" in kw:
+        p["thinking"] = "enabled" if kw["enable_thinking"] else "disabled"
+    choice = req.get("tool_choice")
+    if isinstance(choice, dict):
+        p["tool_choice"] = (choice.get("function") or {}).get("name") or choice.get("name") or choice.get("type")
+    tools = req.get("tools")
+    if isinstance(tools, list) and tools:
+        names = [(t.get("function") if isinstance(t.get("function"), dict) else t).get("name")
+                 for t in tools if isinstance(t, dict)]
+        p["tools"] = len(tools)
+        p["tool_names"] = [n for n in names if isinstance(n, str)][:40]
+    return p
+
+
+def tool_call_view(name, arguments) -> dict:
+    """A tool call in a transcript: its name and arguments (as text when they are long)."""
+    if not isinstance(arguments, dict):
+        arguments = {} if arguments is None else {"arguments": str(arguments)}
+    raw = json.dumps(arguments, ensure_ascii=False)
+    return {"name": name, "arguments": arguments if len(raw) <= TRANSCRIPT_TEXT_MAX else {"arguments": _clip(raw)}}
 
 
 _BTRACE = bool(os.environ.get("STRATA_BATCH_TRACE"))
@@ -3085,6 +3194,31 @@ def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
     return ["--tail-role-token", str(role[0])]
 
 
+def reminder_tail_args(cfg: dict, exe: str, tok) -> list[str] | None:
+    """Opt-in (the config's "qwen_code_tail": true): the engine arguments that keep a client's per-request
+    `<system-reminder>` turn (Qwen Code's memory catalog: a separate short user turn on the end of every request, left
+    out of its history on the next) out of the conversation checkpoint, so the next turn reuses the conversation.
+    None when off (the default) or the engine is too old for it (said once).  ValueError for a non-boolean."""
+    on = cfg.get("qwen_code_tail", False)
+    if not isinstance(on, bool):
+        raise ValueError(f'"qwen_code_tail" must be true or false, not {on!r}')
+    if not on:
+        return None
+    try:
+        with open(engine_binary(exe, cfg), "rb") as f:
+            known = b"--tail-reminder-ids" in f.read()
+    except OSError:
+        known = False
+    ids = tok.encode("<system-reminder>", parse_special=False)
+    if not known or not ids:
+        print("[strata] qwen_code_tail needs an engine with --tail-reminder-ids: the reminder stays in the "
+              "checkpoint", flush=True)
+        return None
+    print("[strata] qwen_code_tail: a trailing <system-reminder> turn stays out of the conversation checkpoint",
+          flush=True)
+    return ["--tail-reminder-ids", ",".join(str(int(i)) for i in ids)]
+
+
 def engine_silence_s(cfg: dict) -> float:
     """#481: the config's "engine_silence_s" - seconds an engine may print nothing during a request before the server
     ends it (default ENGINE_SILENCE_S; 0 = wait forever).  ValueError for anything but a number >= 0."""
@@ -4001,6 +4135,18 @@ class Service:
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
+        # opt-in (the config's "auto_sessions"): save the conversation the engine holds when a request starts a
+        # different one and restore that request's conversation from its file - a switch costs a file copy, not a
+        # prompt read.  Off by default; every failure is logged and leaves the request alone.
+        self.auto_sessions = False
+        self.auto_sessions_min_tokens = 16000         # conversations below this many prompt tokens are not saved
+        self.auto_sessions_keep = 12                  # newest auto-*.bin files kept (0: no count limit)
+        self.auto_sessions_max_gb = 100.0             # their total bytes cap (0: no cap)
+        self.auto_conv = None                         # the conversation the engine holds: {"key", "tokens"}
+        self.auto_stats = {"switches": 0, "saves": 0, "restores": 0, "failures": 0, "pruned": 0,
+                           "last_event": None, "last_tokens": None, "last_bytes": None, "last_ms": None,
+                           "last_at": None, "last_error": None}   # the Monitor's Auto sessions card
+        self.auto_tls = threading.local()             # this request's conversation key (set by prepare)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
@@ -4690,7 +4836,8 @@ class Service:
                                                     "prefill_tok_s_mean": self._prefill_tok_s_mean()},
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
                                        gpu_indices=getattr(self, "gpu_indices", None),
-                                       amd=getattr(self, "backend", None) == "hip")
+                                       amd=getattr(self, "backend", None) == "hip",
+                                       temp_sensor=getattr(self, "gpu_temp_sensor", None) or "edge")
             if getattr(self, "engine", None) is not None and hasattr(self.engine, "gpu_busy"):
                 # #1317: the quick frozen-engine check does not end an engine whose GPU is busy (a long prompt chunk on a
                 # slow card keeps the GPU at work while the host thread sleeps)
@@ -4743,6 +4890,7 @@ class Service:
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
+                  "params": request_params(req),
                   "input": raw[:262144], "input_truncated": len(raw) > 262144,
                   "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
                   "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,
@@ -4751,6 +4899,34 @@ class Service:
             self.api_requests.append(record)
         self.request_trace.record = record
         return record
+
+    def _note_transcript(self, messages):
+        """#332 "view as chat": this request's messages, kept with its monitor record (nothing when the monitor is
+        off).  A failure never fails the request."""
+        trace = getattr(self.request_trace, "record", None)
+        if trace is None:
+            return
+        try:
+            with self.status_lock:
+                previous = [r["transcript"]["messages"] for r in reversed(self.api_requests)
+                            if r is not trace and r.get("transcript")][:8]
+            transcript = transcript_of(messages, previous)
+            with self.status_lock:
+                trace["transcript"] = transcript
+                trace.setdefault("reply", {"content": "", "reasoning": "", "tool_calls": []})
+        except Exception as e:                      # noqa: BLE001 - the monitor must never fail the request
+            print(f"[strata] api monitor: cannot keep this request's messages: {e}", flush=True)
+
+    def _note_reply(self, trace, ev):
+        """The reply's text, reasoning and tool calls as the engine wrote them (every API, streamed or not)."""
+        with self.status_lock:
+            reply = trace.get("reply")
+            if reply is None:
+                return
+            if ev.kind == "tool_call" and ev.call is not None:
+                reply["tool_calls"] = reply["tool_calls"] + [tool_call_view(ev.call.name, ev.call.arguments)]
+            elif ev.kind in ("content", "reasoning") and ev.text and len(reply[ev.kind]) < 262144:
+                reply[ev.kind] = (reply[ev.kind] + ev.text)[:262144]
 
     def request_records(self, request_id=None):
         with self.status_lock:
@@ -4761,7 +4937,8 @@ class Service:
                     return None
                 return {k: v for k, v in record.items() if not k.startswith("_")}
             return [{k: v for k, v in r.items()
-                     if k not in ("input", "output", "reasoning", "response") and not k.startswith("_")}
+                     if k not in ("input", "output", "reasoning", "response", "transcript", "reply")
+                     and not k.startswith("_")}
                     | {"wallclock_s": r.get("wallclock_s", round(time.perf_counter() - r["_clock"], 3))}
                     for r in reversed(records)]
 
@@ -4817,7 +4994,8 @@ class Service:
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
-                "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
+                "auto_sessions": self.auto_sessions_view(),
+                "requests_kept": len(hist), "transcripts": bool(self.api_monitor), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
 
@@ -5000,6 +5178,7 @@ class Service:
         prompt; with thinking, Service.run writes it once the thinking is over."""
         # `cancel` (#1999): set when the client hangs up; the downloads, the wait for the turn and the encodes stop
         # between pictures and raise ClientGone
+        self.auto_tls.key = conversation_key(messages)   # auto sessions: this request's conversation (or None)
         # Cached tool images are references in browser history, never arbitrary file paths or huge base64 strings.
         for message in messages:
             for part in message.get("content", []) if isinstance(message.get("content"), list) else []:
@@ -5019,6 +5198,7 @@ class Service:
                     else:
                         part["source"] = str(image)
         fetched = self._note_unreadable_tool_images(messages, cancel)
+        self._note_transcript(messages)
         ids = encoded_ids = self.encode_prompt(messages, tools, kwargs)
         if force and kwargs.get("enable_thinking", True) is False:
             ids = ids + self.tok.encode(force, parse_special=True)
@@ -5269,15 +5449,161 @@ class Service:
                   f"{el:.0f} s", flush=True)
         return now
 
+    # ---- auto sessions (the config's "auto_sessions", off by default): disk parking around a switch -------------
+
+    def _auto_session_turn(self, ids):
+        """One request is about to run, the FIFO is held and the engine is between requests: when this request
+        starts a different conversation than the one the engine holds, save the held one to its file (once it is
+        worth a file) and restore this request's conversation from its file when one exists.  A failure is logged
+        and leaves the request alone - the engine then parks or reads its prompt as it always did."""
+        key = getattr(self.auto_tls, "key", None)
+        cur = self.auto_conv
+        if key is None:                               # a request with no user text: keep out of the way
+            self.auto_conv = None
+            return
+        if cur is not None and cur.get("key") == key:
+            cur["tokens"] = max(int(cur.get("tokens") or 0), len(ids))
+            return
+        self.auto_stats["switches"] += 1
+        try:
+            # A failed save normally skips the restore too: the held conversation is then still the engine's and
+            # parks in RAM as before - a restore would replace it with weaker and lose it for good.  A held
+            # conversation with nothing durable is the exception: a cancelled request's provisional state is
+            # refused by the engine (kind "invalid") and never has a file - it has no state worth protecting, so
+            # it may not block the incoming restore (minutes of re-read on a long conversation).
+            if cur is not None and int(cur.get("tokens") or 0) >= self.auto_sessions_min_tokens:
+                try:
+                    self._auto_session_save(cur["key"])
+                except SessionRefused as e:
+                    if e.kind != "invalid" and not cur.get("cancelled"):
+                        raise
+                    print(f"[strata] auto sessions: the held conversation has nothing durable ({e}); restoring "
+                          f"the incoming one anyway", flush=True)
+            self._auto_session_restore(key)
+        except Exception as e:                        # a cache must never fail the request
+            print(f"[strata] auto sessions: {e}", flush=True)
+            self.auto_stats.update(failures=self.auto_stats["failures"] + 1, last_error=str(e)[:200])
+        self.auto_conv = {"key": key, "tokens": len(ids)}
+
+    def _auto_session_save(self, key):
+        name = f"auto-{key}.bin"
+        r = self.engine.session_file("save", os.path.join(self.slot_save_path, name))
+        print(f"[strata] auto sessions: saved {r.get('tokens')} tokens ({r.get('bytes', 0) / 1e9:.2f} GB) to "
+              f"{name} in {float(r.get('ms') or 0):.0f} ms", flush=True)
+        self._auto_session_note("saved", r)
+        self._auto_session_prune()
+
+    def _auto_session_restore(self, key):
+        name = f"auto-{key}.bin"
+        path = os.path.join(self.slot_save_path, name)
+        if not os.path.isfile(path):
+            return
+        r = self.engine.session_file("restore", path)
+        print(f"[strata] auto sessions: restored {r.get('tokens')} tokens from {name} in "
+              f"{float(r.get('ms') or 0):.0f} ms", flush=True)
+        self._auto_session_note("restored", r)
+
+    def _auto_session_note(self, event, r):
+        st = self.auto_stats
+        st["saves" if event == "saved" else "restores"] += 1
+        st.update(last_event=event, last_tokens=r.get("tokens"), last_bytes=r.get("bytes"), last_ms=r.get("ms"),
+                  last_at=time.time())
+
+    def _auto_session_files(self) -> list:
+        """The auto-*.bin files in slot_save_path, newest first: (mtime, size, path)."""
+        entries = []
+        with os.scandir(self.slot_save_path) as it:
+            for e in it:
+                if e.is_file() and e.name.startswith("auto-") and e.name.endswith(".bin"):
+                    st = e.stat()
+                    entries.append((st.st_mtime, st.st_size, e.path))
+        entries.sort(reverse=True)
+        return entries
+
+    def auto_sessions_view(self) -> dict:
+        """The Monitor's Auto sessions card: the limits, the conversation the engine holds, the auto-*.bin files on
+        disk and what the switches since the start did."""
+        view = {"enabled": bool(self.auto_sessions), "path": self.slot_save_path,
+                "min_tokens": self.auto_sessions_min_tokens, "keep": self.auto_sessions_keep,
+                "max_gb": self.auto_sessions_max_gb, **self.auto_stats,
+                "files": None, "files_bytes": None, "newest_at": None, "held_tokens": None, "held_on_disk": None}
+        if not self.auto_sessions:
+            return view
+        try:
+            entries = self._auto_session_files()
+            view.update(files=len(entries), files_bytes=sum(size for _, size, _ in entries),
+                        newest_at=entries[0][0] if entries else None)
+        except OSError:
+            pass
+        cur = self.auto_conv
+        if cur is not None:
+            view["held_tokens"] = int(cur.get("tokens") or 0)
+            view["held_on_disk"] = os.path.isfile(os.path.join(self.slot_save_path, f"auto-{cur['key']}.bin"))
+        return view
+
+    def auto_session_shutdown_save(self):
+        """A normal stop must not lose the conversation the engine holds: save it as the auto-sessions file the next
+        start restores from.  Only when the service is idle - a running request's session is live, and saving it
+        would capture a partial state - and best effort: a failure is logged and never blocks the stop."""
+        cur = self.auto_conv
+        if not self.auto_sessions or cur is None or not self.slot_save_path:
+            return
+        if not self.fifo.acquire(blocking=False):
+            print("[strata] auto sessions: a request is running, so the held conversation is not saved at "
+                  "shutdown", flush=True)
+            return
+        try:
+            self._auto_session_save(cur["key"])
+        except Exception as e:                        # never block the stop
+            print(f"[strata] auto sessions: cannot save the held conversation at shutdown: {e}", flush=True)
+        finally:
+            self.fifo.release()
+
+    def _auto_session_prune(self):
+        """Keep the newest auto_sessions_keep files and at most auto_sessions_max_gb of them (0: no such limit).
+        Only auto-*.bin files are ever deleted: a file saved by hand through /slots/0 is not touched."""
+        keep = int(self.auto_sessions_keep or 0)
+        cap = int(float(self.auto_sessions_max_gb or 0) * (1 << 30))
+        try:
+            entries = self._auto_session_files()      # newest first
+        except OSError as e:
+            print(f"[strata] auto sessions: cannot prune ({e})", flush=True)
+            return
+        total = sum(size for _, size, _ in entries)
+        removed = 0
+        for i in range(len(entries) - 1, -1, -1):     # oldest first
+            beyond_count = keep > 0 and i >= keep     # 0: no count limit
+            over_cap = cap > 0 and total > cap        # 0: no size cap
+            if not (beyond_count or over_cap):
+                break
+            try:
+                os.unlink(entries[i][2])
+                total -= entries[i][1]
+                removed += 1
+            except OSError:
+                break
+        if removed:
+            self.auto_stats["pruned"] += removed
+            print(f"[strata] auto sessions: pruned {removed} file(s), {total / 1e9:.1f} GB kept", flush=True)
+
     def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None,
             declared_only=False) -> Iterator[tuple[str, object]]:
         """The request's events (see _run); with "prevent_sleep" in the config, the PC stays awake while it runs or waits."""
         ka = self.keep_awake
         if ka is not None:
             ka.acquire()
+        trace = getattr(self.request_trace, "record", None)
+        events = self._run(ids, thinking, tools, max_new, sampling, cancel, force, declared_only)
         try:
-            yield from self._run(ids, thinking, tools, max_new, sampling, cancel, force, declared_only)
+            if trace is None:
+                yield from events
+            else:
+                for x in events:
+                    if x[0] == "event":
+                        self._note_reply(trace, x[1])
+                    yield x
         finally:
+            events.close()
             if ka is not None:
                 ka.release()
 
@@ -5443,6 +5769,8 @@ class Service:
                     elif not (self.loaded() and not self._vision_down()):
                         with self._inference_fifo(deadline, cancel):
                             self.ensure_loaded()
+                    if self.auto_sessions and not par:    # opt-in: save the held conversation / restore this one
+                        self._auto_session_turn(ids)
                     with self.status_lock:
                         if par:
                             self.status["queued"] -= 1
@@ -5713,6 +6041,9 @@ class Service:
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
                             self.history.append({
                                 "id": request_id,
+                                # #332: the monitor record this request's messages and reply are kept in (None: the
+                                # monitor is off, or it has none) - the Monitor's "view as chat"
+                                "record_id": trace["id"] if trace is not None and trace.get("transcript") else None,
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
@@ -5758,6 +6089,15 @@ class Service:
                             rate_txt = f"{rate:.1f} tok/s" if rate is not None else "no speed"
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate_txt}) "
                                   f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
+                            # auto sessions: remember whether this conversation's request was cancelled.  The
+                            # engine's session is then provisional (it can never be saved), so the next switch must
+                            # not let its failed save block the incoming restore; a finished request settles it.
+                            if self.auto_sessions and self.auto_conv is not None and \
+                                    self.auto_conv.get("key") == getattr(self.auto_tls, "key", None):
+                                if cancel.is_set():
+                                    self.auto_conv["cancelled"] = True
+                                else:
+                                    self.auto_conv.pop("cancelled", None)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
                                 print("[strata] the reply reached max tokens while still thinking, so it has no "
                                       "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
@@ -9013,8 +9353,10 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             raise SystemExit(f"[strata] config {e}")
         try:
             effort_end = effort_end_args(cfg, exe, tok)  # #458
+            reminder_tail = reminder_tail_args(cfg, exe, tok)
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
+        engine_extra = (effort_end or []) + (reminder_tail or [])
         from serve import replicas as rp
         try:
             groups = rp.gpu_groups(cfg)
@@ -9028,11 +9370,11 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         except split_mod.SplitConfigError as e:
             raise SystemExit(f"[strata] config {e}")
         if groups:
-            engine = start_replicas(cfg, groups, exe, effort_end or [], lazy, offline=a.offline)
+            engine = start_replicas(cfg, groups, exe, engine_extra, lazy, offline=a.offline)
         elif split:
-            engine = start_split(cfg, split, exe, effort_end or [], lazy, offline=a.offline)
+            engine = start_split(cfg, split, exe, engine_extra, lazy, offline=a.offline)
         else:
-            engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
+            engine = StrataEngine(exe, engine_args(cfg) + engine_extra, cwd=cfg.get("cwd"), log=cfg.get("log"),
                                   env=env, lazy=lazy)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
         warn_tight_ram(engine.info.get("arena_mib"))
@@ -9171,6 +9513,32 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             raise SystemExit(f"[strata] {e}")
         print(f"[strata] slot save/restore on: {svc.slot_save_path} (session files are kept until deleted: "
               "about 1.2 GB per 63K-token conversation; restore only files this server wrote)", flush=True)
+    # "auto_sessions" (opt-in): the server parks conversations on disk around a switch by itself; the limits
+    # below bound the auto-*.bin files it keeps.  All the validation runs before anything is wired.
+    for k in ("auto_sessions_min_tokens", "auto_sessions_keep"):
+        v = cfg.get(k)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise SystemExit(f"[strata] config {k} must be a whole number (0 or more), not {v!r}")
+    v = cfg.get("auto_sessions_max_gb")
+    if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0):
+        raise SystemExit(f"[strata] config auto_sessions_max_gb must be a number of GB (0: no cap), not {v!r}")
+    auto = cfg.get("auto_sessions")
+    if auto is not None and not isinstance(auto, bool):
+        raise SystemExit(f"[strata] config auto_sessions must be true or false, not {auto!r}")
+    if cfg.get("auto_sessions_min_tokens") is not None:
+        svc.auto_sessions_min_tokens = int(cfg["auto_sessions_min_tokens"])
+    if cfg.get("auto_sessions_keep") is not None:
+        svc.auto_sessions_keep = int(cfg["auto_sessions_keep"])
+    if cfg.get("auto_sessions_max_gb") is not None:
+        svc.auto_sessions_max_gb = float(cfg["auto_sessions_max_gb"])
+    if auto is True:
+        if not svc.slot_save_path:
+            print("[strata] auto_sessions is on, but slot_save_path is not set: auto sessions stay off", flush=True)
+        else:
+            svc.auto_sessions = True
+            print(f"[strata] auto sessions on: keep {svc.auto_sessions_keep} files, at most "
+                  f"{svc.auto_sessions_max_gb:g} GB, from {svc.auto_sessions_min_tokens} prompt tokens "
+                  f"(auto-*.bin in {svc.slot_save_path})", flush=True)
     mode = str(cfg.get("anthropic_thinking") or "model")   # #278: "on_request" = only when the request asks
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[strata] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
@@ -9181,6 +9549,18 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")
     import serve.frontend as _frontend
     _frontend.ENV_TO_USER = etu
+    stu = cfg.get("system_to_user", False)             # opt-in: see frontend.SystemToUser
+    if stu is True:
+        stu = {}
+    if stu is not False:
+        keys = {"learn", "patterns", "ignore", "state", "place"}
+        if not isinstance(stu, dict) or set(stu) - keys:
+            raise SystemExit(f"[strata] config \"system_to_user\" must be true, false or an object with "
+                             f"{', '.join(sorted(keys))}, not {stu!r}")
+        try:
+            _frontend.SYSTEM_TO_USER = _frontend.SystemToUser(**stu)
+        except ValueError as e:
+            raise SystemExit(f"[strata] config \"system_to_user\": {e}")
     rs = cfg.get("repeat_stop_tokens", REPEAT_STOP_TOKENS)   # #606: opt-out with 0
     if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
@@ -9220,6 +9600,11 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.terminal_configured_split = (layer_split_value(cfg) if a.engine == "strata" and layer_split_of(cfg)
                                      else None)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
+    temp_sensor = cfg.get("gpu_temp_sensor") or "edge"  # the AMD card's temperature probe on the Monitor
+    if temp_sensor not in ("edge", "junction", "mem"):
+        raise SystemExit("[strata] config \"gpu_temp_sensor\" must be \"edge\", \"junction\" or \"mem\", "
+                         f"not {temp_sensor!r}")
+    svc.gpu_temp_sensor = temp_sensor
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
@@ -9314,6 +9699,12 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                 print(f"[strata] drain deadline expired; cancelling {cancelled} owned request(s) ...", flush=True)
                 svc.wait_for_drain(5)
                 drained = False
+        # a normal stop must not lose the conversation the engine holds: save it for the next start while the
+        # engine is still up (best effort - a failure never blocks the stop)
+        try:
+            svc.auto_session_shutdown_save()
+        except Exception as e:  # noqa: BLE001 - never block the exit
+            print(f"[strata] auto sessions: cannot save the held conversation at shutdown: {e}", flush=True)
         closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
                    hub.close if hub is not None else None]
         try:

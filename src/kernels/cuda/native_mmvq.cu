@@ -2346,11 +2346,31 @@ void launch_check() {
 // 2 KB row spent most of its time being launched and joined.  The SAME kernel serves every column count 1..8, so a
 // column's sums do not depend on how many columns (verify tokens) ride along.  STRATA_MMVQ_WAVE=0: the CUDA layout.
 bool g_wave_off = std::getenv("STRATA_MMVQ_WAVE") && std::string(std::getenv("STRATA_MMVQ_WAVE")) == "0";
+// The k loop of native_mmvq_wave_kernel.  GUARD: each row checked against n_out inside the loop.  With R > 1 and all R
+// rows present the kernel takes GUARD = false: no branch per row and iteration, so the rows share each column's
+// activation loads in one straight block (gfx906 ISA, Q6_K: 26 vector loads for 2 rows at 4 columns instead of 42).
+// The same sums in the same order either way.
+template<typename F, int NCOLS, int R, bool GUARD>
+__device__ __forceinline__ void wave_rows_dot(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
+                                              float (&tmp)[NCOLS][R], int row0, int n_out, int blocks_per_row,
+                                              int x_stride, int kqs, int lane) {
+    constexpr int BPIW = 64 / F::T;
+    for (int kbx = lane / F::T; kbx < blocks_per_row; kbx += BPIW) {
+        const int kby = kbx * F::KBY;
+#pragma unroll
+        for (int i = 0; i < R; ++i) {
+            if (!GUARD || row0 + i < n_out) {
+                const typename F::W wv = F::load(w + std::size_t(row0 + i) * blocks_per_row + kbx, kqs);
+#pragma unroll
+                for (int j = 0; j < NCOLS; ++j) tmp[j][i] += F::apply(wv, x + std::size_t(j) * x_stride + kby, kqs);
+            }
+        }
+    }
+}
 template<typename F, int NCOLS, int R>
 __launch_bounds__(256)
 __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
                                         float* __restrict__ y, int n_in, int n_out) {
-    constexpr int BPIW = 64 / F::T;
     static_assert(64 % F::T == 0, "a block's threads must tile the wavefront");
     const int lane = int(threadIdx.x) & 63;
     const int row0 = (int(blockIdx.x) * 4 + (int(threadIdx.x) >> 6)) * R;
@@ -2359,16 +2379,20 @@ __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w,
     const int x_stride = n_in / Q8K;
     const int kqs = F::kqs(lane);
     float tmp[NCOLS][R] = {};
-    for (int kbx = lane / F::T; kbx < blocks_per_row; kbx += BPIW) {
-        const int kby = kbx * F::KBY;
+    if constexpr (R == 1) {   // the default: this loop exactly as before (the same machine code)
+        constexpr int BPIW = 64 / F::T;
+        for (int kbx = lane / F::T; kbx < blocks_per_row; kbx += BPIW) {
+            const int kby = kbx * F::KBY;
+            if (row0 < n_out) {
+                const typename F::W wv = F::load(w + std::size_t(row0) * blocks_per_row + kbx, kqs);
 #pragma unroll
-        for (int i = 0; i < R; ++i) {
-            if (row0 + i < n_out) {
-                const typename F::W wv = F::load(w + std::size_t(row0 + i) * blocks_per_row + kbx, kqs);
-#pragma unroll
-                for (int j = 0; j < NCOLS; ++j) tmp[j][i] += F::apply(wv, x + std::size_t(j) * x_stride + kby, kqs);
+                for (int j = 0; j < NCOLS; ++j) tmp[j][0] += F::apply(wv, x + std::size_t(j) * x_stride + kby, kqs);
             }
         }
+    } else if (row0 + R <= n_out) {
+        wave_rows_dot<F, NCOLS, R, false>(w, x, tmp, row0, n_out, blocks_per_row, x_stride, kqs, lane);
+    } else {
+        wave_rows_dot<F, NCOLS, R, true>(w, x, tmp, row0, n_out, blocks_per_row, x_stride, kqs, lane);
     }
 #pragma unroll
     for (int j = 0; j < NCOLS; ++j)
@@ -2380,13 +2404,33 @@ __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w,
             if (lane == 0 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
         }
 }
+// STRATA_MMVQ_WAVE_ROWS=2 / 4 (opt-in): R rows a wavefront instead of one, R independent weight-load chains in flight per
+// lane.  A row's sum is the R = 1 kernel's (the same lanes, the same kbx order, the same butterfly), so the bits do not
+// change; only the number of wavefronts does (n_out / R).  Anything else (or unset) keeps R = 1.
+int g_wave_rows = 0;   // native_mmvq_set_wave_rows (tests, benchmarks); 0 = STRATA_MMVQ_WAVE_ROWS
+int wave_rows() {
+    if (g_wave_rows > 0) return g_wave_rows;
+    static const int r = [] {
+        const char* v = std::getenv("STRATA_MMVQ_WAVE_ROWS");
+        const int n = v ? std::atoi(v) : 1;
+        return n == 2 || n == 4 ? n : 1;
+    }();
+    return r;
+}
+template<typename F, int NCOLS, int R>
+void wave_launch_r(const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
+    const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
+    native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+}
 template<typename F, int NCOLS>
 void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
-    constexpr int R = 1;
-    const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
-    native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+    switch (wave_rows()) {
+        case 2: wave_launch_r<F, NCOLS, 2>(w, x, y, n_in, n_out, s); break;
+        case 4: wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s); break;
+        default: wave_launch_r<F, NCOLS, 1>(w, x, y, n_in, n_out, s); break;
+    }
 }
 template<typename F>
 void wave_launch(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
@@ -3049,6 +3093,11 @@ void native_q6_k_unpack(const void* weights) {
 }
 
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
+#if defined(STRATA_HIP_GFX906)
+void native_mmvq_set_wave_rows(int rows) { g_wave_rows = rows == 1 || rows == 2 || rows == 4 ? rows : 0; }
+#else
+void native_mmvq_set_wave_rows(int) {}
+#endif
 bool native_mmvq_multi_exact() { return g_multi_exact; }
 void native_mmvq_set_b6_rows(int mode) { g_b6_rows = mode; }
 int native_mmvq_b6_rows() { return b6_rows_mode(); }

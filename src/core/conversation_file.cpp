@@ -1,6 +1,7 @@
 #include "strata/core/conversation_file.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -8,15 +9,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
 #include <new>
 #include <unordered_map>
 #include <optional>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <system_error>
+#include <thread>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -527,16 +531,17 @@ bool free_space(const std::string& path, uint64_t& out) {
 
 class FileSink {
 public:
-    explicit FileSink(RawFile& f) : buf_(aligned_block()), f_(f) {}
-    bool ok() const { return buf_ != nullptr; }
+    explicit FileSink(RawFile& f) : buf_{aligned_block(), aligned_block()}, f_(f) {}
+    ~FileSink() { join_writer(); }
+    bool ok() const { return buf_[0] && buf_[1]; }
     std::string error() const {
-        if (!buf_) return "out of memory for the write buffer";
+        if (!buf_[0] || !buf_[1]) return "out of memory for the write buffer";
         return fault_ ? fault_msg_ : f_.error();
     }
-    SessionError kind() const { return buf_ ? (fault_ ? fault_kind_ : f_.kind()) : SessionError::memory; }
-    // room in the block for in-place production (avoids a staging copy)
-    uint8_t* span(size_t& room) { room = kBlock - used_; return buf_.get() + used_; }
-    bool commit(size_t n) { used_ += n; total_ += n; return used_ < kBlock || drain(); }
+    SessionError kind() const { return ok() ? (fault_ ? fault_kind_ : f_.kind()) : SessionError::memory; }
+    // room in the active block for in-place production (avoids a staging copy)
+    uint8_t* span(size_t& room) { room = kBlock - used_; return buf_[active_].get() + used_; }
+    bool commit(size_t n) { used_ += n; total_ += n; return used_ < kBlock || hand_off(); }
     bool write(const void* p, size_t n) {
         const uint8_t* s = static_cast<const uint8_t*>(p);
         while (n) {
@@ -549,13 +554,15 @@ public:
         }
         return true;
     }
-    // last block padded to the alignment for direct I/O, then the file cut back to its exact size and flushed
+    // joins the writer, then the last block padded to the alignment for direct I/O, the file cut back to its
+    // exact size and flushed: after join_writer() nothing here and no writer touches RawFile concurrently
     bool finish(bool durable) {
+        join_writer();
         if (!f_.is_open()) return false;
         if (fault_) { f_.close(); return false; }
         const size_t padded = f_.direct() ? (used_ + kAlign - 1) / kAlign * kAlign : used_;
-        std::memset(buf_.get() + used_, 0, padded - used_);
-        bool ok = f_.write_all(buf_.get(), padded);
+        std::memset(buf_[active_].get() + used_, 0, padded - used_);
+        bool ok = f_.write_all(buf_[active_].get(), padded);
         if (ok && used_ && progress) (*progress)(total_, expected);   // the last, partial block
         ok = ok && (padded == used_ || f_.truncate(total_));
         if (ok && durable && phase) phase("flush", total_);
@@ -565,20 +572,126 @@ public:
         return ok;
     }
     std::optional<Ticker> progress;
+    std::optional<std::function<void(uint64_t, uint64_t, uint64_t)>> block_span;   // tests only, see SessionWriteOptions
     SessionPhase phase;
     uint64_t expected = 0;
     int write_fault = 0, flush_fault = 0;   // tests: errno values injected at the first block write / the file flush
+    int writer_thread_fault = 0;            // tests: nonzero forces the synchronous draining fallback
 private:
+    static uint64_t now_ns() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
     void fail_with(int e) { fault_ = true; fault_kind_ = errno_kind(e); fault_msg_ = std::strerror(e); }
-    bool drain() {
+    // hands the full block to the writer and flips buffers: the producer only waits on disk when BOTH blocks
+    // are working, which is how the source copy of the next block overlaps this block's write
+    bool hand_off() {
+        if (!writer_.joinable() && !no_writer_) {
+            if (writer_thread_fault) no_writer_ = true;   // tests: the starvation seam below, forced
+            else {
+                try { writer_ = std::thread([this] { run_writer(); }); }
+                catch (const std::system_error&) { no_writer_ = true; }   // no thread available (EAGAIN
+            }                                                             // under process limits): drain
+        }                                                                 // synchronously, as before
+        if (no_writer_) return drain_sync();
+        {
+            std::unique_lock<std::mutex> lk(m_);
+            if (writer_failed_) return false;
+            const int next = 1 - active_;
+            slot_free_.wait(lk, [&] { return ready_ != next && inflight_ != next; });
+            ready_ = active_;
+            active_ = next;
+            used_ = 0;
+            work_ready_.notify_all();
+        }
+        if (progress) report_written();
+        return !writer_failed_;
+    }
+    // the un-pipelined fallback: full blocks are written in the caller's thread, exactly as the single-buffer
+    // FileSink did; every save path and error channel stays the same
+    bool drain_sync() {
         if (write_fault) { fail_with(write_fault); return false; }
-        if (!f_.write_all(buf_.get(), used_)) return false;
+        const uint64_t t0 = now_ns();
+        const bool ok = f_.write_all(buf_[active_].get(), kBlock);
+        const uint64_t t1 = now_ns();
+        if (!ok) {
+            fault_ = true;
+            fault_kind_ = f_.kind();
+            fault_msg_ = f_.error();
+            return false;
+        }
+        const uint64_t w = written_.fetch_add(kBlock) + kBlock;
+        if (block_span) (*block_span)(w, t0, t1);
         used_ = 0;
-        if (progress) (*progress)(total_, expected);
+        active_ = 1 - active_;
+        if (progress) report_written();
         return true;
     }
-    Aligned buf_;
+    void run_writer() {
+        for (;;) {
+            int slot;
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                work_ready_.wait(lk, [&] { return ready_ >= 0 || producer_done_; });
+                if (ready_ < 0) return;
+                slot = ready_;
+                ready_ = -1;
+                inflight_ = slot;
+            }
+            if (write_fault) {
+                std::lock_guard<std::mutex> lk(m_);
+                fail_with(write_fault);
+                writer_failed_ = true;
+                ready_ = -1;
+                inflight_ = -1;   // abandon any other pending block: the write is failing, and a producer
+                slot_free_.notify_all();   // waiting on a slot must not outlive the writer that cannot free it
+                return;
+            }
+            const uint64_t t0 = now_ns();
+            const bool ok = f_.write_all(buf_[slot].get(), kBlock);
+            const uint64_t t1 = now_ns();
+            if (!ok) {
+                std::lock_guard<std::mutex> lk(m_);
+                fault_ = true;
+                fault_kind_ = f_.kind();
+                fault_msg_ = f_.error();
+                writer_failed_ = true;
+                ready_ = -1;
+                inflight_ = -1;
+                slot_free_.notify_all();
+                return;
+            }
+            const uint64_t w = written_.fetch_add(kBlock) + kBlock;
+            if (block_span) (*block_span)(w, t0, t1);   // tests: this block's OS write span
+            { std::lock_guard<std::mutex> lk(m_); inflight_ = -1; }
+            slot_free_.notify_all();
+        }
+    }
+    // progress reports stay on the calling thread and follow real movement: bytes the writer has already handed
+    // to the OS, never ahead, lagging at most the blocks still in flight
+    void report_written() {
+        const uint64_t w = written_.load();
+        if (w > reported_) { reported_ = w; (*progress)(w, expected); }
+    }
+    void join_writer() {
+        if (!writer_.joinable()) return;
+        { std::lock_guard<std::mutex> lk(m_); producer_done_ = true; }
+        work_ready_.notify_all();
+        writer_.join();
+        if (progress) report_written();   // catch up on blocks the writer finished while the producer ran ahead
+    }
+    Aligned buf_[2];
     RawFile& f_;
+    int active_ = 0;
+    bool no_writer_ = false;   // set when the writer cannot start: every block drains in the caller's thread
+    std::thread writer_;
+    std::mutex m_;
+    std::condition_variable work_ready_, slot_free_;
+    int ready_ = -1, inflight_ = -1;
+    bool producer_done_ = false;
+    std::atomic<bool> writer_failed_{false};
+    std::atomic<uint64_t> written_{0};
+    uint64_t reported_ = 0;
     bool fault_ = false;
     SessionError fault_kind_ = SessionError::io;
     std::string fault_msg_;
@@ -714,8 +827,37 @@ struct In {
     uint64_t left;
     std::string& error;
     const SessionReadLimits& limits;
+    // Streaming K/V sizes: `record_kv` receives them (the read pass); `verify_kv`, set from the read pass's list,
+    // makes this walk refuse a file whose layer count or any part size differs (the apply pass).  At most one set.
+    std::vector<std::array<uint64_t, 5>>* record_kv = nullptr;
+    const std::vector<std::array<uint64_t, 5>>* verify_kv = nullptr;
     SessionError kind = SessionError::invalid;
     size_t kv_layer = 0;
+    // Streaming read pass: `limits.admit` is asked as the metadata grows, with `base` (the blocks and small vectors)
+    // plus what the parse has allocated so far plus the array about to be - each priced from the size the file
+    // declares, before the array is allocated.  `grow_admit` is off for every other walk.
+    bool grow_admit = false;
+    uint64_t base = 0, held = 0;
+    // The apply pass: the metadata was checked and kept by the read pass, so this walk hashes it and drops it
+    // instead of allocating a second copy.
+    bool discard = false;
+    bool room(uint64_t extra) {
+        if (!grow_admit || !limits.admit) return true;
+        const uint64_t need = (base > UINT64_MAX - held || base + held > UINT64_MAX - extra) ? UINT64_MAX : base + held + extra;
+        std::string why;
+        if (!limits.admit(need, why)) { kind = SessionError::memory; return fail(why); }
+        held += extra;
+        return true;
+    }
+    bool skip(uint64_t c) {
+        uint8_t sink[65536];
+        while (c) {
+            const size_t k = (size_t) std::min<uint64_t>(c, sizeof sink);
+            if (!raw(sink, k)) return false;
+            c -= k;
+        }
+        return true;
+    }
     bool fail(const std::string& m) { if (error.empty()) error = "session file: " + m; return false; }
     bool raw(void* p, size_t c) {
         if (c > left) return fail("payload ends early");
@@ -738,6 +880,8 @@ struct In {
     template<class T> bool vec(std::vector<T>& v, uint64_t limit = UINT64_MAX) {
         uint64_t n = 0;
         if (!count(n, sizeof(T), limit)) return false;
+        if (discard) return skip(n * sizeof(T));
+        if (!room(n * sizeof(T))) return false;
         v.resize((size_t) n);
         return raw(v.data(), (size_t) n * sizeof(T));
     }
@@ -755,14 +899,16 @@ bool get_checkpoint(In& in, ConversationCheckpoint& c) {
     if (!in.vec(c.ids, in.limits.max_tokens)) return false;
     uint64_t n = 0;
     if (!in.count(n, 16, in.limits.max_tokens)) return false;
-    c.imgs.resize((size_t) n);
+    if (in.discard) { if (!in.skip(n * 16)) return false; }
+    else if (!in.room(n * sizeof(ConversationImageKey))) return false;
+    c.imgs.resize(in.discard ? 0 : (size_t) n);
     for (auto& k : c.imgs) if (!in.i64(k.start) || !in.u64(k.hash)) return false;
     const auto& m = in.limits.max_state_bytes;   // byte arrays: element and byte counts are the same
     return in.vec(c.gdn, m[0]) && in.vec(c.ple, m[1]) && in.vec(c.tails, m[2]) && in.vec(c.dead, m[3]) &&
            in.vec(c.block_pos, m[4]) && in.u64(c.used);
 }
 
-bool get_payload(In& in, SavedConversation& s) {
+bool get_meta_prefix(In& in, SavedConversation& s) {
     for (auto& g : s.geometry) if (!in.i64(g)) return false;
     // checked before any state array is read: a file of another geometry allocates nothing
     if (in.limits.geometry && *in.limits.geometry != s.geometry)
@@ -774,12 +920,27 @@ bool get_payload(In& in, SavedConversation& s) {
         return in.fail("saved with another layer range than this runtime's");
     if (cvec > 1) return in.fail("invalid cvec flag");
     s.cvec = cvec == 1;
-    if (!get_checkpoint(in, s.live)) return false;
+    if (in.discard) {
+        ConversationCheckpoint scratch;
+        if (!get_checkpoint(in, scratch)) return false;
+    } else if (!get_checkpoint(in, s.live)) return false;
     uint64_t n = 0;
     // a checkpoint is at least 8 counts + used = 72 bytes; a K/V layer at least 7 + 5 = 96
     if (!in.count(n, 72, in.limits.max_checkpoints)) return false;
+    if (in.discard) {
+        ConversationCheckpoint scratch;
+        for (uint64_t i = 0; i < n; ++i) if (!get_checkpoint(in, scratch)) return false;
+        return true;
+    }
+    if (!in.room(n * sizeof(ConversationCheckpoint))) return false;
     s.checkpoints.resize((size_t) n);
     for (auto& c : s.checkpoints) if (!get_checkpoint(in, c)) return false;
+    return true;
+}
+
+bool get_payload(In& in, SavedConversation& s) {
+    if (!get_meta_prefix(in, s)) return false;
+    uint64_t n = 0;
     if (!in.count(n, 96, in.limits.max_kv_layers)) return false;
     s.kv.resize((size_t) n);
     for (auto& k : s.kv) {
@@ -791,6 +952,52 @@ bool get_payload(In& in, SavedConversation& s) {
         k.format = (int) format;
         if (!in.buffer(k.k, 0) || !in.buffer(k.v, 1) || !in.buffer(k.k_scale, 2) || !in.buffer(k.v_scale, 3) ||
             !in.buffer(k.pooled, 4)) return false;
+    }
+    return true;
+}
+
+// The streaming read: the same walk, but every K/V part's bytes are read through one 16 MiB block and hashed, never
+// kept; a `sink` (the apply pass) gets each block as it is read.  When `in.record_kv` is set the part sizes are
+// recorded for the caller; when `in.verify_kv` is set (the apply pass) the file must have exactly the layer count
+// and part sizes the read pass saw, checked before that layer or part is applied.
+bool get_payload_streamed(In& in, SavedConversation& s, const SessionKvBlock& sink) {
+    if (!get_meta_prefix(in, s)) return false;
+    uint64_t n = 0;
+    if (!in.count(n, 96, in.limits.max_kv_layers)) return false;
+    if (in.verify_kv && in.verify_kv->size() != (size_t) n)
+        return in.fail("K/V layer count differs from the read pass");
+    s.kv.resize((size_t) n);
+    if (in.record_kv) in.record_kv->assign((size_t) n, {});
+    Aligned block;
+    if (n) {
+        block = aligned_block();
+        if (!block) { in.kind = SessionError::memory; return in.fail("out of memory for the K/V read block"); }
+    }
+    for (size_t l = 0; l < (size_t) n; ++l) {
+        auto& k = s.kv[l];
+        in.kv_layer = l;
+        int64_t format = 0;
+        if (!in.i64(format) || !in.i64(k.cells) || !in.i64(k.heads) || !in.i64(k.head_dim) ||
+            !in.i64(k.page_size) || !in.i64(k.pooled_rows) || !in.i64(k.idx_dim)) return false;
+        if (format < INT32_MIN || format > INT32_MAX) return in.fail("invalid K/V format");
+        k.format = (int) format;
+        for (size_t part = 0; part < 5; ++part) {
+            uint64_t size = 0;
+            const uint64_t limit = l < in.limits.max_kv_bytes.size() ? in.limits.max_kv_bytes[l][part] : UINT64_MAX;
+            if (!in.count(size, 1, limit)) return false;
+            if (in.record_kv) (*in.record_kv)[l][part] = size;
+            if (in.verify_kv && size != (*in.verify_kv)[l][part])
+                return in.fail("K/V part size differs from the read pass");
+            for (uint64_t at = 0; at < size; at += kBlock) {
+                const size_t c = (size_t) std::min<uint64_t>(kBlock, size - at);
+                if (!in.raw(block.get(), c)) return false;
+                if (sink && !sink(l, part, at, block.get(), c)) {
+                    if (in.error.empty()) in.error = "session file: the K/V sink failed";
+                    in.kind = SessionError::io;
+                    return false;
+                }
+            }
+        }
     }
     return true;
 }
@@ -1023,6 +1230,21 @@ uint64_t session_read_peak_bytes(uint64_t file_bytes) {
     return sat_add(sat_add(sat_add(file_bytes, kBlock), sat_mul(segments, 4096)), uint64_t(1) << 20);
 }
 
+uint64_t session_read_stream_peak_bytes(uint64_t file_bytes, const SessionReadLimits& limits) {
+    // the reader's block and the block a K/V part is moved through, plus the small vectors
+    uint64_t n = sat_add(sat_mul(2, kBlock), uint64_t(1) << 20);
+    // the parsed running-state metadata: the live checkpoint and every checkpoint the limits accept, each bounded
+    // by the tokens and state bytes the engine allows (an open limit can hold no more than the file itself)
+    uint64_t cp = sat_mul(limits.max_tokens, sizeof(int32_t) + sizeof(ConversationImageKey));
+    for (uint64_t b : limits.max_state_bytes) cp = sat_add(cp, b);
+    cp = sat_add(cp, 64);
+    const uint64_t checkpoints = limits.max_checkpoints == UINT64_MAX ? file_bytes : sat_mul(limits.max_checkpoints, cp);
+    n = sat_add(n, std::min(sat_add(cp, checkpoints), file_bytes));
+    // one hash per <= 16 MiB block moved, and the per-layer directories (a tiny term, bounded by the file)
+    n = sat_add(n, sat_mul(file_bytes / kBlock + 1, 6 * sizeof(uint64_t)));
+    return n;
+}
+
 namespace {
 bool write_impl(const std::string& path, const SavedConversation& image, const std::vector<SessionKvSource>* sources,
                 const SessionFileIdentity& id, size_t& bytes, std::string& error, const SessionWriteOptions& opt,
@@ -1062,12 +1284,14 @@ bool write_impl(const std::string& path, const SavedConversation& image, const s
     FileSink f(raw);
     if (!f.ok()) { st.error = SessionError::memory; error = "session file: " + f.error(); return false; }
     if (opt.progress) f.progress.emplace(opt.progress);
+    if (opt.block_span) f.block_span.emplace(opt.block_span);
     f.phase = opt.phase;
     f.expected = total;
     if (f.progress) (*f.progress)(0, total);   // the temporary file exists: the transfer starts
     const std::function<int(const char*)>* fault = opt.fault ? &opt.fault : nullptr;
     f.write_fault = injected(fault, "write");
     f.flush_fault = injected(fault, "file_flush");
+    f.writer_thread_fault = injected(fault, "writer_thread");
     uint8_t h[kHeader];
     header_bytes(h, id, payload);
     bool ok = f.write(h, kHeader);
@@ -1136,7 +1360,7 @@ const ConversationCheckpoint* session_deepest_checkpoint(const std::vector<Conve
 }
 
 uint64_t session_save_peak_bytes(const ConversationCheckpoint* deepest, const SessionSaveLive& live) {
-    uint64_t n = sat_add(kBlock, uint64_t(1) << 20);                          // write buffer, small vectors
+    uint64_t n = sat_add(sat_mul(2, kBlock), uint64_t(1) << 20);              // the two pipelined write buffers, small vectors
     if (deepest) n = sat_add(n, sat_mul(2, deepest->bytes()));                // the list and the image's copy
     n = sat_add(n, live.state_bytes);                                         // the live running state
     n = sat_add(n, sat_mul(live.tokens, sizeof(int32_t)));                    // its token list
@@ -1171,34 +1395,11 @@ bool session_file_write(const std::string& path, const SavedConversation& image,
 }
 
 namespace {
-bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConversation& image,
-               size_t& bytes, std::string& error, const SessionReadLimits& limits, SessionStatus& st) {
-    error.clear();
-    st = {};
-    st.error = SessionError::invalid;   // every refusal below, unless the step says otherwise
-    RawFile raw;
-    uint64_t size = 0;
-    if (!raw.open_session(path, size)) {
-        st.error = raw.refused() ? SessionError::invalid : raw.kind();
-        error = "session file: " + path + ": " + raw.error();
-        return false;
-    }
-    if (size < kHeader + kTrailer) { error = "session file: size " + std::to_string(size) + " is below the minimum"; return false; }
-    const uint64_t max_size = session_read_max_file_bytes(limits);
-    if (size > max_size || size > (uint64_t) std::numeric_limits<size_t>::max()) {
-        error = "session file: size " + std::to_string(size) + " exceeds this engine's limit" +
-                (max_size == UINT64_MAX ? std::string() : " of " + std::to_string(max_size));
-        return false;
-    }
-    FileSource f(raw);
-    if (!f.ok()) { st.error = SessionError::memory; error = "session file: " + f.error(); return false; }
-    // installed before the first block (the header's) is read: every block reports, the first one included
-    if (limits.progress) f.progress.emplace(limits.progress);
-    f.expected = size;
-    uint8_t h[kHeader];
-    if (!f.read(h, kHeader)) { st.error = f.kind(); error = "session file: header read error: " + f.error(); return false; }
+// The header every read checks first: magic, version, fields, size and both fingerprints, leaving `payload` set.
+bool header_ok(const uint8_t* h, uint64_t size, const SessionFileIdentity& id, uint64_t& payload,
+               std::string& error) {
     uint32_t version = 0, hsize = 0;
-    uint64_t model = 0, config = 0, payload = 0, r0 = 0, r1 = 0, hh = 0;
+    uint64_t model = 0, config = 0, r0 = 0, r1 = 0, hh = 0;
     std::memcpy(&version, h + 8, 4); std::memcpy(&hsize, h + 12, 4);
     std::memcpy(&model, h + 16, 8); std::memcpy(&config, h + 24, 8); std::memcpy(&payload, h + 32, 8);
     std::memcpy(&r0, h + 40, 8); std::memcpy(&r1, h + 48, 8); std::memcpy(&hh, h + 56, 8);
@@ -1213,26 +1414,148 @@ bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConv
                 std::to_string(kHeader + payload + kTrailer) + ")";
         return false;
     }
+    return true;
+}
+
+// A read's prologue: open the file by its name (never what a symbolic link there points to), bound its size, and
+// read and check the header.  On success the source is positioned after the header and `payload` is set.
+struct ReadFile {
+    RawFile raw;
+    FileSource source;
+    uint64_t size = 0;
+    ReadFile() : source(raw) {}
+    bool open(const std::string& path, const SessionFileIdentity& id, const SessionReadLimits& limits,
+              uint64_t& payload, std::string& error, SessionStatus& st) {
+        if (!raw.open_session(path, size)) {
+            st.error = raw.refused() ? SessionError::invalid : raw.kind();
+            error = "session file: " + path + ": " + raw.error();
+            return false;
+        }
+        if (size < kHeader + kTrailer) {
+            error = "session file: size " + std::to_string(size) + " is below the minimum";
+            return false;
+        }
+        const uint64_t max_size = session_read_max_file_bytes(limits);
+        if (size > max_size || size > (uint64_t) std::numeric_limits<size_t>::max()) {
+            error = "session file: size " + std::to_string(size) + " exceeds this engine's limit" +
+                    (max_size == UINT64_MAX ? std::string() : " of " + std::to_string(max_size));
+            return false;
+        }
+        if (!source.ok()) { st.error = SessionError::memory; error = "session file: " + source.error(); return false; }
+        // installed before the first block (the header's) is read: every block reports, the first one included
+        if (limits.progress) source.progress.emplace(limits.progress);
+        source.expected = size;
+        uint8_t h[kHeader];
+        if (!source.read(h, kHeader)) {
+            st.error = source.kind();
+            error = "session file: header read error: " + source.error();
+            return false;
+        }
+        return header_ok(h, size, id, payload, error);
+    }
+};
+
+bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConversation& image,
+               size_t& bytes, std::string& error, const SessionReadLimits& limits, SessionStatus& st) {
+    error.clear();
+    st = {};
+    st.error = SessionError::invalid;   // every refusal below, unless the step says otherwise
+    ReadFile rf;
+    uint64_t payload = 0;
+    if (!rf.open(path, id, limits, payload, error, st)) return false;
     if (limits.admit) {
         std::string why;
-        if (!limits.admit(session_read_peak_bytes(size), why)) {
+        if (!limits.admit(session_read_peak_bytes(rf.size), why)) {
             st.error = SessionError::memory;
             error = "session file: " + why;
             return false;
         }
     }
     SavedConversation parsed;
-    In in{&f, SessionHasher(0), payload, error, limits};
+    In in{&rf.source, SessionHasher(0), payload, error, limits};
     if (!get_payload(in, parsed)) { st.error = in.kind; return false; }
     if (in.left) { error = "session file: payload has " + std::to_string(in.left) + " unparsed bytes"; return false; }
     uint8_t t[kTrailer];
-    if (!f.read(t, kTrailer)) { st.error = f.kind(); error = "session file: trailer read error: " + f.error(); return false; }
+    if (!rf.source.read(t, kTrailer)) { st.error = rf.source.kind(); error = "session file: trailer read error: " + rf.source.error(); return false; }
     uint64_t ph = 0;
     std::memcpy(&ph, t, 8);
     if (ph != in.hash.digest()) { error = "session file: payload checksum mismatch"; return false; }
     if (std::memcmp(t + 8, kEnd, 8) != 0) { error = "session file: bad end marker"; return false; }
     image = std::move(parsed);
-    bytes = (size_t) size;
+    bytes = (size_t) rf.size;
+    st.error = SessionError::none;
+    return true;
+}
+
+// The read pass of a streaming restore: the whole file is validated without materializing the K/V (see
+// conversation_file.hpp).  The apply pass re-walks the same file with a sink, bound by the K/V sizes recorded here.
+bool read_stream_impl(const std::string& path, const SessionFileIdentity& id, SavedConversation& meta,
+                      size_t& bytes, std::string& error, const SessionReadLimits& limits,
+                      std::vector<std::array<uint64_t, 5>>* kv_part_bytes, SessionStatus& st) {
+    error.clear();
+    st = {};
+    st.error = SessionError::invalid;
+    ReadFile rf;
+    uint64_t payload = 0;
+    if (!rf.open(path, id, limits, payload, error, st)) return false;
+    // The two blocks, the small vectors and one hash per block are known now; the metadata is priced as the parse
+    // reaches each array, from the size the file declares (In::room) - not from the limits' worst case.
+    const uint64_t fixed = sat_add(sat_add(sat_mul(2, kBlock), uint64_t(1) << 20),
+                                   sat_mul(rf.size / kBlock + 1, 6 * sizeof(uint64_t)));
+    if (limits.admit) {
+        std::string why;
+        if (!limits.admit(fixed, why)) {
+            st.error = SessionError::memory;
+            error = "session file: " + why;
+            return false;
+        }
+    }
+    SavedConversation parsed;
+    In in{&rf.source, SessionHasher(0), payload, error, limits};
+    in.record_kv = kv_part_bytes;
+    in.grow_admit = true;
+    in.base = fixed;
+    if (!get_payload_streamed(in, parsed, {})) { st.error = in.kind; return false; }
+    if (in.left) { error = "session file: payload has " + std::to_string(in.left) + " unparsed bytes"; return false; }
+    uint8_t t[kTrailer];
+    if (!rf.source.read(t, kTrailer)) { st.error = rf.source.kind(); error = "session file: trailer read error: " + rf.source.error(); return false; }
+    uint64_t ph = 0;
+    std::memcpy(&ph, t, 8);
+    if (ph != in.hash.digest()) { error = "session file: payload checksum mismatch"; return false; }
+    if (std::memcmp(t + 8, kEnd, 8) != 0) { error = "session file: bad end marker"; return false; }
+    meta = std::move(parsed);
+    bytes = (size_t) rf.size;
+    st.error = SessionError::none;
+    return true;
+}
+
+// The apply pass: the file is walked again and every K/V block goes to the sink.  `kv_part_bytes` is the read
+// pass's list: this walk refuses a file whose layer count or part sizes differ before applying that layer or part,
+// so the sink only ever sees the bytes the read pass admitted.  The payload hash is recomputed and compared to the
+// trailer at the end - a same-size divergence since the read pass ends the caller (fail-stop).  Any failure past
+// the first sink call leaves the caller's state partly written - the caller must fail-stop.
+bool apply_stream_impl(const std::string& path, const SessionFileIdentity& id, const SessionKvBlock& sink,
+                       const std::vector<std::array<uint64_t, 5>>& kv_part_bytes, std::string& error,
+                       SessionStatus& st) {
+    error.clear();
+    st = {};
+    st.error = SessionError::invalid;
+    ReadFile rf;
+    uint64_t payload = 0;
+    if (!rf.open(path, id, SessionReadLimits{}, payload, error, st)) return false;
+    SessionReadLimits open;   // the read pass checked the engine's bounds; this walk only hands the K/V over
+    SavedConversation parsed;   // stays empty: In::discard hashes the metadata and drops it
+    In in{&rf.source, SessionHasher(0), payload, error, open};
+    in.verify_kv = &kv_part_bytes;
+    in.discard = true;
+    if (!get_payload_streamed(in, parsed, sink)) { st.error = in.kind; return false; }
+    if (in.left) { error = "session file: payload has " + std::to_string(in.left) + " unparsed bytes"; return false; }
+    uint8_t t[kTrailer];
+    if (!rf.source.read(t, kTrailer)) { st.error = rf.source.kind(); error = "session file: trailer read error: " + rf.source.error(); return false; }
+    uint64_t ph = 0;
+    std::memcpy(&ph, t, 8);
+    if (ph != in.hash.digest()) { error = "session file: the file changed since the read pass (payload checksum)"; return false; }
+    if (std::memcmp(t + 8, kEnd, 8) != 0) { error = "session file: bad end marker"; return false; }
     st.error = SessionError::none;
     return true;
 }
@@ -1244,6 +1567,38 @@ bool session_file_read(const std::string& path, const SessionFileIdentity& id, S
     bool ok = false;
     try {
         ok = read_impl(path, id, image, bytes, error, limits, st);
+    } catch (const std::bad_alloc&) {
+        error = "session file: out of memory while reading " + path;
+        st.error = SessionError::memory;
+        ok = false;
+    }
+    if (status) *status = st;
+    return ok;
+}
+
+bool session_file_read_streamed(const std::string& path, const SessionFileIdentity& id, SavedConversation& meta,
+                                size_t& bytes, std::string& error, const SessionReadLimits& limits,
+                                std::vector<std::array<uint64_t, 5>>* kv_part_bytes, SessionStatus* status) {
+    SessionStatus st;
+    bool ok = false;
+    try {
+        ok = read_stream_impl(path, id, meta, bytes, error, limits, kv_part_bytes, st);
+    } catch (const std::bad_alloc&) {
+        error = "session file: out of memory while reading " + path;
+        st.error = SessionError::memory;
+        ok = false;
+    }
+    if (status) *status = st;
+    return ok;
+}
+
+bool session_file_apply_streamed(const std::string& path, const SessionFileIdentity& id, const SessionKvBlock& sink,
+                                 const std::vector<std::array<uint64_t, 5>>& kv_part_bytes, std::string& error,
+                                 SessionStatus* status) {
+    SessionStatus st;
+    bool ok = false;
+    try {
+        ok = apply_stream_impl(path, id, sink, kv_part_bytes, error, st);
     } catch (const std::bad_alloc&) {
         error = "session file: out of memory while reading " + path;
         st.error = SessionError::memory;
