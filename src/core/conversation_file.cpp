@@ -87,6 +87,11 @@ uint64_t load64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v;
 // (tmpfs, a filesystem that refuses an aligned direct transfer, or STRATA_SESSION_BUFFERED=1).  Windows and other
 // systems: ordinary buffered I/O, same blocks.
 constexpr size_t kAlign = 4096, kBlock = 16u << 20;
+#ifndef _WIN32
+constexpr size_t kReadBlocks = 4;   // FileSource's read-ahead ring
+#else
+constexpr size_t kReadBlocks = 1;
+#endif
 #ifdef _WIN32
 struct AlignedFree { void operator()(uint8_t* p) const { _aligned_free(p); } };
 using Aligned = std::unique_ptr<uint8_t, AlignedFree>;
@@ -407,6 +412,8 @@ public:
     }
     bool is_open() const { return fd_ >= 0; }
     bool direct() const { return direct_; }
+    int fd() const { return fd_; }
+    bool drop_direct() { return leave_direct(); }   // (FileSource's readers, under their lock)
     bool write_all(const uint8_t* p, size_t n) {
         while (n) {
             const ssize_t w = ::write(fd_, p, n);
@@ -720,20 +727,206 @@ private:
     uint64_t total_ = 0;
 };
 
+#ifndef _WIN32
+// The file read ahead: once `start(end)` knows where the file ends, kReaders threads read its 16 MiB blocks with
+// positioned reads into a ring of kRing buffers, in order, while the caller parses, hashes and applies the blocks
+// before them - the disk (two reads in flight) overlaps the CPU instead of waiting for it.  Without start(), or when
+// no thread can start, blocks are read in the caller's thread as before.  `view` hands out the bytes in place (no
+// copy) for the K/V; `read` copies.  Peak RAM: kRing blocks.
+class FileSource {
+public:
+    static constexpr size_t kRing = 4, kReaders = 2;
+    explicit FileSource(RawFile& f) : f_(f) {
+        for (auto& b : ring_) b.buf = aligned_block();
+    }
+    ~FileSource() { stop(); }
+    bool ok() const {
+        for (const auto& b : ring_) if (!b.buf) return false;
+        return true;
+    }
+    std::string error() const { return !ok() ? std::string("out of memory for the read buffer") : !error_.empty() ? error_ : f_.error(); }
+    SessionError kind() const { return !ok() ? SessionError::memory : failed_ ? kind_ : f_.kind(); }
+    // the file ends at `end`: read ahead from the current position (the start of a block)
+    void start(uint64_t end) {
+        end_ = end;
+        if (!ok() || ahead_) return;
+        ahead_ = true;
+        try {
+            for (size_t i = 0; i < kReaders; ++i) readers_.emplace_back([this] { run(); });
+        } catch (const std::system_error&) {
+            stop();
+            ahead_ = false;   // no thread: every block is read in this thread
+        }
+    }
+    bool read(void* p, size_t n) {
+        uint8_t* d = static_cast<uint8_t*>(p);
+        while (n) {
+            const uint8_t* s = nullptr;
+            size_t c = 0;
+            if (!view(n, s, c)) return false;
+            std::memcpy(d, s, c);
+            d += c; n -= c;
+        }
+        return true;
+    }
+    // up to `n` of the next bytes, in place (valid until the next call); false at the end of the file or on an error
+    bool view(size_t n, const uint8_t*& p, size_t& got) {
+        if (at_ == have_ && !next()) return false;
+        got = std::min(n, have_ - at_);
+        p = cur_ + at_;
+        at_ += got;
+        return true;
+    }
+    // the buffers go (and the readers stop) before the caller reads another file
+    void release() {
+        stop();
+        for (auto& b : ring_) b.buf.reset();
+        cur_ = nullptr;
+        at_ = have_ = 0;
+    }
+    std::optional<Ticker> progress;
+    uint64_t expected = 0;
+private:
+    struct Slot {
+        Aligned buf;
+        uint64_t block = UINT64_MAX;   // the block it holds (or is being filled with)
+        size_t have = 0;
+        bool ready = false, failed = false;
+        int err = 0;
+    };
+    // one block at `block`: positioned reads until it is whole or the file ends; the error's errno on failure
+    bool fill(Slot& s, uint64_t block) {
+        s.have = 0;
+        const uint64_t off = block * kBlock;
+        size_t want = (size_t) std::min<uint64_t>(kBlock, end_ > off ? end_ - off : 0);
+        while (s.have < want) {
+            const size_t ask = (want - s.have + kAlign - 1) / kAlign * kAlign;   // aligned length for direct I/O
+            const ssize_t r = ::pread(f_.fd(), s.buf.get() + s.have, std::min(ask, kBlock - s.have), (off_t) (off + s.have));
+            if (r < 0 && errno == EINTR) continue;
+            if (r < 0 && errno == EINVAL && f_.direct()) {   // a filesystem that refuses this direct transfer
+                std::lock_guard<std::mutex> lk(direct_m_);
+                if (f_.direct() && !f_.drop_direct()) { s.err = EINVAL; return false; }
+                continue;
+            }
+            if (r < 0) { s.err = errno; return false; }
+            if (r == 0) break;
+            s.have += (size_t) r;
+            if (f_.direct() && s.have % kAlign) break;   // short aligned read: end of file
+        }
+        s.have = std::min(s.have, want);
+        return true;
+    }
+    void run() {
+        for (;;) {
+            uint64_t block;
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                block = claim_++;
+                if (stop_ || block * kBlock >= end_) return;
+                Slot& s = ring_[block % kRing];
+                // the slot is free once the caller has moved past the block kRing before this one
+                free_.wait(lk, [&] { return stop_ || block < consumed_ + kRing; });
+                if (stop_) return;
+                s.block = block;
+                s.ready = s.failed = false;
+            }
+            Slot& s = ring_[block % kRing];
+            const bool ok = fill(s, block);
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                s.ready = true;
+                s.failed = !ok;
+            }
+            ready_.notify_all();
+        }
+    }
+    bool next() {
+        at_ = have_ = 0;
+        const uint64_t block = next_block_;
+        if (block * kBlock >= end_ && end_ != UINT64_MAX) return false;
+        Slot& s = ring_[block % kRing];
+        if (ahead_) {
+            std::unique_lock<std::mutex> lk(m_);
+            if (block > 0) { consumed_ = block; free_.notify_all(); }   // the previous block is done with
+            ready_.wait(lk, [&] { return s.ready && s.block == block; });
+        } else {
+            s.block = block;
+            if (end_ == UINT64_MAX) {   // (no start(): read as far as the file goes)
+                s.have = 0;
+                while (s.have < kBlock) {
+                    const long long r = f_.read_some(s.buf.get() + s.have, kBlock - s.have);
+                    if (r < 0) { s.failed = true; s.err = 0; break; }
+                    if (r == 0) break;
+                    s.have += (size_t) r;
+                    if (f_.direct() && s.have % kAlign) break;
+                }
+                if (s.failed) return false;
+            } else {
+                s.failed = !fill(s, block);
+            }
+        }
+        if (s.failed) {
+            failed_ = true;
+            if (s.err) { kind_ = errno_kind(s.err); error_ = std::strerror(s.err); }
+            return false;
+        }
+        if (s.have == 0) return false;
+        ++next_block_;
+        cur_ = s.buf.get();
+        have_ = s.have;
+        const uint64_t before = total_;
+        total_ += have_;
+        if (progress && total_ > before) (*progress)(total_, expected);
+        return true;
+    }
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            stop_ = true;
+        }
+        free_.notify_all();
+        ready_.notify_all();
+        for (auto& t : readers_) t.join();
+        readers_.clear();
+    }
+    std::array<Slot, kRing> ring_;
+    RawFile& f_;
+    std::vector<std::thread> readers_;
+    std::mutex m_, direct_m_;
+    std::condition_variable free_, ready_;
+    uint64_t claim_ = 0, consumed_ = 0, next_block_ = 0, end_ = UINT64_MAX;
+    bool stop_ = false, ahead_ = false, failed_ = false;
+    SessionError kind_ = SessionError::io;
+    std::string error_;
+    const uint8_t* cur_ = nullptr;
+    size_t at_ = 0, have_ = 0;
+    uint64_t total_ = 0;
+};
+#else
 class FileSource {
 public:
     explicit FileSource(RawFile& f) : buf_(aligned_block()), f_(f) {}
     bool ok() const { return buf_ != nullptr; }
     std::string error() const { return buf_ ? f_.error() : std::string("out of memory for the read buffer"); }
     SessionError kind() const { return buf_ ? f_.kind() : SessionError::memory; }
+    void start(uint64_t) {}
+    void release() { buf_.reset(); at_ = have_ = 0; }
     bool read(void* p, size_t n) {
         uint8_t* d = static_cast<uint8_t*>(p);
         while (n) {
-            if (at_ == have_ && !fill()) return false;
-            const size_t c = std::min(n, have_ - at_);
-            std::memcpy(d, buf_.get() + at_, c);
-            at_ += c; d += c; n -= c;
+            const uint8_t* s = nullptr;
+            size_t c = 0;
+            if (!view(n, s, c)) return false;
+            std::memcpy(d, s, c);
+            d += c; n -= c;
         }
+        return true;
+    }
+    bool view(size_t n, const uint8_t*& p, size_t& got) {
+        if (at_ == have_ && !fill()) return false;
+        got = std::min(n, have_ - at_);
+        p = buf_.get() + at_;
+        at_ += got;
         return true;
     }
     std::optional<Ticker> progress;
@@ -746,7 +939,6 @@ private:
             if (r < 0) return false;
             if (r == 0) break;
             have_ += (size_t) r;
-            if (f_.direct() && have_ % kAlign) break;   // short aligned read: end of file
         }
         const uint64_t before = total_;
         total_ += have_;
@@ -758,6 +950,7 @@ private:
     size_t at_ = 0, have_ = 0;
     uint64_t total_ = 0;
 };
+#endif
 
 // ---- serialization: the same walk counts (f == nullptr) and writes
 struct Out {
@@ -913,6 +1106,14 @@ struct In {
     }
     bool u64(uint64_t& v) { return raw(&v, 8); }
     bool i64(int64_t& v) { return raw(&v, 8); }
+    // up to `n` of the next payload bytes in place (hashed), for the K/V: no copy
+    bool view(uint64_t n, const uint8_t*& p, size_t& c) {
+        if (n > left) return fail("payload ends early");
+        if (!f->view((size_t) std::min<uint64_t>(n, SIZE_MAX), p, c)) { kind = f->kind(); return fail("read error: " + f->error()); }
+        hash.update(p, c);
+        left -= c;
+        return true;
+    }
     // `elem`: the fewest file bytes one element takes; `limit`: the most elements the caller accepts
     bool count(uint64_t& n, size_t elem, uint64_t limit = UINT64_MAX) {
         if (!u64(n)) return false;
@@ -1013,11 +1214,6 @@ bool get_payload_streamed(In& in, SavedConversation& s, const SessionKvBlock& si
         return in.fail("K/V layer count differs from the read pass");
     s.kv.resize((size_t) n);
     if (in.record_kv) in.record_kv->assign((size_t) n, {});
-    Aligned block;
-    if (n) {
-        block = aligned_block();
-        if (!block) { in.kind = SessionError::memory; return in.fail("out of memory for the K/V read block"); }
-    }
     for (size_t l = 0; l < (size_t) n; ++l) {
         auto& k = s.kv[l];
         in.kv_layer = l;
@@ -1033,14 +1229,16 @@ bool get_payload_streamed(In& in, SavedConversation& s, const SessionKvBlock& si
             if (in.record_kv) (*in.record_kv)[l][part] = size;
             if (in.verify_kv && size != (*in.verify_kv)[l][part])
                 return in.fail("K/V part size differs from the read pass");
-            for (uint64_t at = 0; at < size; at += kBlock) {
-                const size_t c = (size_t) std::min<uint64_t>(kBlock, size - at);
-                if (!in.raw(block.get(), c)) return false;
-                if (sink && !sink(l, part, at, block.get(), c)) {
+            for (uint64_t at = 0; at < size;) {   // in place from the read-ahead blocks
+                const uint8_t* p = nullptr;
+                size_t c = 0;
+                if (!in.view(size - at, p, c)) return false;
+                if (sink && !sink(l, part, at, p, c)) {
                     if (in.error.empty()) in.error = "session file: the K/V sink failed";
                     in.kind = SessionError::io;
                     return false;
                 }
+                at += c;
             }
         }
     }
@@ -1364,13 +1562,14 @@ uint64_t session_read_max_file_bytes(const SessionReadLimits& l) {
 
 uint64_t session_read_peak_bytes(uint64_t file_bytes) {
     const uint64_t segments = file_bytes / kBlock + 1;
-    // the parsed image (about the payload), the read buffer, a page per buffer segment, the small vectors
-    return sat_add(sat_add(sat_add(file_bytes, kBlock), sat_mul(segments, 4096)), uint64_t(1) << 20);
+    // the parsed image (about the payload), the read buffers, a page per buffer segment, the small vectors
+    return sat_add(sat_add(sat_add(file_bytes, sat_mul(kReadBlocks, kBlock)), sat_mul(segments, 4096)), uint64_t(1) << 20);
 }
 
 uint64_t session_read_stream_peak_bytes(uint64_t file_bytes, const SessionReadLimits& limits) {
-    // the reader's block and the block a K/V part is moved through, plus the small vectors
-    uint64_t n = sat_add(sat_mul(2, kBlock), uint64_t(1) << 20);
+    // the read-ahead blocks of the file and of a delta file's log (the K/V is handed over in place), plus the small
+    // vectors
+    uint64_t n = sat_add(sat_mul(2 * kReadBlocks, kBlock), uint64_t(1) << 20);
     // the parsed running-state metadata: the live checkpoint and every checkpoint the limits accept, each bounded
     // by the tokens and state bytes the engine allows (an open limit can hold no more than the file itself)
     uint64_t cp = sat_mul(limits.max_tokens, sizeof(int32_t) + sizeof(ConversationImageKey));
@@ -1890,6 +2089,7 @@ struct ReadFile {
         // installed before the first block (the header's) is read: every block reports, the first one included
         if (limits.progress) source.progress.emplace(limits.progress);
         source.expected = size;
+        source.start(size);
         uint8_t h[kHeader];
         if (!source.read(h, kHeader)) {
             st.error = source.kind();
@@ -1920,25 +2120,39 @@ bool trailer_ok(ReadFile& rf, In& in, std::string& error, SessionStatus& st, boo
 // part, no gap before its offset, within the engine's part limit), the digest over the committed length compared,
 // and every part of `sizes` covered.  With a `sink` (the apply pass) each record's bytes inside its part go to it,
 // in log order (a later record of the same bytes overwrites).  `progress` is called with the log bytes read.
-bool walk_log(const std::string& path, const SessionFileIdentity& id, const LogRef& ref,
-              const std::vector<std::array<uint64_t, 5>>& sizes, const SessionReadLimits& limits,
-              const SessionKvBlock& sink, const SessionProgress& progress, SessionHashState* end_state,
-              std::string& error, SessionStatus& st, bool changed) {
-    const std::string log_path = session_delta_log_path(path, ref.id);
+// A delta head's log, opened and read ahead as soon as the head's header names it - its reads overlap the head's
+// parse - up to the committed length (a tail past it is never read).
+struct LogFile {
     RawFile raw;
-    uint64_t size = 0;
-    if (!raw.open_session(log_path, size)) {
-        st.error = raw.refused() ? SessionError::invalid : raw.kind();
-        error = "session file: the K/V log " + log_path + ": " + raw.error();
-        return false;
-    }
-    if (size < ref.bytes) { error = "session file: the K/V log is shorter than its head says"; return false; }
-    FileSource src(raw);
-    if (!src.ok()) { st.error = SessionError::memory; error = "session file: " + src.error(); return false; }
+    FileSource src;
     SessionProgress clipped;
-    if (progress) clipped = [&](uint64_t done, uint64_t) { progress(std::min(done, ref.bytes), ref.bytes); };
-    if (clipped) src.progress.emplace(clipped);
-    src.expected = ref.bytes;
+    LogFile() : src(raw) {}
+    bool open(const std::string& path, uint64_t log_id, uint64_t log_bytes, const SessionProgress& progress,
+              std::string& error, SessionStatus& st) {
+        const std::string log_path = session_delta_log_path(path, log_id);
+        uint64_t size = 0;
+        if (!raw.open_session(log_path, size)) {
+            st.error = raw.refused() ? SessionError::invalid : raw.kind();
+            error = "session file: the K/V log " + log_path + ": " + raw.error();
+            return false;
+        }
+        if (size < log_bytes) { error = "session file: the K/V log is shorter than its head says"; return false; }
+        if (!src.ok()) { st.error = SessionError::memory; error = "session file: " + src.error(); return false; }
+        if (progress) {
+            clipped = [progress, log_bytes](uint64_t done, uint64_t) { progress(std::min(done, log_bytes), log_bytes); };
+            src.progress.emplace(clipped);
+        }
+        src.expected = log_bytes;
+        src.start(log_bytes);
+        return true;
+    }
+};
+
+bool walk_log(LogFile& lf, const SessionFileIdentity& id, const LogRef& ref,
+              const std::vector<std::array<uint64_t, 5>>& sizes, const SessionReadLimits& limits,
+              const SessionKvBlock& sink, SessionHashState* end_state, std::string& error, SessionStatus& st,
+              bool changed) {
+    FileSource& src = lf.src;
     SessionHasher hash(0);
     auto read = [&](void* p, size_t n) {
         if (!src.read(p, n)) { st.error = src.kind(); error = "session file: K/V log read error: " + src.error(); return false; }
@@ -1950,8 +2164,6 @@ bool walk_log(const std::string& path, const SessionFileIdentity& id, const LogR
     log_header_bytes(want, ref.id, id);
     if (std::memcmp(h, want, kHeader) != 0) { error = "session file: the K/V log does not belong to this head"; return false; }
     std::vector<std::array<uint64_t, 5>> covered(sizes.size(), std::array<uint64_t, 5>{});
-    Aligned block = aligned_block();
-    if (!block) { st.error = SessionError::memory; error = "session file: out of memory for the K/V read block"; return false; }
     uint64_t pos = kHeader;
     while (pos < ref.bytes) {
         if (ref.bytes - pos < kRecord) { error = "session file: the K/V log ends inside a record"; return false; }
@@ -1971,13 +2183,19 @@ bool walk_log(const std::string& path, const SessionFileIdentity& id, const LogR
             if (offset > covered[layer][part]) { error = "session file: a gap in the K/V log"; return false; }
             if (n > limit || offset > limit - n) { error = "session file: a K/V log record past this engine's limit"; return false; }
         }
-        for (uint64_t at = 0; at < n; at += kBlock) {
-            const size_t c = (size_t) std::min<uint64_t>(kBlock, n - at);
-            if (!read(block.get(), c)) return false;
-            if (pad || !sink) continue;
-            const uint64_t o = offset + at, end = sizes[layer][part];
-            if (o >= end) continue;
-            if (!sink(layer, part, o, block.get(), (size_t) std::min<uint64_t>(c, end - o))) {
+        for (uint64_t at = 0; at < n;) {   // in place from the read-ahead blocks
+            const uint8_t* p = nullptr;
+            size_t c = 0;
+            if (!src.view((size_t) std::min<uint64_t>(n - at, SIZE_MAX), p, c)) {
+                st.error = src.kind();
+                error = "session file: K/V log read error: " + src.error();
+                return false;
+            }
+            hash.update(p, c);
+            const uint64_t o = offset + at, end = pad ? 0 : sizes[layer][part];
+            at += c;
+            if (pad || !sink || o >= end) continue;
+            if (!sink(layer, part, o, p, (size_t) std::min<uint64_t>(c, end - o))) {
                 if (error.empty()) error = "session file: the K/V sink failed";
                 st.error = SessionError::io;
                 return false;
@@ -2047,7 +2265,8 @@ bool read_stream_impl(const std::string& path, const SessionFileIdentity& id, Sa
     // reaches each array, from the size the file declares (In::room) - not from the limits' worst case.  A delta
     // head reads its log through two more blocks.
     const bool delta = rf.version == kVersionDelta;
-    const uint64_t fixed = sat_add(sat_add(sat_mul(delta ? 4 : 2, kBlock), uint64_t(1) << 20),
+    // (a delta file reads its head and its log ahead at once: two rings)
+    const uint64_t fixed = sat_add(sat_add(sat_mul(delta ? 2 * kReadBlocks : kReadBlocks, kBlock), uint64_t(1) << 20),
                                    sat_mul(rf.size / kBlock + 1, 6 * sizeof(uint64_t)));
     if (limits.admit) {
         std::string why;
@@ -2057,6 +2276,10 @@ bool read_stream_impl(const std::string& path, const SessionFileIdentity& id, Sa
             return false;
         }
     }
+    SessionProgress progress;
+    if (limits.progress) progress = [&](uint64_t done, uint64_t total) { limits.progress(rf.size + done, rf.size + total); };
+    LogFile lf;
+    if (delta && !lf.open(path, rf.log_id, rf.log_bytes, progress, error, st)) return false;
     SavedConversation parsed;
     In in{&rf.source, SessionHasher(0), payload, error, limits};
     in.record_kv = kv_part_bytes;
@@ -2078,10 +2301,9 @@ bool read_stream_impl(const std::string& path, const SessionFileIdentity& id, Sa
     }
     if (ref.id != rf.log_id || ref.bytes != rf.log_bytes) { error = "session file: the head's log reference differs from its header"; return false; }
     if (!trailer_ok(rf, in, error, st, false)) return false;
-    SessionProgress progress;
-    if (limits.progress) progress = [&](uint64_t done, uint64_t total) { limits.progress(rf.size + done, rf.size + total); };
+    rf.source.release();
     SessionHashState end;
-    if (!walk_log(path, id, ref, sizes, limits, {}, progress, &end, error, st, false)) return false;
+    if (!walk_log(lf, id, ref, sizes, limits, {}, &end, error, st, false)) return false;
     meta = std::move(parsed);
     bytes = (size_t) (rf.size + ref.bytes);
     if (log) {
@@ -2109,6 +2331,8 @@ bool apply_stream_impl(const std::string& path, const SessionFileIdentity& id, c
     uint64_t payload = 0;
     if (!rf.open(path, id, SessionReadLimits{}, payload, error, st)) return false;
     SessionReadLimits open;   // the read pass checked the engine's bounds; this walk only hands the K/V over
+    LogFile lf;
+    if (rf.version == kVersionDelta && !lf.open(path, rf.log_id, rf.log_bytes, {}, error, st)) return false;
     SavedConversation parsed;   // stays empty: In::discard hashes the metadata and drops it
     In in{&rf.source, SessionHasher(0), payload, error, open};
     in.verify_kv = &kv_part_bytes;
@@ -2127,8 +2351,9 @@ bool apply_stream_impl(const std::string& path, const SessionFileIdentity& id, c
     }
     if (ref.id != rf.log_id || ref.bytes != rf.log_bytes) { error = "session file: the head's log reference differs from its header"; return false; }
     if (!trailer_ok(rf, in, error, st, true)) return false;
+    rf.source.release();
     // the sizes were bound to the read pass by get_kv_dir (verify_kv); the log's digest binds its bytes
-    if (!walk_log(path, id, ref, sizes, open, sink, {}, nullptr, error, st, true)) return false;
+    if (!walk_log(lf, id, ref, sizes, open, sink, nullptr, error, st, true)) return false;
     st.error = SessionError::none;
     return true;
 }
