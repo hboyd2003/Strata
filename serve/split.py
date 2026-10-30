@@ -377,7 +377,7 @@ class SplitEngine:
             raise box["e"]
         return box.get("r")
 
-    def _hand_over(self, ids, cancel, rec: dict):
+    def _hand_over(self, ids, cancel, rec: dict, request_id=None):
         """Prefill engine reads the prompt, saves the session; the decode engine restores it.  Yields keep-alives.
         rec['ok'] is True when the decode engine now holds the prompt's first n-1 tokens."""
         from serve.server import EngineDied, SessionRefused
@@ -390,7 +390,8 @@ class SplitEngine:
         self.__dict__["cur"] = P
         try:
             try:
-                for _ in P.generate(ids, 0, {}, cancel, prefill_only=True):
+                trace = {"request_id": request_id} if request_id is not None else {}   # (STRATA_CORRECTNESS_TRACE)
+                for _ in P.generate(ids, 0, {}, cancel, prefill_only=True, **trace):
                     yield None
             except (EngineDied, ValueError) as e:
                 self.say(f"[strata] split: the prefill engine failed ({e}); the decode engine reads the prompt itself")
@@ -425,7 +426,7 @@ class SplitEngine:
             self.__dict__["cur"] = D
             session_files.remove(path)            # the head and, with STRATA_SESSION_DELTA, its K/V log
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None, request_id=None):
         D = self.decode
         ids = list(ids)
         st = self.stats
@@ -437,7 +438,7 @@ class SplitEngine:
         if use:
             if not self.prefill.alive():
                 self.heal()
-            yield from self._hand_over(ids, cancel, rec)
+            yield from self._hand_over(ids, cancel, rec, request_id)
             if cancel.is_set():
                 self.__dict__["held"] = []
                 return
@@ -454,8 +455,9 @@ class SplitEngine:
         produced: list[int] = []
         ok = False
         try:
-            gen = D.generate(ids, max_new, sampling, cancel, embeddings=embeddings) if embeddings is not None \
-                else D.generate(ids, max_new, sampling, cancel)
+            trace = {"request_id": request_id} if request_id is not None else {}   # (STRATA_CORRECTNESS_TRACE)
+            gen = D.generate(ids, max_new, sampling, cancel, embeddings=embeddings, **trace) if embeddings is not None \
+                else D.generate(ids, max_new, sampling, cancel, **trace)
             for t in gen:
                 if t is not None:
                     produced.append(t)
