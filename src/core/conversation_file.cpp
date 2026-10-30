@@ -96,12 +96,13 @@ constexpr size_t kReadBlocks = 1;
 #ifdef _WIN32
 struct AlignedFree { void operator()(uint8_t* p) const { _aligned_free(p); } };
 using Aligned = std::unique_ptr<uint8_t, AlignedFree>;
-Aligned aligned_block() { return Aligned(static_cast<uint8_t*>(_aligned_malloc(kBlock, kAlign))); }
+Aligned aligned_bytes(size_t n) { return Aligned(static_cast<uint8_t*>(_aligned_malloc(n, kAlign))); }
 #else
 struct AlignedFree { void operator()(uint8_t* p) const { std::free(p); } };
 using Aligned = std::unique_ptr<uint8_t, AlignedFree>;
-Aligned aligned_block() { return Aligned(static_cast<uint8_t*>(std::aligned_alloc(kAlign, kBlock))); }
+Aligned aligned_bytes(size_t n) { return Aligned(static_cast<uint8_t*>(std::aligned_alloc(kAlign, n))); }
 #endif
+Aligned aligned_block() { return aligned_bytes(kBlock); }
 
 uint64_t random64() {
     std::random_device rd;
@@ -1759,6 +1760,13 @@ void remove_other_logs(int dirfd, const std::string& leaf, const std::string& ke
     for (const auto& n : gone) ::unlinkat(dirfd, n.c_str(), 0);
 }
 
+// A v1 head published over a delta one: the old head's logs (each the whole conversation's K/V) go too.
+void remove_logs_of(const std::string& path) {
+    Publisher dir;
+    std::string ignored;
+    if (dir.open(path, ignored)) remove_other_logs(dir.dirfd(), dir.leaf(), {});
+}
+
 bool write_delta_impl(const std::string& path, const SavedConversation& meta, const std::vector<SessionKvSource>& kv,
                       const SessionFileIdentity& id, const SessionLog* base, SessionLog& out,
                       SessionDeltaStats& stats, size_t& bytes, std::string& error, const SessionWriteOptions& opt,
@@ -2018,12 +2026,20 @@ int64_t session_phase_limit_s(uint64_t bytes) {
 bool session_file_write(const std::string& path, const SavedConversation& meta, const std::vector<SessionKvSource>& kv,
                         const SessionFileIdentity& id, size_t& bytes, std::string& error,
                         const SessionWriteOptions& options, SessionStatus* status) {
-    return write_guarded(path, meta, &kv, id, bytes, error, options, status);
+    const bool ok = write_guarded(path, meta, &kv, id, bytes, error, options, status);
+#ifndef _WIN32
+    if (ok) remove_logs_of(path);
+#endif
+    return ok;
 }
 
 bool session_file_write(const std::string& path, const SavedConversation& image, const SessionFileIdentity& id,
                         size_t& bytes, std::string& error, const SessionWriteOptions& options, SessionStatus* status) {
-    return write_guarded(path, image, nullptr, id, bytes, error, options, status);
+    const bool ok = write_guarded(path, image, nullptr, id, bytes, error, options, status);
+#ifndef _WIN32
+    if (ok) remove_logs_of(path);
+#endif
+    return ok;
 }
 
 namespace {
@@ -2125,9 +2141,8 @@ bool trailer_ok(ReadFile& rf, In& in, std::string& error, SessionStatus& st, boo
 // parse - up to the committed length (a tail past it is never read).
 struct LogFile {
     RawFile raw;
-    FileSource src;
+    std::optional<FileSource> src;   // made by open(): a v1 file has no log and allocates no second ring
     SessionProgress clipped;
-    LogFile() : src(raw) {}
     bool open(const std::string& path, uint64_t log_id, uint64_t log_bytes, const SessionProgress& progress,
               std::string& error, SessionStatus& st) {
         const std::string log_path = session_delta_log_path(path, log_id);
@@ -2138,13 +2153,14 @@ struct LogFile {
             return false;
         }
         if (size < log_bytes) { error = "session file: the K/V log is shorter than its head says"; return false; }
-        if (!src.ok()) { st.error = SessionError::memory; error = "session file: " + src.error(); return false; }
+        src.emplace(raw);
+        if (!src->ok()) { st.error = SessionError::memory; error = "session file: " + src->error(); return false; }
         if (progress) {
             clipped = [progress, log_bytes](uint64_t done, uint64_t) { progress(std::min(done, log_bytes), log_bytes); };
-            src.progress.emplace(clipped);
+            src->progress.emplace(clipped);
         }
-        src.expected = log_bytes;
-        src.start(log_bytes);
+        src->expected = log_bytes;
+        src->start(log_bytes);
         return true;
     }
 };
@@ -2162,7 +2178,7 @@ public:
     bool put(size_t layer, size_t part, uint64_t off, const uint8_t* p, size_t n, uint64_t record_n) {
         if (record_n >= kSmall) return flush_part(layer, part) && give(layer, part, off, p, n);
         if (!arena_) {
-            arena_ = Aligned(static_cast<uint8_t*>(std::aligned_alloc(kAlign, kArena)));
+            arena_ = aligned_bytes(kArena);
             stage_ = aligned_block();
             if (!arena_ || !stage_) { error_ = "out of memory for the K/V merge buffers"; return false; }
         }
@@ -2232,7 +2248,7 @@ bool walk_log(LogFile& lf, const SessionFileIdentity& id, const LogRef& ref,
               const std::vector<std::array<uint64_t, 5>>& sizes, const SessionReadLimits& limits,
               const SessionKvBlock& sink, SessionHashState* end_state, std::string& error, SessionStatus& st,
               bool changed) {
-    FileSource& src = lf.src;
+    FileSource& src = *lf.src;
     SessionHasher hash(0);
     KvMerger merger(sink);
     auto sink_failed = [&] {

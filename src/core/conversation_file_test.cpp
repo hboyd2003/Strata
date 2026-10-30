@@ -437,6 +437,15 @@ void delta_tests(const fs::path& dir, const SessionFileIdentity& id) {
         check(!session_file_read(head.string(), id, full, b9, error) && error.find("streamed") != std::string::npos,
               "delta: the materializing read refuses a delta head");
     }
+
+    // 10. a v1 save over a delta head takes the old head's logs with it
+    {
+        SessionLog lg;
+        check(session_file_write_delta(head.string(), meta, pool_sources(pool, none), id, nullptr, lg, stats, bytes,
+                                       error) && count_logs(dir, leaf) == 1, "delta: a delta head before the v1 save");
+        check(session_file_write(head.string(), sample(), id, bytes, error), "delta: a v1 save over it");
+        check(count_logs(dir, leaf) == 0, "delta: no log is left beside the v1 head");
+    }
     check(no_temp(dir), "delta: no temporary file left");
 }
 #endif
