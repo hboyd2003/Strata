@@ -6,6 +6,10 @@ are real wins on other GPUs, on several GPUs, or with batching.
 
 What *was* kept is documented on its own branch (`docs/gfx906/branches/<branch>.md`).
 
+Every result was measured with the fork's A/B harness ([`bench/gfx906/ab.py`](branches/gfx906-ab.md)), each
+variant against the build running at the time with a repeat of the base as the noise control. Kernel numbers (µs)
+come from the parity tests' `--bench` modes.
+
 **Legend.** Percentages are decode tok/s against the build running at the time, unless a row says otherwise.
 The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 
