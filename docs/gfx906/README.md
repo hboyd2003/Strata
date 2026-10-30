@@ -73,7 +73,7 @@ All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did 
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
-**Speed:** about 83 tok/s decode on short prompts; prefill ~740 tok/s at 16K and
+**Speed:** about 83 tok/s decode on short prompts and ~75 tok/s on real agent traffic at ~80K context; prefill ~740 tok/s at 16K and
 ~720 tok/s at 100K. The fork started at ~59 tok/s decode on the same box and model.
 
 ## Branches merged into `main`
