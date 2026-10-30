@@ -10429,6 +10429,20 @@ int main(int argc, char** argv) {
         std::vector<int32_t> live;
         std::vector<ImgKey> live_imgs, req_imgs;
         bool live_ok = false;
+        // STRATA_SESSION_DELTA=1: the session file the live K/V last came from or went to (a SAVE, or a RESTORE of a
+        // delta file), its log state, and how many leading tokens' cells are unchanged since then - the next SAVE to
+        // that path appends only the cells past them.  Lowered where a request rewrites cells (read_from), dropped
+        // whenever the cells come from anywhere else (a parked conversation, a borrowed prefix, a batch slot, #879).
+        struct SessionLineage {
+            std::string path;
+            strata::core::SessionLog log;
+            int64_t unchanged = 0;
+            std::vector<int32_t> ids;
+        } lineage;
+        const bool session_delta = [] {
+            const char* e = std::getenv("STRATA_SESSION_DELTA");
+            return e != nullptr && e[0] == '1' && strata::core::session_delta_supported();
+        }();
         // #879: a window met non-finite logits: the next request drops every cached state first and reads from token 0
         bool nan_flush = false;
         // #3465: the non-finite logits came in a window that reads the PROMPT's tail (the last few tokens, read through
@@ -13724,6 +13738,7 @@ int main(int argc, char** argv) {
                     if (!live_ok || live.empty()) { refuse("no complete session to save"); continue; }
                     size_t bytes = 0, kept = 0;
                     double capture_ms = 0;
+                    strata::core::SessionDeltaStats dstats;
                     try {
                         // RAM PREFLIGHT for the save (not a reservation), BEFORE anything is copied: the deepest
                         // checkpoint is chosen by reference, and the copies it will take (the list below and the one
@@ -13781,10 +13796,21 @@ int main(int argc, char** argv) {
                         const strata::core::ConversationView view{live, live_imgs, disk_checks, cvec_cached};
                         strata::core::SavedConversation meta;
                         std::vector<strata::core::SessionKvSource> sources;
+                        // STRATA_SESSION_DELTA: the cells unchanged since this path's last save or restore are in
+                        // its log already (the same conversation: its ids still lead the live ones)
+                        int64_t unchanged = 0;
+                        const strata::core::SessionLog* base = nullptr;
+                        if (session_delta && lineage.path == path && lineage.log.id != 0) {
+                            const int64_t n = (int64_t) std::min(lineage.ids.size(), live.size());
+                            int64_t same = 0;
+                            while (same < n && lineage.ids[(size_t) same] == live[(size_t) same]) ++same;
+                            unchanged = std::min(lineage.unchanged, same);
+                            if (unchanged > 0) base = &lineage.log;
+                        }
                         // the live running state comes off the device in one synchronous copy
                         blocking("capture", sl.state_bytes == UINT64_MAX ? 0 : sl.state_bytes);
                         if (!strata::core::conversation_snapshot_sources(meta, sources, view, ss, g, mtp.kv_state(),
-                                                                         err)) {
+                                                                         err, base ? unchanged : 0)) {
                             refuse(err, strata::core::SessionError::io);
                             continue;
                         }
@@ -13794,10 +13820,18 @@ int main(int argc, char** argv) {
                         wo.progress = moving;
                         wo.phase = blocking;
                         strata::core::SessionStatus st;
-                        if (!strata::core::session_file_write(path, meta, sources, id, bytes, err, wo, &st)) {
+                        strata::core::SessionLog new_log;
+                        const bool wrote = session_delta
+                            ? strata::core::session_file_write_delta(path, meta, sources, id, base, new_log, dstats,
+                                                                     bytes, err, wo, &st)
+                            : strata::core::session_file_write(path, meta, sources, id, bytes, err, wo, &st);
+                        if (!wrote) {
+                            lineage = {};
                             refuse(err, st.error, st.published);
                             continue;
                         }
+                        if (session_delta) lineage = {path, std::move(new_log), (int64_t) live.size(), live};
+                        else lineage = {};
                         if (st.dir_flush_unsupported)
                             std::fprintf(stderr, "strata serve: session saved to %s; this filesystem cannot flush a "
                                                  "folder, so the new name is not flushed\n", path.c_str());
@@ -13805,9 +13839,22 @@ int main(int argc, char** argv) {
                         refuse("not enough RAM to save the session", strata::core::SessionError::memory);
                         continue;
                     }
+                    std::string delta_note;
+                    if (session_delta) {
+                        char b[256];
+                        if (dstats.appended)
+                            std::snprintf(b, sizeof b, "; delta: appended %.1f MiB to the log (now %.1f MiB), head %.1f MiB",
+                                          dstats.log_written / 1048576.0, dstats.log_bytes / 1048576.0,
+                                          dstats.head_bytes / 1048576.0);
+                        else
+                            std::snprintf(b, sizeof b, "; delta: full write (%s), log %.1f MiB, head %.1f MiB",
+                                          dstats.full_reason.c_str(), dstats.log_bytes / 1048576.0,
+                                          dstats.head_bytes / 1048576.0);
+                        delta_note = b;
+                    }
                     std::fprintf(stderr, "strata serve: session saved %zu tokens, %zu of %zu checkpoints, %zu bytes to %s "
-                                 "in %.1f ms (state %.1f ms)\n", live.size(), kept, checks.size(), bytes,
-                                 path.c_str(), ms(), capture_ms);
+                                 "in %.1f ms (state %.1f ms%s)\n", live.size(), kept, checks.size(), bytes,
+                                 path.c_str(), ms(), capture_ms, delta_note.c_str());
                     std::printf("SAVED %zu %zu %.1f\n", live.size(), bytes, ms());
                 } else {
                     // Streaming restore: the read pass parses and checks the whole file without materializing the
@@ -13816,6 +13863,7 @@ int main(int argc, char** argv) {
                     // 16 MiB blocks and the running state - not the snapshot.
                     strata::core::SavedConversation image;   // running state + K/V headers; the K/V buffers stay empty
                     std::vector<std::array<uint64_t, 5>> file_kv;   // the K/V sizes exactly as the read pass parsed them
+                    strata::core::SessionLog file_log;   // a delta file's log state (the next SAVE appends to it)
                     size_t bytes = 0;
                     try {
                         // bounds this session can ever restore (geometry, layer range, tokens, checkpoints, every
@@ -13840,7 +13888,8 @@ int main(int argc, char** argv) {
                             continue;
                         }
                         strata::core::SessionStatus st;
-                        if (!strata::core::session_file_read_streamed(path, id, image, bytes, err, limits, &file_kv, &st)) {
+                        if (!strata::core::session_file_read_streamed(path, id, image, bytes, err, limits, &file_kv, &st,
+                                                                      &file_log)) {
                             refuse(err, st.error);
                             continue;
                         }
@@ -13927,6 +13976,9 @@ int main(int argc, char** argv) {
                     for (const ConvCheckpoint& c : checks) check_clock = std::max(check_clock, c.used);
                     cvec_cached = image.cvec;
                     live_ok = true;
+                    // the pools hold the file's cells now: a delta file is the base of this path's next SAVE
+                    if (session_delta && file_log.id != 0) lineage = {path, std::move(file_log), (int64_t) live.size(), live};
+                    else lineage = {};
                     if (nan_flush) {   // #879: the file replaced the poisoned session; the parked ones go (no slots here)
                         nan_flush = false;
                         const size_t n_parked = conversations.clear();
@@ -14256,6 +14308,7 @@ int main(int argc, char** argv) {
             // conversation and every idle batch slot go, and this prompt is read from token 0 (resume == 0 below)
             if (nan_flush) {
                 nan_flush = false;
+                lineage = {};
                 if (nf_prompt_windows) {
                     nf_prompt_windows = false;
                     short_read_off_once = o.short_read > 0;
@@ -14534,6 +14587,7 @@ int main(int argc, char** argv) {
             }
             if (slot_source >= 0) {
                 lent_slot = -1;   // (a longer start than the main session's)
+                lineage = {};     // (the cells come from the slot)
                 const auto t0 = Clock::now();
                 if (!copy_from_slot(slot_source, slot_ck, err)) {
                     // the main session may be half written: read this prompt from the start
@@ -14631,6 +14685,7 @@ int main(int argc, char** argv) {
             }
             if (borrow) {
                 const auto t0 = Clock::now();
+                lineage = {};   // (the cells come from a parked conversation)
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
                 if (donor == nullptr ||
                     strata::core::conversation_snapshot_restore_prefix(*donor, parked.tokens, ss, g,
@@ -14659,6 +14714,7 @@ int main(int argc, char** argv) {
             }
             if (incoming) {
                 const auto t0 = Clock::now();
+                lineage = {};   // (the cells come from the parked conversation)
                 if (strata::core::conversation_snapshot_restore(*incoming, ss, g,
                         use_mtp && (stages.empty() || mtp_first) ? &mtp.kv_state() : nullptr, err) !=
                     strata::core::ConversationRestore::restored) {
@@ -14841,6 +14897,7 @@ int main(int argc, char** argv) {
                 mtp.set_cell_floor(resume > 0 && reread_to <= 0 ? kva_floors.floor_for(ids.data(), resume) : 0);
             const int64_t read_from = reread_to > 0 ? 0 : resume;
             conversations.limit_reuse(read_from);
+            lineage.unchanged = std::min(lineage.unchanged, read_from);   // every cell from read_from on is rewritten
             pp_total = n;
             pp_from = read_from;
             pp_reached = read_from;
