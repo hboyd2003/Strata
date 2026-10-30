@@ -67,9 +67,10 @@ Every candidate (an upstream PR, a commit from another fork, or my own idea) goe
 2. **Branch** off `main` as an experiment. Experiments stay local.
 3. **Build** in the ROCm container. For kernel changes, check VGPRs and occupancy before timing anything.
 4. **Parity tests** for the touched kernels, on the MI50.
-5. **A/B**, against the running build, with a repeat of the base as a noise control: decode tok/s and
-   ms per window, every decode stage, prefill at several lengths, long-context turns where relevant, and the
-   greedy output hashes.
+5. **A/B** with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), against the running build, with a repeat of the
+   base as a noise control: decode tok/s and ms per window, every decode stage, prefill at several lengths,
+   long-context turns where relevant, and the greedy output hashes. On the box a small wrapper restarts the server
+   with each variant's config and runs the harness, so every number comes from the same code anyone can run.
 6. **Classify the output effect**: exact, rounding only, or quality-reducing. Quality-reducing changes are
    not taken, whatever the speed.
 7. **Keep or drop.** A keeper gets a real branch name, is merged into `main` and deployed, and is documented
