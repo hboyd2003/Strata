@@ -2632,7 +2632,7 @@ class StrataEngine:
         if prefill_only:                                 # split serving (serve/split.py): read the prompt, make no token
             if embeddings or int(max_new) != 0:
                 raise ValueError("prefill_only is a text prompt and max_new 0")
-            head = f"GEN 0 prefill=1{rid_key}"
+            head = native_trace.command("GEN", 0, " prefill=1" + rid_key, request_id)
         try:
             if rid is not None:                          # several requests write to the engine at once
                 self._send(f"{head} {','.join(str(int(t)) for t in ids)}")
@@ -4211,6 +4211,7 @@ def child_env(cfg: dict, *, offline: bool = False) -> dict:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
+    native_trace.follow_engine_env(env)
     if (cfg.get("arch") or "") == "deepseek41":      # (only this engine reads these; Qwen's environment is untouched)
         deepseek_slot_env(env, cfg)
     parallel_stack_env(env, cfg)
