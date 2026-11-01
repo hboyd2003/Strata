@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Fork release versions: v<upstream version>+<fork version>-gfx906, for example v0.2.8+0.1-gfx906.
 
-The upstream version is the app version `main` is built on (apps/host/package.json); the fork version counts every
-fork release, across upstream versions (0.1, 0.2, ... 0.10, then 1.0 for a big change).
+The upstream version is the app version `main` is built on (apps/host/package.json); the fork version is the version
+of the fork's own changes: it stays the same when only the upstream base moves (v0.2.8+0.1 -> v0.2.9+0.1) and goes up
+when the fork itself changes (0.1, 0.2, ... 0.10, then 1.0 for a big change; pass it with release.sh --fork X.Y).
 
   release_notes.py check <tag>   check the tag against the checkout at HEAD; print upstream=, fork=, image= lines
-  release_notes.py next          print the next tag for HEAD (the fork version after the highest v*-gfx906 tag)
+  release_notes.py next          print the next tag for HEAD (HEAD's upstream version + the latest fork version)
   release_notes.py notes <tag>   print the release notes (Markdown) for the tag
 
 Run inside a checkout with the history and the tags (fetch-depth: 0)."""
@@ -37,10 +38,16 @@ def image_tag(tag):
     return f"{up}-{a}.{b}"   # Docker tags can't hold '+'
 
 
+def version_key(tag):
+    """(fork version, upstream version): the order of releases."""
+    up, fork = parse(tag)
+    return fork, tuple(int(x) for x in up.split("."))
+
+
 def fork_tags(exclude=None):
-    """Every v*-gfx906 tag, highest fork version first."""
+    """Every v*-gfx906 tag, newest release first (highest fork version, then highest upstream version)."""
     tags = [t for t in git("tag", "--list", "v*-gfx906").split() if TAG_RE.match(t) and t != exclude]
-    return sorted(tags, key=lambda t: parse(t)[1], reverse=True)
+    return sorted(tags, key=version_key, reverse=True)
 
 
 def upstream_base(rev):
@@ -72,16 +79,17 @@ def check(tag, rev="HEAD"):
     if up != have:
         sys.exit(f"{tag}: the upstream part is {up}, but {rev} is built on upstream {have} (apps/host/package.json)")
     for t in fork_tags(exclude=tag):
-        if parse(t)[1] >= fork:
-            sys.exit(f"{tag}: fork version {fork[0]}.{fork[1]} is not above the existing {t}")
+        if version_key(t) >= version_key(tag):
+            sys.exit(f"{tag}: not after the existing {t} (the fork version may stay the same only with a newer upstream "
+                     "version)")
         break
     print(f"upstream={up}\nfork={fork[0]}.{fork[1]}\nimage={IMAGE}:{image_tag(tag)}")
 
 
 def next_tag(rev="HEAD"):
     tags = fork_tags()
-    a, b = parse(tags[0])[1] if tags else (0, 0)
-    print(f"v{upstream_version(rev)}+{a}.{b + 1}-gfx906")
+    a, b = parse(tags[0])[1] if tags else (0, 1)
+    print(f"v{upstream_version(rev)}+{a}.{b}-gfx906")
 
 
 def notes(tag, rev="HEAD"):
