@@ -4244,6 +4244,11 @@ bool nib_shift_on() {
     static const bool on = [] { const char* v = std::getenv("STRATA_NIB_SHIFT"); return v != nullptr && std::atoi(v) != 0; }();
     return on;
 }
+// exp/grup STRATA_GU16=1 (opt-in): mode 8's fused gate/up with 16 lanes a row (native_gu_fused16_kernel, rounding-only)
+bool gu16_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_GU16"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
 // exp/tier1 STRATA_DOWN_LPR=2|4|8|16 (0/unset off): modes 7/8's down rows with that many lanes a row (rounding-only)
 int down_lpr() {
     static const int r = [] { const char* v = std::getenv("STRATA_DOWN_LPR"); const int n = v ? std::atoi(v) : 0; return n == 2 || n == 4 || n == 8 || n == 16 ? n : 0; }();
@@ -6219,6 +6224,100 @@ __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned lon
     }
 }
 
+// exp/grup STRATA_GU16=1 (rounding-only): mode 8's fused gate/up with 16 lanes a row.  The 80 dot items of a 2560-wide
+// IQ row are then 5 per lane (the 32-lane loop gives lanes 0-15 three and 16-31 two) and the row reduction is 4 steps;
+// 2 passes of 32 rows instead of 4 of 16, the same LDS staging and SwiGLU/q8_1 epilogue.  Another summation order.
+// amdgpu_waves_per_eu(3): without it IQ2_S took 117 VGPRs (2 waves a SIMD; mode 8's kernel holds 81).
+template<int TG, int SG = 1>
+__global__ void __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(3))) native_gu_fused16_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                              const int32_t* __restrict__ grp_start,
+                                                              const int32_t* __restrict__ n_groups,
+                                                              const int32_t* __restrict__ ent_tok,
+                                                              const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                              block_q8_1* __restrict__ hq) {
+    using GT = typename GridOf<TG>::T;
+    using F = Fmt<TG>;
+    __shared__ GT sgrid[GridOf<TG>::N];
+    __shared__ float res[LDS_NT][64];
+    extern __shared__ int sx_raw[];
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const GT* gsrc = GridOf<TG>::src();
+    for (int i = tid; i < GridOf<TG>::N; i += 256) sgrid[i] = gsrc[i];
+    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const int nb = (int) (L.n_embd / F::qk), xb = (int) (L.n_embd / 32), hb = (int) (L.n_ff / 32);
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const int r0 = blockIdx.x * 32;
+    const block_q8_1* sx = (const block_q8_1*) sx_raw;
+    auto wrow = [&](int i) -> const uint8_t* {   // i < 32: gate row r0 + i, else up row r0 + i - 32
+        return blob + (i < 32 ? (size_t) 0 : L.up_off) + (size_t) (r0 + (i & 31)) * L.gu_row;
+    };
+    for (int c0 = e0; c0 < e1; c0 += LDS_NT) {
+        const int cn = min(LDS_NT, e1 - c0);
+        __syncthreads();
+        for (int j = 0; j < cn; ++j) {
+            const int* src = (const int*) (xq + (size_t) ent_tok[c0 + j] * xb);
+            for (int i = tid; i < xb * 9; i += 256) sx_raw[j * xb * 9 + i] = src[i];
+        }
+        __syncthreads();
+        for (int p = 0; p < 2; ++p) {   // 2 passes of 32 rows: each 32-lane group's halves take their own row pair
+            const int i0 = p * 32 + (lane >> 4) * 16 + warp, i1 = i0 + 8, rl = lane & 15;
+            const uint8_t* w0 = wrow(i0);
+            const uint8_t* w1 = wrow(i1);
+            auto pass = [&](auto ntc) {
+                constexpr int NTC = decltype(ntc)::value;
+                float s0[NTC], s1[NTC];
+#pragma unroll
+                for (int j = 0; j < NTC; ++j) { s0[j] = 0.0f; s1[j] = 0.0f; }
+                for (int k = rl; k < nb * F::ipb; k += 16) {
+                    const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
+#pragma unroll
+                    for (int j = 0; j < NTC; ++j) {
+                        const block_q8_1* xk = sx + (size_t) j * xb + kbx * (F::qk / 32);
+                        const float a = DotG<TG, SG>::f(w0, xk, kbx, iqs, sgrid);
+                        const float b = DotG<TG, SG>::f(w1, xk, kbx, iqs, sgrid);
+                        s0[j] += a;
+                        s1[j] += b;
+                    }
+                }
+#pragma unroll
+                for (int j = 0; j < NTC; ++j) {
+                    float a = s0[j], b = s1[j];
+#pragma unroll
+                    for (int o = 8; o > 0; o >>= 1) {
+                        a += __shfl_xor_sync(0xffffffffu, a, o);
+                        b += __shfl_xor_sync(0xffffffffu, b, o);
+                    }
+                    if (rl == 0) { res[j][i0] = a; res[j][i1] = b; }
+                }
+            };
+            switch (cn) {
+                case 1: pass(std::integral_constant<int, 1>{}); break;
+                case 2: pass(std::integral_constant<int, 2>{}); break;
+                case 3: pass(std::integral_constant<int, 3>{}); break;
+                default: pass(std::integral_constant<int, 4>{}); break;
+            }
+        }
+        __syncthreads();
+        if (warp < cn) {   // swiglu_entries_kernel + quantize_q8_1_kernel, one block of 32 h values per entry
+            const float gg = res[warp][lane], uu = res[warp][32 + lane];
+            const float xi = (gg / (1.0f + __expf(-gg))) * uu;
+            float amax = fabsf(xi), sum = xi;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+                sum += __shfl_xor_sync(0xffffffffu, sum, o);
+            }
+            const float d = q8_1_finite(amax / 127.0f);   // #606, as q8_1_store: finite blocks bit for bit
+            const int8_t q = q8_1_quant(xi, d, amax);
+            block_q8_1* y = hq + (size_t) (c0 + warp) * hb + blockIdx.x;
+            y->qs[lane] = q;
+            if (lane == 0) y->ds = q8_1_ds(d, sum);
+        }
+    }
+}
+
 // dflash2-kern: Strix Halo (gfx1151) takes mode 8 (gate/up + SwiGLU + q8_1 in one launch, the group's activations in LDS) for the
 // IQ packs' gate/up: native_expert_bench on the IQ3_S pack's real rows, 45 groups of one entry (a 8-token verify window's call),
 // gate/up -25% (IQ2_S), -8% (IQ3_XXS), -6% (IQ3_S), bitwise equal to mode 0.  STRATA_GFX1151_EXP8=0 keeps the old layout.
@@ -6437,6 +6536,16 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     if (fused_gu && g_exp_phase != 2) {
         const dim3 gl((unsigned) (L.n_ff / 32), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_embd / 32) * sizeof(block_q8_1);
+        if (gu16_on()) {
+            switch (L.gu_type) {
+                case 16: native_gu_fused16_kernel<16><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
+                case 18: native_gu_fused16_kernel<18><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
+                // IQ3_S on DotG<21, 2> (nib_mask_shift, bitwise DotG<21, 1>'s): <21, 1> spilled 28 bytes a lane at 3 waves a SIMD
+                case 21: native_gu_fused16_kernel<21, 2><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
+                case 23: native_gu_fused16_kernel<23><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
+                default: native_gu_fused16_kernel<22><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
+            }
+        } else
         switch (L.gu_type) {
             case 16: native_gu_fused_kernel<16><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
             case 18: native_gu_fused_kernel<18><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
