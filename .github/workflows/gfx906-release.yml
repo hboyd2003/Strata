@@ -2,8 +2,9 @@ name: gfx906 release
 
 # Publishes the GitHub Release of a fork version tag: v<upstream version>+<fork version>-gfx906, for example
 # v0.2.8+0.1-gfx906. docker/gfx906/release.sh on the MI50 box pushes the image to ghcr.io and then the tag; this job
-# checks the tag against the tagged commit (its upstream part must be the app version it is built on, its fork part
-# above every earlier one) and writes the notes with docker/gfx906/release_notes.py.
+# checks the tag against the tagged commit (its upstream part must be the app version it is built on, and the tag must
+# come after every earlier one: a higher fork version, or the same one on a newer upstream) and writes the notes with
+# docker/gfx906/release_notes.py.
 
 on:
   push:
