@@ -546,7 +546,7 @@ void diag_active_verifier(std::FILE* f) {
 constexpr int kLiveMax = 16;
 VerifyReleaseControl g_live[kLiveMax];
 bool drain_registered_verify_streams(void* stream, void* copy_stream, int device, int timeout_ms) {
-    _mm_sfence();   // the host stores above must be visible before querying for the released spin kernel
+    strata_store_fence();   // the host stores above must be visible before querying for the released spin kernel
     const OnDevice on_device(device);
     const Clock::time_point t0 = Clock::now();
     for (cudaStream_t s : {static_cast<cudaStream_t>(stream), static_cast<cudaStream_t>(copy_stream)}) {

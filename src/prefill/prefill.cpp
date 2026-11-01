@@ -5283,6 +5283,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     core::nibble::fatal(l, "the prompt path's group gather", cudaGetErrorString((cudaError_t) rc));
                             } else
 #endif
+                            {   // (one block: the nibble branch's `else` must cover both gathers below)
                             // NVFP4: each expert's scales go next to its group slot in the same launch
                             if (rp_main && rp_check && !mmq::gather_native_group(gg, f.up_off, mmq_gub / 2, f.down_off, mmq_db, m.rpc_gu,
                                                                                   mmq_gub, m.rpc_d, mmq_db, m.cs, 0, nullptr, zero))
@@ -5313,6 +5314,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                                        f.tail_off ? b + f.tail_off : nullptr,
                                                        f.tail_off ? m.grp_tail + i * 4 : nullptr, i + 1 == gg.n ? zero : 0);
                                 }
+                            }
                             }
                             if (gg_nslots > 0) {
                                 const int rel = gg_slots[gg_nslots - 1];

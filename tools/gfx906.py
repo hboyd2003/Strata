@@ -71,7 +71,7 @@ def validate(record: Any) -> list[str]:
         if not isinstance(provenance.get(key), str) or not provenance[key].strip():
             errors.append(f"missing provenance.{key}")
     commit = provenance.get("commit", "")
-    if commit and not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+    if isinstance(commit, str) and commit and not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
         errors.append("provenance.commit must be a hexadecimal commit SHA")
     if provenance.get("synthetic"):
         errors.append("synthetic fixture cannot be reported as run evidence")
@@ -183,7 +183,7 @@ def validate(record: Any) -> list[str]:
             if cache_state in {"warm", "cached"} and is_int(reused) and reused < 1:
                 errors.append("warm/cached claim requires reused_tokens > 0")
             if cache_state == "cached" and is_int(reused) and is_int(workload.get("prompt_tokens")):
-                if reused / workload["prompt_tokens"] < 0.98:
+                if workload["prompt_tokens"] < 1 or reused / workload["prompt_tokens"] < 0.98:
                     errors.append("cache_state=cached requires at least 98% reused prompt tokens")
     elif cache_evidence is not None:
         errors.append("cache_evidence requires a known cold, warm, or cached cache_state")
