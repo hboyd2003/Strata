@@ -137,20 +137,36 @@ def amd_device_dir(index, sysfs=None):
     return dev if os.path.isdir(dev) else None
 
 
+# The amdgpu hwmon temperature probes, by their tempN_label: the die edge, the hottest spot on the die (junction,
+# "hotspot") and the HBM/GDDR memory.  Not every card has all three; "edge" (temp1) is always there.
+TEMP_SENSORS = ("edge", "junction", "mem")
+
+
 class _Amd:
     """#301: an AMD card's readings from the amdgpu driver's sysfs files (Linux; no ROCm library needed), with _Nvml's
     interface: load (gpu_busy_percent), VRAM (mem_info_vram_used / _total), and from its hwmon folder the temperature
-    (temp1_input, the edge sensor, m°C), power (power1_average or power1_input, µW) and its cap (power1_cap)."""
+    (m°C; the probe whose tempN_label is `temp_sensor`, the edge sensor temp1 by default or when the card has no such
+    probe), power (power1_average or power1_input, µW) and its cap (power1_cap)."""
 
-    def __init__(self, index=0, sysfs=None):
+    def __init__(self, index=0, sysfs=None, temp_sensor="edge"):
         self.dev = amd_device_dir(index, sysfs)
         self.hwmon = None
+        self.temp_file = "temp1_input"
         if self.dev:
             try:
                 hw = sorted(os.listdir(os.path.join(self.dev, "hwmon")))
                 self.hwmon = os.path.join(self.dev, "hwmon", hw[0]) if hw else None
             except OSError:
                 pass
+        if self.hwmon and temp_sensor and temp_sensor != "edge":
+            try:
+                labels = sorted(n for n in os.listdir(self.hwmon) if re.fullmatch(r"temp\d+_label", n))
+            except OSError:
+                labels = []
+            for n in labels:
+                if (_Amd._read(self.hwmon, n) or "").lower() == temp_sensor:
+                    self.temp_file = n.replace("_label", "_input")
+                    break
 
     def ok(self):
         return self.dev is not None
@@ -238,7 +254,7 @@ class _Amd:
                "mem_used": self._int(os.path.join(self.dev, "mem_info_vram_used")),
                "mem_total": self._int(os.path.join(self.dev, "mem_info_vram_total"))}
         if self.hwmon:
-            t = self._int(os.path.join(self.hwmon, "temp1_input"))
+            t = self._int(os.path.join(self.hwmon, self.temp_file))
             out["temp"] = t / 1000.0 if t is not None else None
             p = self._int(os.path.join(self.hwmon, "power1_average"))
             if p is None:
@@ -345,12 +361,13 @@ class _Metal:
         return out
 
 
-def gpu_reader(index=0, amd=False):
+def gpu_reader(index=0, amd=False, temp_sensor="edge"):
     """The card's readings: NVML (NVIDIA), the amdgpu sysfs files with the AMD backend (#301), or IOKit's
     IOAccelerator registry on macOS (Metal backend).  `amd` comes first: no Mac runs the HIP backend, and the
-    tests' AMD trees are read on a Mac too."""
+    tests' AMD trees are read on a Mac too.  `temp_sensor` (one of TEMP_SENSORS) picks the AMD card's temperature
+    probe; NVML has one GPU temperature only."""
     if amd:
-        return _Amd(index)
+        return _Amd(index, temp_sensor=temp_sensor)
     return _Metal(index) if sys.platform == "darwin" else _Nvml(index)
 
 
@@ -529,18 +546,19 @@ class _CpuRamFallback:
 
 # ------------------------------------------------------------------------------------------------ the sampler
 class Telemetry:
-    def __init__(self, extra=None, gpu_index=0, gpu_indices=None, amd=False):
+    def __init__(self, extra=None, gpu_index=0, gpu_indices=None, amd=False, temp_sensor="edge"):
         """`extra()` -> dict of more series to record each second (the server's tok/s).  `gpu_index`: the card the
         engine runs on, numbered as nvidia-smi and NVML number them (by PCI bus); `gpu_indices`: all of them when
         the model is split across several (issue #112) - the gpu_* readings are then their total (memory, power,
         PCIe traffic), mean (load) or hottest (temperature), and "gpus" has each card's own.  `amd`: the AMD backend's
-        cards, numbered as HIP numbers them, read from sysfs (#301)."""
+        cards, numbered as HIP numbers them, read from sysfs (#301).  `temp_sensor`: the AMD cards' temperature probe
+        (TEMP_SENSORS; the config's "gpu_temp_sensor")."""
         self.extra = extra
         self.lock = threading.Lock()
         self.now: dict = {}
         self.hist = collections.defaultdict(lambda: collections.deque(maxlen=HISTORY))
         idx = list(gpu_indices) if gpu_indices and len(gpu_indices) > 1 else [gpu_index]
-        self.gpus = [(i, gpu_reader(i, amd)) for i in idx]
+        self.gpus = [(i, gpu_reader(i, amd, temp_sensor)) for i in idx]
         self.gpus = [(i, g) for i, g in self.gpus if g.ok()] or self.gpus[:1]
         self.gpu = self.gpus[0][1]
         try:
