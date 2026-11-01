@@ -5,7 +5,8 @@
 #   docker/gfx906/release.sh [--fork X.Y] [--image IMAGE | --build] [--dry-run]
 #
 # Run it from a clean checkout of origin/main. The version is v<upstream>+<fork>-gfx906: the upstream part comes from
-# apps/host/package.json, the fork part is the next one after the highest v*-gfx906 tag (or --fork X.Y).
+# apps/host/package.json, the fork part stays the latest release's unless --fork X.Y raises it (do that when the fork's
+# own changes changed, not for a catch-up that only moves the upstream base).
 #
 # Image: by default the one the running `strata` container uses, i.e. what production already runs and was smoke-tested
 # on. --image names another local image; either must carry an org.opencontainers.image.revision label whose code
