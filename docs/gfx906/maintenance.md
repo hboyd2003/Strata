@@ -50,8 +50,9 @@ than hand-merging the old one.
 ## Releases
 
 Releases are tagged `v<upstream version>+<fork version>-gfx906`, for example `v0.2.8+0.1-gfx906`. The upstream part
-is the upstream Strata version `main` is built on; the fork part counts every fork release and doesn't reset when
-upstream moves. Tags are the only refs that are never rewritten, so a release tag is the thing to pin.
+is the upstream Strata version `main` is built on; the fork part is the version of the fork's own changes. It goes up
+only when the fork itself changes, so a catch-up that only moves the upstream base keeps it (`v0.2.8+0.1-gfx906` →
+`v0.2.9+0.1-gfx906`). Tags are the only refs that are never rewritten, so a release tag is the thing to pin.
 
 Each release has a GitHub Release and an image, `ghcr.io/hboyd2003/strata-gfx906:<upstream>-<fork>` (plus `:latest`).
 The image is the one production runs on the MI50 box, pushed from there; the tag then starts a workflow that checks it
