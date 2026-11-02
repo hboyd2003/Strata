@@ -12,6 +12,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -103,7 +104,10 @@ int main(int argc, char** argv) {
     const struct { bool apply, inject; const char* what; } shapes[] = {
         {true, true, "verifier read (pending write + inject)"}, {false, true, "no pending write"}, {false, false, "final mixer (no inject)"}};
     int bad = 0, ran = 0;
+    for (int shape = 1; shape <= 2; ++shape)
     for (const auto& sh : shapes) {
+        k::fused_gr_ro_set_shape(shape);
+        std::printf("-- RO down shape %d (%s)\n", shape, shape == 1 ? "8 rows x 4 waves" : "4 rows x 8 waves");
         for (int T = 1; T <= TM; ++T) {
             k::FusedGrArgs a[TM];
             make(a, T, sh.apply, sh.inject, dwd, dwu, dwi);
@@ -169,44 +173,67 @@ int main(int argc, char** argv) {
         cudaEvent_t e0, e1;
         ck(cudaEventCreate(&e0), "ev");
         ck(cudaEventCreate(&e1), "ev");
-        std::printf("timing (verifier read shape, weights cold over %d sets, %d iters), us per read:\n", sets, iters);
+        cudaStream_t st;
+        ck(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking), "stream");
+        constexpr int GRAPH_READS = 96;   // one verify window's hyper-connection reads
+        // v: 0 default read, 1 RO shape 1, 2 RO shape 2; parts: the RO launches to run (7 = all)
+        auto time_direct = [&](std::vector<k::FusedGrArgs>& as, int T, int v, int parts) {
+            k::fused_gr_ro_set_shape(v == 0 ? 0 : v);
+            k::fused_gr_ro_set_parts(parts);
+            auto run = [&](int i) {
+                const k::FusedGrArgs* a = &as[(size_t) (i % sets) * TM];
+                if (v == 0) k::fused_gr_read_multi(a, T, dxn, st);
+                else k::fused_gr_read_ro(a, T, dxn, st);
+            };
+            for (int i = 0; i < 10; ++i) run(i);
+            ck(cudaEventRecord(e0, st), "rec");
+            for (int i = 0; i < iters; ++i) run(i);
+            ck(cudaEventRecord(e1, st), "rec");
+            ck(cudaEventSynchronize(e1), "sync");
+            float ms = 0.f;
+            ck(cudaEventElapsedTime(&ms, e0, e1), "elapsed");
+            k::fused_gr_ro_set_parts(7);
+            return 1e3 * ms / iters;
+        };
+        auto time_graph = [&](std::vector<k::FusedGrArgs>& as, int T, int v) {   // as the verifier replays it
+            k::fused_gr_ro_set_shape(v == 0 ? 0 : v);
+            cudaGraph_t g;
+            cudaGraphExec_t ge;
+            ck(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal), "capture");
+            for (int i = 0; i < GRAPH_READS; ++i) {
+                const k::FusedGrArgs* a = &as[(size_t) (i % sets) * TM];
+                if (v == 0) k::fused_gr_read_multi(a, T, dxn, st);
+                else k::fused_gr_read_ro(a, T, dxn, st);
+            }
+            ck(cudaStreamEndCapture(st, &g), "end capture");
+            ck(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0), "instantiate");
+            for (int w = 0; w < 3; ++w) ck(cudaGraphLaunch(ge, st), "launch");
+            const int reps = std::max(3, iters / GRAPH_READS);
+            ck(cudaEventRecord(e0, st), "rec");
+            for (int r = 0; r < reps; ++r) ck(cudaGraphLaunch(ge, st), "launch");
+            ck(cudaEventRecord(e1, st), "rec");
+            ck(cudaEventSynchronize(e1), "sync");
+            float ms = 0.f;
+            ck(cudaEventElapsedTime(&ms, e0, e1), "elapsed");
+            cudaGraphExecDestroy(ge);
+            cudaGraphDestroy(g);
+            return 1e3 * ms / (reps * GRAPH_READS);
+        };
+        std::printf("timing (verifier read shape, weights cold over %d sets), us per read; graph = %d reads captured and replayed:\n",
+                    sets, GRAPH_READS);
         for (int T = 1; T <= 5; ++T) {
             std::vector<k::FusedGrArgs> as((size_t) sets * TM);
             for (int s = 0; s < sets; ++s) make(&as[(size_t) s * TM], T, true, true, cd[s], cu[s], ci[s]);
-            double us[2];
-            for (int v = 0; v < 2; ++v) {
-                auto run = [&](int i) {
-                    const k::FusedGrArgs* a = &as[(size_t) (i % sets) * TM];
-                    if (v == 0) k::fused_gr_read_multi(a, T, dxn, nullptr);
-                    else k::fused_gr_read_ro(a, T, dxn, nullptr);
-                };
-                for (int i = 0; i < 10; ++i) run(i);
-                ck(cudaEventRecord(e0), "rec");
-                for (int i = 0; i < iters; ++i) run(i);
-                ck(cudaEventRecord(e1), "rec");
-                ck(cudaEventSynchronize(e1), "sync");
-                float ms = 0.f;
-                ck(cudaEventElapsedTime(&ms, e0, e1), "elapsed");
-                us[v] = 1e3 * ms / iters;
+            const double dd = time_direct(as, T, 0, 7), dg = time_graph(as, T, 0);
+            std::printf("  T=%d  default   direct %6.1f  graph %6.1f\n", T, dd, dg);
+            for (int v = 1; v <= 2; ++v) {
+                const double rd = time_direct(as, T, v, 7), rg = time_graph(as, T, v);
+                const double p1 = time_direct(as, T, v, 1), p3 = time_direct(as, T, v, 3);
+                std::printf("        ro shape %d direct %6.1f  graph %6.1f (%+.1f us, %+.0f%%)   direct split: down %5.1f  reduce %4.1f  up %5.1f\n",
+                            v, rd, rg, rg - dg, 100.0 * (rg / dg - 1.0), p1, p3 - p1, rd - p3);
             }
-            // the RO read's launches alone: down, down + reduce (up = all - that)
-            double part_us[2];
-            for (int p = 0; p < 2; ++p) {
-                k::fused_gr_ro_set_parts(p == 0 ? 1 : 3);
-                for (int i = 0; i < 10; ++i) k::fused_gr_read_ro(&as[(size_t) (i % sets) * TM], T, dxn, nullptr);
-                ck(cudaEventRecord(e0), "rec");
-                for (int i = 0; i < iters; ++i) k::fused_gr_read_ro(&as[(size_t) (i % sets) * TM], T, dxn, nullptr);
-                ck(cudaEventRecord(e1), "rec");
-                ck(cudaEventSynchronize(e1), "sync");
-                float ms = 0.f;
-                ck(cudaEventElapsedTime(&ms, e0, e1), "elapsed");
-                part_us[p] = 1e3 * ms / iters;
-            }
-            k::fused_gr_ro_set_parts(7);
-            std::printf("  T=%d  default %6.1f   ro %6.1f   (%+.1f us, %+.0f%%)   ro split: down %5.1f  reduce %4.1f  up %5.1f\n",
-                        T, us[0], us[1], us[1] - us[0], 100.0 * (us[1] / us[0] - 1.0), part_us[0],
-                        part_us[1] - part_us[0], us[1] - part_us[1]);
         }
+        k::fused_gr_ro_set_shape(0);
     }
     return bad ? 1 : 0;
 }
