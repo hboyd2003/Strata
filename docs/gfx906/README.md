@@ -15,7 +15,7 @@ nothing was kept unless it made that machine faster (see the warning in the [REA
 
 The rest of `docs/` is upstream's and describes upstream Strata. It is left untouched so catch-ups stay clean.
 
-Numbers below are as of 2026-10-30.
+Numbers below are as of 2026-11-02, unless a line gives its own date.
 
 ## The box
 
