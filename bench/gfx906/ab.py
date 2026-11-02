@@ -540,6 +540,15 @@ SUMMARY_KEYS = [
 ]
 
 
+def md_table(header, rows):
+    """A Markdown table padded to column width, so it reads aligned un-rendered too (first column left, the rest right)."""
+    rows = [[str(c) for c in r] for r in [header] + rows]
+    w = [max(3, *(len(r[i]) for r in rows)) for i in range(len(header))]
+    fmt = lambda r: "| " + " | ".join(c.ljust(w[i]) if i == 0 else c.rjust(w[i]) for i, c in enumerate(r)) + " |"
+    sep = "|" + "|".join("-" * (n + 2) if i == 0 else "-" * (n + 1) + ":" for i, n in enumerate(w)) + "|"
+    return [fmt(rows[0]), sep] + [fmt(r) for r in rows[1:]]
+
+
 def table(runs):
     """Markdown tables of the runs' means, with % deltas against the first."""
     labels = [r["label"] for r in runs]
@@ -554,7 +563,6 @@ def table(runs):
         d = f" ({(v - r) / r * 100:+.1f}%)" if _num(r) and r and a is not ref else ""
         return f"{v:.2f}{d}" if isinstance(v, float) else f"{v}{d}"
 
-    head = ["| metric | " + " | ".join(labels) + " |", "|---|" + "---|" * len(runs)]
     extra = [(k, k) for k in keys if (k.startswith("prefill.pf") and k.endswith("_api_tps") and not k.startswith("prefill.pf200")
                                       and not any(k == s for s, _ in SUMMARY_KEYS))
              or (k.startswith("live.lv") and k.endswith(("_api_tps", "_dec_tps", "_startup_ms", "_save_ms", "_restore_ms")))]
@@ -563,7 +571,7 @@ def table(runs):
     for title, ks in (("Key metrics", [(k, n) for k, n in SUMMARY_KEYS if k in keys] + extra),
                       ("GPU stages (needs STRATA_VERIFY_PROFILE=1, ms/window)", gpu)):
         if ks:
-            out += [f"## {title}", ""] + head + [f"| {n} | " + " | ".join(cell(a, k) for a in aggs) + " |" for k, n in ks] + [""]
+            out += [f"## {title}", ""] + md_table(["metric"] + labels, [[n] + [cell(a, k) for a in aggs] for k, n in ks]) + [""]
     out += ["## Output (decode first pass)", ""]
     if len(runs) == 1:
         return out + [f"Answer hashes: {ref.get('decode.first_shas')}" +
