@@ -44,6 +44,12 @@ The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 | 0FL01 | HC BF16 clone / `Q5_HEAD_R2`, `Q8_OUT_R2` | X / N | The clone never fires; the two head kernels are covered by `MMVQ_WAVE_ROWS`. (0FL01's router rows were taken.) |
 | dys0re | `--mtp-adaptive` | H, −0.8% | Needs `--suffix-draft 0` and min-p 0, which alone cost −1.4%. |
 | xxDoman | DFlash2 drafting | X | 0 of 126 drafts accepted on gfx906. |
+| PR #4928 (lyesrock) | `STRATA_LOOKUP=1` (prompt-lookup windows up to 16 rows while a reply copies its context), built with `-DSTRATA_WINDOW_MAX_T=16` | N | Long windows almost never form: the 6-row suffix-lookup windows already get ~99% of their drafts accepted on copy prompts. Where windows did grow, each row past 8 cost ~12 ms against ~6.9 ms per row below that. The wide build changed the output hashes even with the knob off (not tracked down). |
+| rajathvsm | `STRATA_PREWARM_GRAPHS=1` (capture the decode graphs before the server reports ready) | N, rounding | Saves ~150 ms on the first request after a restart and nothing after it. It didn't make A/B restarts steadier either: that noise comes from the adaptive expert cache and from the first arm running on a cold card. |
+| bitaccesscomau | refills of lent expert slots on their own stream | X (not built) | It only changes the one-shot command-line prompt path; `--serve` refills slots through its own code. |
+| samnolak | `PF_ROUTE_EVENT=1` (hand port) | N, exact | +0.3% at 16K prefill, the rest flat: the host already waited only on the router. |
+| mgendre | `POOL_ONE_PHASE=1` | N, exact | Host CPU-expert time −5% in decode, hidden behind the wait for the GPU. The short decode right after a prompt may get slower. |
+| bsorensen110 | `MOE_BUCKET_PLAN=1` | N, exact | Our windows' top-10 groups rarely hold more than one entry, so there is little to bucket; 4K prefill 1.7% slower. |
 
 ## Engine switches
 
@@ -78,6 +84,8 @@ Upstream switches and my own experiments that are in the code but left off.
 | `GPU_MAX_HW_QUEUES=8` / `=2` | H, −23% / −4% | |
 | `STRATA_DMA_BATCH` | X | CUDA 13+ only. |
 | `-mllvm -amdgpu-sched-strategy=max-ilp` (compiler flag) | H, −6.6% | |
+| `MMVQ_IACC_OCC` (own: a waves-per-SIMD cap on the Q6_K head and projection gemv) | N, exact | Benched −5% at 3-token windows only, ~0 end to end. Raising occupancy spills on gfx906, and spilling is very slow here. |
+| `MMVQ_IACC_PF` / `MMVQ_IACC_V2` (own: load prefetch / leaner decode of the same kernel) | H / X, exact | Prefetch doubles the VGPRs and halves occupancy (+35..+45% kernel time). V2 cut the decode ALU work and changed nothing at 1 token: that kernel is limited by memory latency, not ALU. |
 
 ## Tuning
 
@@ -85,7 +93,8 @@ Upstream switches and my own experiments that are in the code but left off.
 | --- | --- | --- |
 | `--spec` / `--spec-min-p` | 2, 3, 4, 5 × min-p 0.4–0.8 | **4 / 0.6 used** (+2.6% over 3 / 0.5); 4 / 0.7 was the steadiest runner-up (+1.2..+1.8%). Spec 5 −1.4..−3%, spec 2 −4.7%. |
 | `--mtp-window` | 8192, 4096, 2048 (default 32768) | H at long context (acceptance 0.69 → 0.61, −4.7%), N short; changes output. |
-| `--adapt-swaps` / `--adapt-every` | swaps 0–160, every 1/2/4 | **80 / 1 used.** Swaps 0 −22%, 8 −2.3%, every 2 −17%. |
+| `--adapt-swaps` / `--adapt-every` | swaps 0–160, every 1/2/4 | **80 / 1 used.** Swaps 0 −22%, 8 −2.3%, every 2 −17%. Re-tested 2026-11-01: 40 and 60 are neutral (the swap wait drops 33–47%, but the time moves to CPU experts and the draft). |
+| `--adapt-decay` | 0.95, 0.99 | **0.97 used.** Both neutral. |
 | `--expert-cache` pinned at the old size | 11635 slots vs auto | +0.8% (noise) for 480 MiB less VRAM headroom. Not taken. |
 | `--lookup-max-t 16` | | H, −1.6% on normal prompts. |
 | `--prefill 4096` | vs auto | H, −18% prefill. |
@@ -104,3 +113,6 @@ Upstream switches and my own experiments that are in the code but left off.
   host doorbells). `--memory-copy-trace` alone is fine; time GPU work with events in the code instead.
 - **A kernel bench is a hint, not a result.** Several kernels that benched 5–10% faster were neutral or slower
   end to end, and one (`ROUTER_W64`) did three times better than its bench predicted.
+- **The gfx906 build holds verify windows of at most 8 rows** (`STRATA_WINDOW_MAX_T=auto`): it takes CMake's CUDA
+  path, and the 16-row default belongs to the wave32 HIP backend. A feature that needs wider windows needs
+  `-DSTRATA_WINDOW_MAX_T=16`, and the parity tests don't cover rows 9–16.
