@@ -76,6 +76,9 @@ default that is on in this build:
 
 `DECODE_TIMING=1` is also set: it only logs per-window timings and does not change speed or output.
 
+Built in, with no switch to set: [`perf/gfx906-dpp-shfl`](branches/perf-gfx906-dpp-shfl.md) (exact DPP / `ds_swizzle`
+xor shuffles instead of `ds_bpermute`, ~+1.9% decode; bitwise).
+
 All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did not change; "rounding only"
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
@@ -116,6 +119,7 @@ In merge order. "Source" says where the code came from.
 | [`serve/session-delta`](branches/serve-session-delta.md) | own | delta session files: append a turn's new K/V instead of rewriting the file |
 | [`fix/rebased-review`](branches/fix-rebased-review.md) | own | review fixes for the forks' and PRs' code (auto sessions, session restore, correctness trace) |
 | [`perf/gfx906-hc-ro`](branches/perf-gfx906-hc-ro.md) | own | rounding-only hyper-connection read (split-K `down`, norm folded in), ~+4% decode |
+| [`perf/gfx906-dpp-shfl`](branches/perf-gfx906-dpp-shfl.md) | own | exact DPP / `ds_swizzle` xor shuffles in the HIP layer instead of `ds_bpermute`, ~+1.9% decode |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
