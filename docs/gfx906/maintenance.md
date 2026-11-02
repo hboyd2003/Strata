@@ -56,7 +56,8 @@ only when the fork itself changes, so a catch-up that only moves the upstream ba
 
 Each release has a GitHub Release and an image, `ghcr.io/hboyd2003/strata-gfx906:<upstream>-<fork>` (plus `:latest`).
 The image is the one production runs on the MI50 box, pushed from there; the tag then starts a workflow that checks it
-and writes the notes. Details: [branches/gfx906-release.md](branches/gfx906-release.md).
+and writes the notes. Since `v0.2.9+0.2-gfx906` each release also has a portable image of the same code (AVX2
+baseline, for other host CPUs): `:<upstream>-<fork>-portable`, plus `:latest-portable`. Details: [branches/gfx906-release.md](branches/gfx906-release.md).
 
 The fork carries no upstream tags. Upstream's own releases are at [Niko1221/Strata](https://github.com/Niko1221/Strata/releases).
 
