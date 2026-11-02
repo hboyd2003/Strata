@@ -73,6 +73,16 @@ def merged_branches(rev):
     return out
 
 
+def portable_image(tag):
+    """The portable image release.sh pushed for the tag, from the tag's message ("Portable image: ..."), or None."""
+    try:
+        msg = git("for-each-ref", "--format=%(contents)", f"refs/tags/{tag}")
+    except subprocess.CalledProcessError:
+        return None
+    m = re.search(r"^Portable image: (\S+)$", msg, re.M)
+    return m.group(1) if m else None
+
+
 def check(tag, rev="HEAD"):
     up, fork = parse(tag)
     have = upstream_version(rev)
@@ -106,14 +116,36 @@ def notes(tag, rev="HEAD"):
         "",
         "## Image",
         "",
-        "```bash",
-        f"docker pull {IMAGE}:{image_tag(tag)}",
-        "```",
-        "",
-        "The image's CPU code is built for the build machine (`-march=native` on a Zen 4: AVX-512 VNNI). It needs a CPU "
-        "with the same instruction set; build it yourself with `--build-arg STRATA_PORTABLE=ON` for other CPUs "
-        f"([gfx906/local]({REPO}/blob/{tag}/docs/gfx906/branches/gfx906-local.md)).",
-        "",
+    ]
+    native = f"{IMAGE}:{image_tag(tag)}"
+    local = f"[gfx906/local]({REPO}/blob/{tag}/docs/gfx906/branches/gfx906-local.md)"
+    port = portable_image(tag)
+    if port:
+        w = max(len(native), len(port))
+        lines += [
+            "Two builds of the same code:",
+            "",
+            "```bash",
+            f"docker pull {native.ljust(w)}   # native: needs AVX-512 VNNI + VBMI (Zen 4, Ice Lake or newer)",
+            f"docker pull {port.ljust(w)}   # portable: any CPU with AVX2 + FMA + F16C",
+            "```",
+            "",
+            "The native image's CPU code is built for the build machine (`-march=native` on a Zen 4). The portable one "
+            f"is built with `--build-arg STRATA_PORTABLE=ON` ({local}). It still carries the AVX-512 expert kernels and "
+            "uses them when the CPU has AVX-512. `latest` and `latest-portable` follow the newest release.",
+            "",
+        ]
+    else:
+        lines += [
+            "```bash",
+            f"docker pull {native}",
+            "```",
+            "",
+            "The image's CPU code is built for the build machine (`-march=native` on a Zen 4: AVX-512 VNNI). It needs a "
+            f"CPU with the same instruction set; build it yourself with `--build-arg STRATA_PORTABLE=ON` for other CPUs ({local}).",
+            "",
+        ]
+    lines += [
         "## What is in it",
         "",
         f"Upstream v{up} plus these branches, merged in this order "
