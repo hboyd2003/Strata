@@ -12,7 +12,8 @@ A release is tagged `v<upstream version>+<fork version>-gfx906`, for example `v0
   `v0.2.9+0.1-gfx906`), so releases are ordered by the fork version, then the upstream version.
 
 The image for a release is `ghcr.io/hboyd2003/strata-gfx906:<upstream>-<fork>` (Docker tags can't hold `+`), and
-`:latest` follows the newest release.
+`:latest` follows the newest release. Each release also has a portable build of the same code (`STRATA_PORTABLE=ON`,
+AVX2 baseline, for other CPUs): `:<upstream>-<fork>-portable`, with `:latest-portable`.
 
 ## Cutting a release
 
@@ -20,12 +21,17 @@ On the MI50 box, from a clean checkout of `origin/main`:
 
 ```bash
 docker/gfx906/release.sh --dry-run     # shows the version, the image and every step
-docker/gfx906/release.sh               # pushes the image, then the tag
+docker/gfx906/release.sh               # builds the portable image, pushes both images, then the tag
 ```
 
 - By default it releases the image production runs (the `strata` container's), after checking that the image's
   `org.opencontainers.image.revision` label has the same code as `HEAD`; the docs, the CI and the release tooling don't
   count, nor does `bench/`. `--image IMAGE` picks another local image under the same check, and `--build` builds a fresh one from `HEAD`.
+- The portable image is built from `HEAD` by default. A build uses every core and a lot of RAM, so the script
+  refuses to build while the `strata` container runs: stop it first (the native image is still read from the stopped
+  container). `--portable-image IMAGE` uses an existing one under the same revision check, and `--no-portable` releases
+  without it. Both images are also checked for their kind (`portable` in the image's `/usr/local/bin/BUILD.json`).
+  The tag's message names the portable image, and the notes list both pulls when it does.
 - The fork version defaults to the latest release's; `--fork X.Y` raises it when the fork's own changes changed.
 - Pushing needs `docker login ghcr.io` with a token that has `write:packages`.
 
