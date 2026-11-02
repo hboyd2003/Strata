@@ -75,6 +75,16 @@ constexpr int kFusedGrWideT = kWindowMaxT;
 bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
                          unsigned long long* stamp_buf = nullptr, int stamp_i0 = 0);
 
+/// gfx906 opt-in STRATA_GR_RO=1: the multi read in a rounding-only order (split-K `down` over every CU with the norm
+/// folded in, a fixed-order reduce, `up`): deterministic, not bitwise the default read.  fused_gr_read_multi calls it
+/// when the switch is on; `fused_gr_read_ro` returns false (and does nothing) off gfx906, for Q8 / REQ8 weights or an
+/// invalid token count.  It never writes the q8_1 image (the multi read then returns false: the caller quantizes).
+bool fused_gr_ro_on();
+bool fused_gr_read_ro(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
+                      unsigned long long* stamp_buf = nullptr, int stamp_i0 = 0);
+/// The bench only: which of the RO read's launches run (1 down, 2 reduce, 4 up; default 7).
+void fused_gr_ro_set_parts(int mask);
+
 /// The bench only: the AMD latency-hidden kernels on (1) or off (0); -1 = STRATA_GR_FAST.
 void fused_gr_set_fast(int on);
 /// The multi read's variants (#315; not main's opt-in STRATA_GR_V3 read, which sums in another order), all computing
