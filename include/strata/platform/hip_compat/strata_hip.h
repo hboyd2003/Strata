@@ -199,12 +199,66 @@ inline hipError_t cudaInitDevice(int device, unsigned int device_flags, unsigned
 #define __shfl_sync(mask, var, lane, ...) __shfl(var, lane, STRATA_SHFL_W(__VA_ARGS__))
 #define __shfl_up_sync(mask, var, delta, ...) __shfl_up(var, delta, STRATA_SHFL_W(__VA_ARGS__))
 #define __shfl_down_sync(mask, var, delta, ...) __shfl_down(var, delta, STRATA_SHFL_W(__VA_ARGS__))
-#define __shfl_xor_sync(mask, var, lanemask, ...) __shfl_xor(var, lanemask, STRATA_SHFL_W(__VA_ARGS__))
 // STRATA_SHFL_W() -> 32, STRATA_SHFL_W(w) -> w
 #define STRATA_SHFL_W(...) STRATA_SHFL_W_I(dummy, ##__VA_ARGS__, STRATA_SHFL_W_GIVEN, STRATA_SHFL_W_DEFAULT)(__VA_ARGS__)
 #define STRATA_SHFL_W_I(d, a, b, ...) b
 #define STRATA_SHFL_W_GIVEN(w) (w)
 #define STRATA_SHFL_W_DEFAULT(...) 32
+// STRATA_SHFL_W64() -> 64 (HIP's own __shfl_xor default, warpSize), STRATA_SHFL_W64(w) -> w
+#define STRATA_SHFL_W64(...) STRATA_SHFL_W_I(dummy, ##__VA_ARGS__, STRATA_SHFL_W_GIVEN, STRATA_SHFL_W64_DEFAULT)(__VA_ARGS__)
+#define STRATA_SHFL_W64_DEFAULT(...) 64
+
+// Exact xor shuffles without LDS round trips (STRATA_GFX906_DPP_SHFL, default 1; =0 restores the plain ds_bpermute path).
+// HIP's __shfl_xor is one ds_bpermute + a wait per step (~45 ns each in a dependent chain).  When the lane mask is a
+// compile-time constant (the unrolled butterflies of every warp/wave sum) and below the width, each step reads EXACTLY
+// lane ^ m, for any data, through:
+//   xor 1 / 2  DPP quad_perm [1,0,3,2] / [2,3,0,1]
+//   xor 4      DPP row_ror 4 (lanes with bit 2 set: i - 4) or row_ror 12 (bit 2 clear: i + 4), selected per lane
+//   xor 8      DPP row_ror 8 ((i - 8) mod 16 = i ^ 8)
+//   xor 16     ds_swizzle bitmask mode, xor 0x10 within 32 lanes (LDS crossbar, no address VGPR)
+// xor 32, non-constant masks and other types keep ds_bpermute.  Every step returns the same lane's value as before,
+// so every reduction keeps its order: bitwise the old result (red_bench, ab/runs/20261102-isa-quick).
+#ifndef STRATA_GFX906_DPP_SHFL
+#define STRATA_GFX906_DPP_SHFL 1
+#endif
+template <int CTRL>
+static __device__ __forceinline__ int strata_dpp_i32(int v) {
+    return __builtin_amdgcn_update_dpp(0, v, CTRL, 0xf, 0xf, false);
+}
+static __device__ __forceinline__ int strata_xor_i32(int v, int m) {
+    if (m == 1) return strata_dpp_i32<0xb1>(v);
+    if (m == 2) return strata_dpp_i32<0x4e>(v);
+    if (m == 4) {
+        const int dn = strata_dpp_i32<0x124>(v);   // row_ror 4: lane i reads i - 4
+        const int up = strata_dpp_i32<0x12c>(v);   // row_ror 12: lane i reads i + 4
+        return (__lane_id() & 4u) ? dn : up;
+    }
+    if (m == 8) return strata_dpp_i32<0x128>(v);
+    return __builtin_amdgcn_ds_swizzle(v, 0x1f | (16 << 10));   // m == 16
+}
+template <typename T>
+static __device__ __forceinline__ T strata_shfl_xor(T var, int m, int w) {
+#if STRATA_GFX906_DPP_SHFL
+    if (__builtin_constant_p(m) && __builtin_constant_p(w) &&
+        (m == 1 || m == 2 || m == 4 || m == 8 || m == 16) && m < w && w <= 64 && (w & (w - 1)) == 0) {
+        if constexpr (sizeof(T) == 4 && __is_trivially_copyable(T)) {
+            return __builtin_bit_cast(T, strata_xor_i32(__builtin_bit_cast(int, var), m));
+        } else if constexpr (sizeof(T) == 8 && __is_trivially_copyable(T)) {
+            struct P { int lo, hi; };
+            P p = __builtin_bit_cast(P, var);
+            p.lo = strata_xor_i32(p.lo, m);
+            p.hi = strata_xor_i32(p.hi, m);
+            return __builtin_bit_cast(T, p);
+        }
+    }
+#endif
+    return (__shfl_xor)(var, m, w);   // parenthesised: HIP's function, never the macro below
+}
+#define __shfl_xor_sync(mask, var, lanemask, ...) strata_shfl_xor(var, lanemask, STRATA_SHFL_W(__VA_ARGS__))
+#if STRATA_GFX906_DPP_SHFL
+// the gfx906-native kernels call HIP's __shfl_xor directly (64-lane wave sums): same exact mapping
+#define __shfl_xor(var, lanemask, ...) strata_shfl_xor(var, lanemask, STRATA_SHFL_W64(__VA_ARGS__))
+#endif
 #define __all_sync(mask, pred) __all(pred)
 #define __any_sync(mask, pred) __any(pred)
 

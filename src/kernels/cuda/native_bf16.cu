@@ -143,8 +143,18 @@ __global__ void bf16_f32_mmvf_multi_kernel(const float* x_, int64_t ldx, const u
 // ordered FMAs and the same warp and block reductions: bit-identical to bf16_f32_mmvf_multi_kernel.
 // S26 STRATA_LFUSE=1 (AUX): one more block computes row 0 of w_aux into y_aux[k * ldy_aux] - the same per-output
 // code, so each aux output is bitwise what its own bf16_f32_mmvf_multi_kernel launch gave (the shared expert's gate)
+#ifndef STRATA_GFX906_MMVF_LB
+#define STRATA_GFX906_MMVF_LB 1
+#endif
+// STRATA_GFX906_MMVF_LB: without __launch_bounds__ HIP compiles a kernel for 1024-thread blocks, a 64-VGPR cap on wave64;
+// the NT = 8 instances spilled 5 VGPRs to scratch there (73 VGPRs, no scratch with the bound).  Same arithmetic: exact.
+#if defined(__HIPCC__) && STRATA_GFX906_MMVF_LB
+#define STRATA_MMVF_ROWS_LB __launch_bounds__(BLOCK_SIZE)
+#else
+#define STRATA_MMVF_ROWS_LB
+#endif
 template <int BLOCK_SIZE, int NT, int RPB, bool TS = false, bool AUX = false>
-__global__ void bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t ldx, const uint16_t* __restrict__ w,
+__global__ void STRATA_MMVF_ROWS_LB bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t ldx, const uint16_t* __restrict__ w,
                                           float* __restrict__ y, int64_t ldy, int n_in, int n_out, int n_tok,
                                           const uint16_t* __restrict__ w_aux = nullptr, float* __restrict__ y_aux = nullptr,
                                           int64_t ldy_aux = 0) {
