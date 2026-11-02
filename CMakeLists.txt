@@ -655,19 +655,6 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       src/kernels/cuda/native_qsa_indexer.cu
       src/kernels/cuda/native_qsa_score.cu
       PROPERTIES COMPILE_OPTIONS "$<IF:$<BOOL:${STRATA_HIP_GFX906}>,,--use_fast_math>")
-    # gfx906: STRATA_GFX906_FAST_MATH=ON gives these files the HIP counterparts of CUDA's --use_fast_math (flush f32
-    # denormals, approximate f32 divide/sqrt, approximate transcendentals).  Off by default: it changes rounding.
-    option(STRATA_GFX906_FAST_MATH "gfx906: HIP fast-math counterparts of --use_fast_math on the native_* kernels" OFF)
-    if(STRATA_HIP_GFX906 AND STRATA_GFX906_FAST_MATH)
-      set_property(SOURCE src/kernels/cuda/native_mmvq.cu src/kernels/cuda/native_bf16.cu
-        src/kernels/cuda/native_gr_norm.cu src/kernels/cuda/native_moe.cu src/kernels/cuda/native_gdn.cu
-        src/kernels/cuda/native_gr_postops.cu src/kernels/cuda/native_router.cu src/kernels/cuda/native_gdn_preprocess.cu
-        src/kernels/cuda/native_qsa.cu src/kernels/cuda/native_rope.cu src/kernels/cuda/native_ple_postops.cu
-        src/kernels/cuda/native_flash_attn.cu src/kernels/cuda/native_qsa_indexer.cu src/kernels/cuda/native_qsa_score.cu
-        APPEND PROPERTY COMPILE_OPTIONS -fgpu-flush-denormals-to-zero -fno-hip-fp32-correctly-rounded-divide-sqrt
-        -fgpu-approx-transcendentals)
-      message(STATUS "Strata: gfx906 fast math on the native_* kernels")
-    endif()
   elseif(STRATA_ENABLE_HIP)
     # Keep Q8_K's multiply and magic-bias rounding as separate FP32 operations on HIP; contraction to an
     # FMA changes tie results. The embedding gather also relies on separately rounded operations.
