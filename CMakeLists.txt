@@ -1702,6 +1702,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(hc_persist_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME hc_persist_parity COMMAND hc_persist_parity)
   add_test(NAME hc_persist_default_off COMMAND hc_persist_parity --off)
+  # gfx906 STRATA_GR_RO=1: the rounding-only hyper-connection read against the default multi read (bounded, two runs
+  # bitwise) and both timed with cold weights (a skip off gfx906)
+  add_executable(hc_ro_parity src/kernels/hc_ro_parity.cpp)
+  target_include_directories(hc_ro_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(hc_ro_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME hc_ro_parity COMMAND hc_ro_parity 0 0)
   if(STRATA_HIP_GFX906)
     # the S6 router (STRATA_HIP_ROUTER_FAST=1 on gfx906) against the portable kernel, bitwise, on wave64
     add_executable(hip_router_fast tests/hip/router_fast.cpp)
