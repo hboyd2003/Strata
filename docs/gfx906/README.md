@@ -84,9 +84,9 @@ means the order of floating-point sums changed and nothing else. Nothing that lo
 what the quant already has (for example a 4-bit KV cache) is used.
 
 **Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md)): about 85 tok/s decode on short prompts
-(84.6 on 2026-11-02 after `GR_RO`). On real agent traffic (the last 100 requests on 2026-10-30: context median
+(85.8 on 2026-11-02 after `perf/gfx906-dpp-shfl`). On real agent traffic (the last 100 requests on 2026-10-30: context median
 144K tokens, p90 185K, ~730 new tokens a turn) decode is 82 tok/s median with 0.74 draft acceptance, and prompt
-reading takes ~45% of engine time. Prefill ~775 tok/s at 16K and ~730 tok/s on a 32K document (2026-11-02), ~720
+reading takes ~45% of engine time. Prefill ~785 tok/s at 16K and ~775 tok/s on a 32K document (2026-11-02), ~720
 tok/s at 100K (measured 2026-10-30, before the GDN prompt switches). The fork started at ~59 tok/s decode on the same box and model.
 
 ## Branches merged into `main`
