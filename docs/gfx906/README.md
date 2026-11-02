@@ -69,6 +69,8 @@ default that is on in this build:
 | `ADAPT_COPY_BLOCKS=16` | `perf/gfx906-draft-copy` | exact |
 | `PREFILL_CPU_SHARE=auto`, `PREFILL_CPU_SHARE_MAX=8192` / `PREFILL_CPU_TOKENS=16` | upstream / `perf/prefill-cpu-tokens` | rounding only |
 | `SELECT_SIMT=1` (prefill only) | upstream | rounding only |
+| `GDN_HEAD=1`, `GDN_PP=2`, `GDN_CONVL2=1`, `GDN_NOY=1` (prefill only) | upstream | exact |
+| `QSA_ROWS=1` (long-context decode: the ≤4-query QSA score calls) | upstream | rounding only |
 | `SESSION_DELTA=1` | `serve/session-delta` | exact |
 | `GR_RO=1` | `perf/gfx906-hc-ro` | rounding only |
 
@@ -78,10 +80,11 @@ All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did 
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
-**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md)): about 83 tok/s decode on short prompts. On real agent traffic (the last 100 requests on 2026-10-30: context median
+**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md)): about 85 tok/s decode on short prompts
+(84.6 on 2026-11-02 after `GR_RO`). On real agent traffic (the last 100 requests on 2026-10-30: context median
 144K tokens, p90 185K, ~730 new tokens a turn) decode is 82 tok/s median with 0.74 draft acceptance, and prompt
-reading takes ~45% of engine time. Prefill ~740 tok/s at 16K and
-~720 tok/s at 100K. The fork started at ~59 tok/s decode on the same box and model.
+reading takes ~45% of engine time. Prefill ~775 tok/s at 16K and ~730 tok/s on a 32K document (2026-11-02), ~720
+tok/s at 100K (measured 2026-10-30, before the GDN prompt switches). The fork started at ~59 tok/s decode on the same box and model.
 
 ## Branches merged into `main`
 
