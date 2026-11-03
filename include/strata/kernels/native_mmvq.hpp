@@ -37,6 +37,7 @@ void native_mmvq_set_wave_rows(int rows);
 // exp/tier1 (tests): STRATA_MMVQ_MUL24 / STRATA_MMVQ_Q6K_R4 forced off (0) / on (1); -1 = the env. Same bits either way.
 void native_mmvq_set_mul24(int on);
 void native_mmvq_set_q6k_r4(int on);
+void native_mmvq_set_wave_lds(int mode);   // #5033 bit 0 XLDS, 1 Q6X4, 2 WPB 8, 3 Q4X4, 4 IACC_XLDS; -1 = the env
 // exp/iacc (gfx906): the integer-accumulating wave64 layout for Q6_K (bit 1), Q4_K (2), Q5_K (4); -1 = STRATA_MMVQ_IACC.
 // rows: rows a wavefront for it (1/2/4; 0 = STRATA_MMVQ_IACC_ROWS, else 4 if n_out >= 4096 else 2). Rounding-only.
 void native_mmvq_set_iacc(int mask, int rows = 0, int k = 0);   // k: ints a lane, 2/4 (0 = auto)
