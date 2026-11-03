@@ -237,6 +237,7 @@
   "toast.requestFailed": "请求失败",
   "tool.arguments": "参数",
   "tool.beingWritten": "(正在写入)",
+  "tool.called": "已调用",
   "tool.chars": "{n} 个字符",
   "tool.cut": "，已为模型截短",
   "tool.done": "完成",

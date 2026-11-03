@@ -237,6 +237,7 @@
   "toast.requestFailed": "Запрос не удался",
   "tool.arguments": "Аргументы",
   "tool.beingWritten": "(пишется)",
+  "tool.called": "Вызван",
   "tool.chars": "{n} симв.",
   "tool.cut": ", сокращено для модели",
   "tool.done": "Готово",
