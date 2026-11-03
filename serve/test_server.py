@@ -921,6 +921,28 @@ class EffortAtTheEnd(unittest.TestCase):
             with self.assertRaises(ValueError):
                 effort_end_args({"effort_position": "middle"}, str(new), Tok())
 
+    def test_the_qwen_code_tail_config(self):
+        from serve.server import reminder_tail_args
+
+        class Tok:
+            def encode(self, text, parse_special=False):
+                return [27, 8678, 12]
+
+        with tempfile.TemporaryDirectory() as d:
+            new, old = Path(d) / "new.exe", Path(d) / "old.exe"
+            new.write_bytes(b"...  --tail-reminder-ids A,B --serve: ...")
+            old.write_bytes(b"... --tail-role-token ID ...")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertIsNone(reminder_tail_args({}, str(new), Tok()))
+                self.assertIsNone(reminder_tail_args({"qwen_code_tail": False}, str(new), Tok()))
+                self.assertEqual(reminder_tail_args({"qwen_code_tail": True}, str(new), Tok()),
+                                 ["--tail-reminder-ids", "27,8678,12"])
+                self.assertIsNone(reminder_tail_args({"qwen_code_tail": True}, str(old), Tok()))
+            self.assertIn("needs an engine with --tail-reminder-ids", out.getvalue())
+            with self.assertRaises(ValueError):
+                reminder_tail_args({"qwen_code_tail": "yes"}, str(new), Tok())
+
 
 class StatusNeedsTheKey(unittest.TestCase):
     """#212: /status shows the end of the answer being written, so it needs the key like /v1/*."""
