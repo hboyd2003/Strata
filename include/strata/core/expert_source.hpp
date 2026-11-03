@@ -680,6 +680,11 @@ void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, cons
 /// STRATA_ROUTE_TAIL_SKIP rank (0: off).  Unset in the environment: 0 until the serve start-up sets the default.
 int tail_skip_rank();
 void set_tail_skip_rank(int r);
+/// --pcie-frac 0 given (one GPU, no peer or remote cache): the session never stages a missed expert over PCIe, not even
+/// for a request that sends its own pcie_frac, so the verify graph is captured without its PCIe branch (no flag wait,
+/// no empty grouped launch per layer).  Set once at start-up, before the first capture.
+void set_pcie_off(bool off);
+bool pcie_off();
 
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out, strata::kernels::cpu::NativeArithmetic arithmetic = strata::kernels::cpu::NativeArithmetic::Default);
