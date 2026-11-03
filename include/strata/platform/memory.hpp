@@ -71,12 +71,17 @@ constexpr bool file_cache_old_rule_default() {
 #endif
 }
 
+/// Whether the old full-read rule is in force: the compile-time default unless the override is set (non-empty).
+inline bool file_cache_old_rule(const char* old_rule_override) {
+    if (old_rule_override != nullptr && old_rule_override[0] != '\0') return old_rule_override[0] != '0';
+    return file_cache_old_rule_default();
+}
+
 inline bool file_cache_keeps_for_tier(uint64_t avail, uint64_t arena_bytes, uint64_t read_bytes,
                                       const char* old_rule_override) {
-    bool old_rule = file_cache_old_rule_default();
-    if (old_rule_override != nullptr && old_rule_override[0] != '\0') old_rule = old_rule_override[0] != '0';
-    return old_rule ? file_cache_keeps(avail, arena_bytes, read_bytes)
-                    : file_cache_keeps(avail, arena_bytes, read_bytes, 1ull << 30, 0.05, 3ull << 29);
+    return file_cache_old_rule(old_rule_override)
+        ? file_cache_keeps(avail, arena_bytes, read_bytes)
+        : file_cache_keeps(avail, arena_bytes, read_bytes, 1ull << 30, 0.05, 3ull << 29);
 }
 
 /// #3237: with the room rule saying the file cache could keep the experts that come back, but holding only
