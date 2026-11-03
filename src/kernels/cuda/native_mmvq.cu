@@ -2604,23 +2604,50 @@ __global__ void q4k_wave4_kernel(const Q4KBlock* __restrict__ w, const Q81Block*
         if (j == 0) y[std::size_t(c) * n_out + row] = (p[c][0] + p[c][2]) + (p[c][1] + p[c][3]);
     }
 }
-// #5033 switches (all opt-in, all bitwise the wave kernel's sums):
-//   STRATA_MMVQ_XLDS=1  the wave kernel stages its activation columns in shared memory (16-byte aligned rows, <= 32 KB)
-//   STRATA_MMVQ_Q6X4=1 / STRATA_MMVQ_Q4X4=1  (with XLDS) Q6_K / Q4_K through the four-lanes-in-one kernels above
-//   STRATA_MMVQ_WPB=8   8 wavefronts per block in the four-lane kernels (4 otherwise)
-//   STRATA_MMVQ_IACC_XLDS=1  the same staging in the iacc layout below (rounding as iacc's, bits as iacc's)
-// native_mmvq_set_wave_lds (tests): bit 0 XLDS, bit 1 Q6X4, bit 2 WPB 8, bit 3 Q4X4, bit 4 IACC_XLDS; -1 = the env.
-// The four-lane kernels take their type ahead of STRATA_MMVQ_IACC.
+// #5033 switches (all opt-in, all bitwise the kernel they replace):
+//   STRATA_MMVQ_XLDS=N   the wave kernel stages its activation columns in shared memory for calls of <= N columns
+//                        (1 = one-column calls only; 16-byte aligned, <= 32 KB)
+//   STRATA_MMVQ_Q6X4=N / STRATA_MMVQ_Q4X4=N  Q6_K / Q4_K calls of <= N columns through the four-lane kernels above
+//                        (staged activations; they take the type ahead of STRATA_MMVQ_IACC).  NB #5033's "=1" means on
+//                        for every T; here it is T = 1 only (on the MI50 they beat iacc at T = 1 only, mmvq_wave_rows_parity)
+//   STRATA_MMVQ_WPB=8    8 wavefronts per block in the four-lane kernels (4 otherwise)
+//   STRATA_MMVQ_IACC_XLDS=1|all|q6k,q4k,q5k  the same staging in the iacc layout below for those types (bits as iacc's)
+// native_mmvq_set_wave_lds (tests): bit 0 XLDS, bit 1 Q6X4, bit 2 WPB 8, bit 3 Q4X4, bit 4 IACC_XLDS (all types), every
+// column count; -1 = the env.
+struct WaveLds { int xl_t = 0, q6_t = 0, q4_t = 0, wpb = 4, iacc = 0; };
 int g_wave_lds = -1;
-int wave_lds() {
-    if (g_wave_lds >= 0) return g_wave_lds;
-    static const int m = [] {
-        const auto on = [](const char* n) { const char* v = std::getenv(n); return v != nullptr && v[0] == '1'; };
-        const char* wpb = std::getenv("STRATA_MMVQ_WPB");
-        return (on("STRATA_MMVQ_XLDS") ? 1 : 0) | (on("STRATA_MMVQ_Q6X4") ? 2 : 0) | (on("STRATA_MMVQ_Q4X4") ? 8 : 0) |
-               (wpb != nullptr && std::atoi(wpb) == 8 ? 4 : 0) | (on("STRATA_MMVQ_IACC_XLDS") ? 16 : 0);
-    }();
-    return m;
+WaveLds wave_lds_env() {
+    WaveLds c;
+    const auto num = [](const char* n) { const char* v = std::getenv(n); return v ? std::atoi(v) : 0; };
+    c.xl_t = num("STRATA_MMVQ_XLDS");
+    c.q6_t = num("STRATA_MMVQ_Q6X4");
+    c.q4_t = num("STRATA_MMVQ_Q4X4");
+    c.wpb = num("STRATA_MMVQ_WPB") == 8 ? 8 : 4;
+    if (const char* v = std::getenv("STRATA_MMVQ_IACC_XLDS")) {
+        const std::string t(v);
+        if (t == "1" || t == "all") c.iacc = 7;
+        else c.iacc = (t.find("q6k") != std::string::npos ? 1 : 0) | (t.find("q4k") != std::string::npos ? 2 : 0) |
+                      (t.find("q5k") != std::string::npos ? 4 : 0);
+    }
+    return c;
+}
+WaveLds wave_lds() {
+    if (g_wave_lds >= 0) {
+        WaveLds c;
+        const int m = g_wave_lds;
+        c.xl_t = (m & 1) ? 16 : 0;
+        c.q6_t = (m & 2) ? 16 : 0;
+        c.wpb = (m & 4) ? 8 : 4;
+        c.q4_t = (m & 8) ? 16 : 0;
+        c.iacc = (m & 16) ? 7 : 0;
+        return c;
+    }
+    static const WaveLds c = wave_lds_env();
+    return c;
+}
+bool xl_ok(const void* x, int n_in, int ncols, std::size_t& sm) {
+    sm = std::size_t(ncols) * (n_in / Q8K) * sizeof(Q81Block);
+    return (reinterpret_cast<std::uintptr_t>(x) & 15) == 0 && (n_in / Q8K * 9) % 4 == 0 && sm <= 32768;
 }
 template<typename F, int NCOLS, int R>
 void wave_launch_r(const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s,
@@ -2640,32 +2667,25 @@ template<typename F, int NCOLS>
 void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
-    const int lds = wave_lds();
-    std::size_t xl_bytes = 0;
-    if (lds != 0) {
-        const std::size_t sm = std::size_t(NCOLS) * (n_in / Q8K) * sizeof(Q81Block);
-        if ((reinterpret_cast<std::uintptr_t>(x) & 15) == 0 && (n_in / Q8K * 9) % 4 == 0 && sm <= 32768) xl_bytes = sm;
-    }
-    if (xl_bytes != 0 && (lds & (2 | 8)) != 0) {   // the four-lane kernels (they need the staged activations)
-        const int wpb = (lds & 4) ? 8 : 4;
-        const unsigned blocks4 = unsigned((std::size_t(n_out) + 4 * wpb - 1) / (4 * wpb));
+    const WaveLds c = wave_lds();
+    std::size_t sm = 0;
+    const bool x4 = (std::is_same_v<F, Q6KTraits> && NCOLS <= c.q6_t) || (std::is_same_v<F, Q4KTraits> && NCOLS <= c.q4_t);
+    const bool ok = (x4 || NCOLS <= c.xl_t) && xl_ok(x, n_in, NCOLS, sm);
+    if (x4 && ok) {   // the four-lane kernels (they need the staged activations)
+        const unsigned blocks4 = unsigned((std::size_t(n_out) + 4 * c.wpb - 1) / (4 * c.wpb));
         const bool m24 = mul24_on();
         if constexpr (std::is_same_v<F, Q6KTraits>) {
-            if (lds & 2) {
-                if (m24) q6k_wave4_kernel<NCOLS, true><<<blocks4, 64 * wpb, xl_bytes, s>>>(w, x, y, n_in, n_out);
-                else q6k_wave4_kernel<NCOLS, false><<<blocks4, 64 * wpb, xl_bytes, s>>>(w, x, y, n_in, n_out);
-                return;
-            }
+            if (m24) q6k_wave4_kernel<NCOLS, true><<<blocks4, 64 * c.wpb, sm, s>>>(w, x, y, n_in, n_out);
+            else q6k_wave4_kernel<NCOLS, false><<<blocks4, 64 * c.wpb, sm, s>>>(w, x, y, n_in, n_out);
+            return;
         }
         if constexpr (std::is_same_v<F, Q4KTraits>) {
-            if (lds & 8) {
-                if (m24) q4k_wave4_kernel<NCOLS, true><<<blocks4, 64 * wpb, xl_bytes, s>>>(w, x, y, n_in, n_out);
-                else q4k_wave4_kernel<NCOLS, false><<<blocks4, 64 * wpb, xl_bytes, s>>>(w, x, y, n_in, n_out);
-                return;
-            }
+            if (m24) q4k_wave4_kernel<NCOLS, true><<<blocks4, 64 * c.wpb, sm, s>>>(w, x, y, n_in, n_out);
+            else q4k_wave4_kernel<NCOLS, false><<<blocks4, 64 * c.wpb, sm, s>>>(w, x, y, n_in, n_out);
+            return;
         }
     }
-    if ((lds & 1) == 0) xl_bytes = 0;   // the wave kernel stages only under XLDS
+    const std::size_t xl_bytes = ok && NCOLS <= c.xl_t ? sm : 0;   // the wave kernel stages only under XLDS
     if constexpr (std::is_same_v<F, Q6KTraits> && NCOLS >= 2) {
         if (n_out >= 10240 && q6k_r4_on()) { wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s, xl_bytes); return; }
     }
@@ -2729,6 +2749,7 @@ struct IaccLane { unsigned o0, o1, o2; int s0, s1; unsigned xq, xd; };
 template<int K> struct IaccRaw6 { int a[K], b[K]; int s, d; };
 template<int K>
 struct IaccQ6K {
+    static constexpr int MASK = 1;   // STRATA_MMVQ_IACC / IACC_XLDS bit
     static constexpr unsigned BYTES = 210;
     static constexpr bool SUMU = false;
     using Raw = IaccRaw6<K>;
@@ -2775,6 +2796,7 @@ __device__ __forceinline__ void iacc_scale_min(const int (&w3)[3], int s, int& d
 template<int K> struct IaccRawK { int a[K], b[K]; int sc[3]; int dm; };
 template<bool Q5, int K>
 struct IaccQ45K {
+    static constexpr int MASK = Q5 ? 4 : 2;   // STRATA_MMVQ_IACC / IACC_XLDS bit
     static constexpr unsigned BYTES = Q5 ? 176 : 144;
     static constexpr bool SUMU = true;
     using Raw = IaccRawK<K>;
@@ -2933,8 +2955,8 @@ int iacc_k(int bpr) {
 template<template<int> class P, int K, int NCOLS, int R>
 void iacc_launch_r(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
     const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
-    const std::size_t sm = std::size_t(NCOLS) * (n_in / Q8K) * sizeof(Q81Block);
-    if ((wave_lds() & 16) && (reinterpret_cast<std::uintptr_t>(x) & 15) == 0 && (n_in / Q8K * 9) % 4 == 0 && sm <= 32768)
+    std::size_t sm = 0;
+    if ((wave_lds().iacc & P<K>::MASK) && xl_ok(x, n_in, NCOLS, sm))
         native_mmvq_iacc_kernel<P, K, NCOLS, R, true><<<blocks, 256, sm, s>>>(static_cast<const uint8_t*>(w),
                                                                             static_cast<const Q81Block*>(x), y, n_in, n_out);
     else
@@ -2974,8 +2996,8 @@ bool iacc_try(const void* w, const void* x, float* y, int n_in, int n_out, int n
     const int m = iacc_mask();
     if (m == 0 || ncols > 8) return false;   // its kernels take 1..8 columns; the wave kernel goes to 16 (VERIFY_MAX_T > 8)
     // #5033's four-lane kernels (STRATA_MMVQ_Q6X4 / Q4X4) take their type ahead of this layout
-    if constexpr (std::is_same_v<F, Q6KTraits>) { if (wave_lds() & 2) return false; }
-    if constexpr (std::is_same_v<F, Q4KTraits>) { if (wave_lds() & 8) return false; }
+    if constexpr (std::is_same_v<F, Q6KTraits>) { if (ncols <= wave_lds().q6_t) return false; }
+    if constexpr (std::is_same_v<F, Q4KTraits>) { if (ncols <= wave_lds().q4_t) return false; }
     if constexpr (std::is_same_v<F, Q6KTraits>) { if (m & 1) { iacc_launch<IaccQ6K>(w, x, y, n_in, n_out, ncols, s); return true; } }
     if constexpr (std::is_same_v<F, Q4KTraits>) { if (m & 2) { iacc_launch<IaccQ4K>(w, x, y, n_in, n_out, ncols, s); return true; } }
     if constexpr (std::is_same_v<F, Q5KTraits>) { if (m & 4) { iacc_launch<IaccQ5K>(w, x, y, n_in, n_out, ncols, s); return true; } }
