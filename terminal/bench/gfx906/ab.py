@@ -9,10 +9,13 @@
   1. decode, x 2 reps, greedy, thinking off: two code prompts (write a class with tests; find and fix the bugs in a
      function), two writing prompts (an essay, an explanation) and three specific-knowledge questions (chemistry,
      history, physics): tok/s overall and per kind, draft acceptance, answer hashes.
-  1b. long context (long_ctx): a ~30K-token document (the engine's reference manual, then one of its source files)
-     and a question that needs both, 350 tokens out. Rep 1 reads the document, rep 2 reuses it from the conversation
-     cache: read tok/s, decode at ~30K, reuse. A per-run nonce keeps a disk session from an earlier run out of it, so
-     its answer hash is reported on its own.
+  1b. long context (long_ctx), x the same reps, after ALL decode reps (so no decode rep follows a 30K read: that read
+     reshuffles the adaptive expert cache, and before v3 every decode rep after the first ran on that reshuffled
+     cache, which roughly doubled the run-to-run noise of decode tok/s): a ~30K-token document (the engine's
+     reference manual, then one of its source files) and a question that needs both, ~900 tokens out (cap 1000).
+     Rep 1 reads the document, later reps reuse it from the conversation cache: read tok/s, decode at ~30K for the
+     read rep and the reuse reps separately, reuse. A per-run nonce keeps a disk session from an earlier run out of
+     it, so its answer hash is reported on its own.
   2. prefill: three ~200-token prompts, ~4K and ~16K-token prompts (a nonce in front, so the conversation cache can't
      reuse them; 16 output tokens), then a follow-up turn on the 16K exchange (~1.8K new tokens over ~16K cached).
 The long prompts are built from the engine's own docs and source at a fixed commit (CORPUS_REV), so every machine sends
@@ -56,7 +59,8 @@ import hashlib, json, os, platform, re, subprocess, sys, threading, time, urllib
 from pathlib import Path
 from statistics import mean
 
-TOOL_VERSION = 2   # 2: the eight-prompt decode set with long_ctx (1: three prompts)
+TOOL_VERSION = 3   # 3: long_ctx after all decode reps, ~900-token answer; 2: the eight-prompt decode set with long_ctx
+                   # inside each rep, ~300-token answer; 1: three prompts
 CORPUS_REV = "870aedd9e1ebe1c91f94da93b59af17729f6c5c0"   # upstream Strata v0.2.8: the prompts' source text
 REPO = Path(__file__).resolve().parents[2]
 CODE_FIX = '''def merge_intervals(intervals):
@@ -82,14 +86,14 @@ PROMPTS = [
                   "About 250 words.", 350),
     ("know_phys", "What is the Chandrasekhar limit? Give its approximate value, the physics that sets it, who derived it and when, "
                   "and what happens to a white dwarf that exceeds it. About 250 words.", 350),
-    ("long_ctx", None, 350),
+    ("long_ctx", None, 1000),
 ]
 LONG_TAG = "long_ctx"
 GROUPS = {"code": ("code_write", "code_fix"), "writing": ("essay", "explain"), "knowledge": ("know_chem", "know_hist", "know_phys")}
 # long_ctx: prose then code from CORPUS_REV (~110K characters, ~30K tokens), and a question that needs both
 LONG_DOC = [("docs/DETAILS.md", 70000), ("src/core/conversation_file.cpp", 40000)]
 LONG_Q = ("Above are an inference engine's reference manual and one of its source files. Using only them, explain in about "
-          "250 words how a conversation is kept between requests: the in-RAM conversation cache, the session files on disk, "
+          "700 words how a conversation is kept between requests: the in-RAM conversation cache, the session files on disk, "
           "the settings that control them, and what the source file does when it writes or reads a session file.")
 PREFILL_CHARS = [("pf200a", 700), ("pf200b", 700), ("pf200c", 700), ("pf4k", 14000), ("pf16k", 56000)]
 TURN_CHARS = 6300                  # the follow-up turn after pf16k: ~1.8K tokens of the text that follows pf16k's
@@ -417,18 +421,22 @@ def measure(reps, do_prefill, nonce, pf_reps=1, live_reps=0, interleave=False, d
     for rep in range(reps):
         for tag, p, n in PROMPTS:
             if tag == LONG_TAG:
-                if not do_long:
-                    continue
-                # the run's nonce: rep 0 reads the document even if an earlier run left it in a disk session; later reps
-                # reuse it from the conversation cache (so its answer hash can't match across runs)
-                long_body = long_body or f"[ab {tag} {nonce}]\n{CORPUS.long_doc()}\n\n{LONG_Q}"
-                row = chat(long_body, n)
-                rows.append({"pass": "long", "rep": rep, "prompt": tag, **row})
-                print(f"  long {tag} rep {rep}: {row.get('api_prompt_n')} tokens read at {row.get('api_prompt_tps')} tok/s, "
-                      f"decode {row['decode_tps']} tok/s", flush=True)
                 continue
             rows.append({"pass": "decode", "rep": rep, "prompt": tag, **chat(f"[ab {tag}] {p}", n)})
             print(f"  decode {tag} rep {rep}: {rows[-1]['decode_tps']} tok/s", flush=True)
+    # long_ctx only after every decode rep: its 30K read reshuffles the adaptive expert cache, so a decode rep after it
+    # gives other answers (other acceptance) from run to run
+    for rep in range(reps if do_long else 0):
+        for tag, p, n in PROMPTS:
+            if tag != LONG_TAG:
+                continue
+            # the run's nonce: rep 0 reads the document even if an earlier run left it in a disk session; later reps
+            # reuse it from the conversation cache (so its answer hash can't match across runs)
+            long_body = long_body or f"[ab {tag} {nonce}]\n{CORPUS.long_doc()}\n\n{LONG_Q}"
+            row = chat(long_body, n)
+            rows.append({"pass": "long", "rep": rep, "prompt": tag, **row})
+            print(f"  long {tag} rep {rep}: {row.get('api_prompt_n')} tokens read at {row.get('api_prompt_tps')} tok/s, "
+                  f"decode {row['decode_tps']} tok/s", flush=True)
     if do_prefill:
         for pr in range(pf_reps):
             for tag, nc in PREFILL_CHARS:
@@ -476,7 +484,10 @@ def agg(rows, engine=None):
             first, later = [r for r in rs if r["rep"] == 0], [r for r in rs if r["rep"] > 0]
             for k, f, src in (("read_tokens", "api_prompt_n", first), ("read_tps", "api_prompt_tps", first),
                               ("read_ms", "api_prompt_ms", first), ("reused_tokens", "api_cache_n", later),
-                              ("reuse_read_tokens", "api_prompt_n", later), ("startup_ms", "startup_ms", later)):
+                              ("reuse_read_tokens", "api_prompt_n", later), ("startup_ms", "startup_ms", later),
+                              ("read_decode_tps", "decode_tps", first), ("reuse_decode_tps", "decode_tps", later),
+                              ("read_ms_per_window", "dec_ms_per_window", first),
+                              ("reuse_ms_per_window", "dec_ms_per_window", later)):
                 v = [r[f] for r in src if _num(r.get(f))]
                 if v:
                     out[f"long.{k}"] = round(mean(v), 2)
@@ -527,7 +538,8 @@ SUMMARY_KEYS = [
     ("decode.code_tps", "decode tok/s: code"), ("decode.writing_tps", "decode tok/s: writing"),
     ("decode.knowledge_tps", "decode tok/s: knowledge"),
     ("long.read_tokens", "long: document tokens"), ("long.read_tps", "long: read tok/s"),
-    ("long.decode_tps", "long: decode tok/s at ~30K"), ("long.api_accept", "long: draft accept"),
+    ("long.decode_tps", "long: decode tok/s at ~30K"), ("long.read_decode_tps", "long: decode tok/s, read rep"),
+    ("long.reuse_decode_tps", "long: decode tok/s, reuse reps"), ("long.api_accept", "long: draft accept"),
     ("long.dec_ms_per_window", "long: ms/window"), ("long.reused_tokens", "long: tokens reused (rep 2)"),
     ("long.startup_ms", "long: time to first token, reused (ms)"),
     ("prefill.pf200_api_tps", "prefill ~200 tok/s"), ("prefill.pf4k_api_tps", "prefill ~4K tok/s"),
@@ -669,7 +681,7 @@ def cmd_compare():
     runs = [json.loads((Path(d) / "results.json").read_text()) for d in dirs]
     warn = []
     if len({r.get("tool_version") for r in runs}) > 1:
-        warn.append("- The runs come from different harness versions (different prompts): compare only the rows they share.")
+        warn.append("- The runs come from different harness versions (different prompts or pass order): compare only the rows they share.")
     if len({json.dumps(r["corpus"], sort_keys=True) for r in runs}) > 1:
         warn.append("- The runs used different prompt text: their prefill numbers aren't comparable.")
     if len({r["suite"] + json.dumps(measured_options(r["options"])) for r in runs}) > 1:
