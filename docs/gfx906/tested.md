@@ -32,7 +32,7 @@ The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 | PR #3073 | `STRATA_SELECT_SIMT=2` | N | Bitwise equal to `SELECT_SIMT=1` (already upstream and in use), no faster end to end. |
 | PR #4567 | `STRATA_QSA_ATTN_VARIANT=2` (32-cell attention chunks) | H, rounding | Attention −26% at short context but +1% overall (noise); prefill −1.3..−2.2%; at 80K context the drafter gets 9% slower. |
 | PR #4158 | `PF_MMVQ` (MMVQ for short prefill projections) | N | It engages, but ~200-token prefill is flat, likely because our dense prompt projections already use int8 MMQ (not measured). |
-| PR #4039 | `PF_HC_REGION` / `PF_GROUP_SCRATCH` | N, exact / B | The scratch variant gives non-finite logits after every prefill on this fork. |
+| PR #4039 | `PF_HC_REGION` / `PF_GROUP_SCRATCH` | N, exact / B | The scratch variant gives non-finite logits after every prefill on this fork. Re-tested 2026-11-03 on upstream's 10-31 rewrite of both: `PF_HC_REGION` N again (every prefill size inside the base's spread); `PF_GROUP_SCRATCH` still gives non-finite logits (on a 256-token chunk). |
 | PR #4226 | disk conversation cache (spill dir, deltas, codec) | not taken | Still prices restores at the worst case, so it doesn't fix restores failing for RAM; 10.8K lines, CUDA-tested only, conflicts with #3565/#3251. Replaced by own delta session files. |
 | PR #4258 | `--drop-file-cache` | X | Experts come from the resident arena, not mapped files, so nothing is dropped. |
 | PR #4283 | `STRATA_PREFILL_ROUTED_STREAM=1` | X | Prefill here is compute bound: copies are done before the router needs them (wait copy ≤0.4% of prefill). |
@@ -85,6 +85,12 @@ Upstream switches and my own experiments that are in the code but left off.
 | `STRATA_DMA_BATCH` | X | CUDA 13+ only. |
 | `-mllvm -amdgpu-sched-strategy=max-ilp` (compiler flag) | H, −6.6% | |
 | `MMVQ_IACC_OCC` (own: a waves-per-SIMD cap on the Q6_K head and projection gemv) | N, exact | Benched −5% at 3-token windows only, ~0 end to end. Raising occupancy spills on gfx906, and spilling is very slow here. |
+| `SMALL_UNR=1` / `2` / `3` (upstream constant-trip router and GDN a/b reads) | X, exact | The GDN a/b stage is already at the 0.05 ms timer floor, and the router read on this fork goes through its own `router_gemv_906`, which the switch doesn't reach. |
+| `PF_SMALL=0` (upstream's small-card prompt rule, on by default) | X | The rule only applies to automatic prompt chunks under 8,192 tokens; this box's are 32,768. |
+| `MTP_MULTI_COPY=0` (upstream's combined draft-copy kernel is the default) | N, exact | The old one-launch-a-copy path is no faster. |
+| `QSA_FUSE_NR=0` (upstream's norm + rope fusion in the QSA prompt layers, on by default) | N | Same output on the decode prompts, prefill unchanged: the default stays. |
+| `LOOKUP_MAX_T=0` (turns off upstream's 12-row lookup window default) | H on copy-heavy replies | −8.5% when a reply copies its context (a file copy −12%, an edit −6%, a re-copy −7%), neutral on normal prompts. The default is kept; it costs 38 MiB of VRAM. Rounding only. |
+| `PENALTY_PROMPT=1` (upstream #4590's off switch) | not kept | Brings back the old penalty window: the last 64 tokens, which at the start of a reply are the prompt's. With the model card's presence penalty 1.5 (sent for thinking-off requests) that penalised the words the prompt asked for. Upstream now counts only the reply's tokens, as vLLM and SGLang do for presence and frequency penalties. It changed greedy outputs; speed is unchanged. |
 | `MMVQ_IACC_PF` / `MMVQ_IACC_V2` (own: load prefetch / leaner decode of the same kernel) | H / X, exact | Prefetch doubles the VGPRs and halves occupancy (+35..+45% kernel time). V2 cut the decode ALU work and changed nothing at 1 token: that kernel is limited by memory latency, not ALU. |
 
 ## Tuning
@@ -96,7 +102,7 @@ Upstream switches and my own experiments that are in the code but left off.
 | `--adapt-swaps` / `--adapt-every` | swaps 0–160, every 1/2/4 | **80 / 1 used.** Swaps 0 −22%, 8 −2.3%, every 2 −17%. Re-tested 2026-11-01: 40 and 60 are neutral (the swap wait drops 33–47%, but the time moves to CPU experts and the draft). |
 | `--adapt-decay` | 0.95, 0.99 | **0.97 used.** Both neutral. |
 | `--expert-cache` pinned at the old size | 11635 slots vs auto | +0.8% (noise) for 480 MiB less VRAM headroom. Not taken. |
-| `--lookup-max-t 16` | | H, −1.6% on normal prompts. |
+| `--lookup-max-t 16` | | H, −1.6% on normal prompts. 12, upstream's default since 2026-11, is kept: see `LOOKUP_MAX_T` above. |
 | `--prefill 4096` | vs auto | H, −18% prefill. |
 | `STRATA_PREFILL_CPU_SHARE_MAX` / `CPU_TOKENS` | 4096 / 6144 / 8192, tokens 8 / 16 / 32 | **8192 / 16 used.** 6144 won as much on 4K prompts (−5.2%); 8192 covers more chunk sizes. 4096 and 32 neutral. |
 | English-only draft vocabulary | 40.5K-token draft head instead of 106K | +1.8%, but every output changes and non-English text could lose acceptance. On hold. |
@@ -107,6 +113,12 @@ Upstream switches and my own experiments that are in the code but left off.
   token's top-10 experts barely overlap, so a wider speculative window pays only once the per-token cost drops.
 - **Draft-side changes are not output-neutral.** A different drafter gives different verify windows, and verify
   isn't batch-invariant across window sizes, so greedy output changes too. Check hashes on draft changes.
+- **Two fresh starts of the same build drift apart.** They usually agree on the first decode prompt and then
+  give other answers (the adaptive expert cache places experts on the GPU or the CPU by timing, and the two round
+  differently). That moves draft acceptance, so decode tok/s varies ~0.4–1% between identical runs; ms per window
+  and the stage times are steadier, so small exact changes are judged on those. Harness version 3 (2026-11-03) moved
+  the long-context pass after every decode rep, which made the long-context numbers steady (±0.5%, was ±2.6%) but
+  not the decode ones.
 - **The third harness prompt's hash flips between runs** of the same build (the adaptive expert cache differs).
   Only the first pass of the first two prompts is stable enough to compare.
 - **`rocprofv3 --kernel-trace` deadlocks the engine** (it holds completion signals while the verify graph spins on
