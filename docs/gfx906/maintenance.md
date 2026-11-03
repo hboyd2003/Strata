@@ -69,7 +69,10 @@ Every candidate (an upstream PR, a commit from another fork, or my own idea) goe
    these quant types, one GPU. Many switches decline or compile out on gfx906 (see [tested.md](tested.md)).
 2. **Branch** off `main` as an experiment. Experiments stay local.
 3. **Build** in the ROCm container. For kernel changes, check VGPRs and occupancy before timing anything.
-4. **Parity tests** for the touched kernels, on the MI50.
+4. **Parity tests** for the touched kernels, on the MI50. Two blind spots on gfx906: `verify_parity` stops at its
+   first test (`argmax_rows` is not built for gfx906), so its later tests (the MTP multi-copy, the scaled q8_0
+   quantize) never run here, and `mmvq_il_parity` is CUDA-only. Changes to those paths are checked with the A/B's
+   output hashes instead.
 5. **A/B** with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), against the running build, with a repeat of the
    base as a noise control: decode tok/s and ms per window, every decode stage, prefill at several lengths,
    long-context turns where relevant, and the greedy output hashes. On the box a small wrapper restarts the server

@@ -15,7 +15,7 @@ nothing was kept unless it made that machine faster (see the warning in the [REA
 
 The rest of `docs/` is upstream's and describes upstream Strata. It is left untouched so catch-ups stay clean.
 
-Numbers below are as of 2026-11-02, unless a line gives its own date.
+Numbers below are as of 2026-11-03, unless a line gives its own date.
 
 ## The box
 
@@ -79,14 +79,19 @@ default that is on in this build:
 Built in, with no switch to set: [`perf/gfx906-dpp-shfl`](branches/perf-gfx906-dpp-shfl.md) (exact DPP / `ds_swizzle`
 xor shuffles instead of `ds_bpermute`, ~+1.9% decode; bitwise).
 
+Upstream defaults that matter here (since the 2026-11-03 catch-up): `--lookup-max-t 12` (12-row prompt-lookup
+windows: +8.5% on replies that copy their context, neutral otherwise, 38 MiB of VRAM), and penalties count only the
+reply's tokens (upstream #4590). The model card's presence penalty 1.5 is sent for thinking-off requests, so their
+greedy outputs differ from builds before 2026-11-03.
+
 All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did not change; "rounding only"
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
 **Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md)): about 85 tok/s decode on short prompts
-(85.8 on 2026-11-02 after `perf/gfx906-dpp-shfl`). On real agent traffic (the last 100 requests on 2026-10-30: context median
+(85.9 on 2026-11-03 after the catch-up to upstream of 2026-11-02; 85.8 on 2026-11-02 after `perf/gfx906-dpp-shfl`). On real agent traffic (the last 100 requests on 2026-10-30: context median
 144K tokens, p90 185K, ~730 new tokens a turn) decode is 82 tok/s median with 0.74 draft acceptance, and prompt
-reading takes ~45% of engine time. Prefill ~785 tok/s at 16K and ~775 tok/s on a 32K document (2026-11-02), ~720
+reading takes ~45% of engine time. Prefill ~780 tok/s at 16K and ~736 tok/s on a 32K document (2026-11-03), ~720
 tok/s at 100K (measured 2026-10-30, before the GDN prompt switches). The fork started at ~59 tok/s decode on the same box and model.
 
 ## Branches merged into `main`
