@@ -47,12 +47,23 @@ const Case CASES[] = {
     {"Q6_K dhead", 14, 2560, 106299, 256, 210, {208, -1}},   // the MTP draft head over rt/draft_vocab.bin
     {"Q6_K dhead en", 14, 2560, 40525, 256, 210, {208, -1}},   // ... over draft_vocab_en.bin
 };
-const int WIDTHS[] = {1, 2, 3, 4, 5};
-// exp/tier1: rows a wavefront, STRATA_MMVQ_MUL24, STRATA_MMVQ_Q6K_R4 - every config bitwise the first's
-const int ROWS[] = {1, 2, 4, 1, 2, 2, 2};
-const int MUL24[] = {0, 0, 0, 1, 1, 0, 1};
-const int Q6R4[] = {0, 0, 0, 0, 0, 1, 1};
-constexpr int NCFG = 7;
+const int WIDTHS[] = {1, 2, 3, 4, 5, 6};
+// exp/tier1: rows a wavefront, STRATA_MMVQ_MUL24, STRATA_MMVQ_Q6K_R4; #5033: LDS (native_mmvq_set_wave_lds: 1 XLDS,
+// 2 Q6X4, 4 WPB 8, 8 Q4X4, 16 IACC_XLDS).  Every wave config bitwise config 0's; the iacc configs (IACC 1, rounding-only
+// vs the wave kernel) bitwise the first iacc config's (CFG_IACC).
+const int ROWS[] = {1, 2, 4, 1, 2, 2, 2, 1, 2, 1, 1, 1, 0, 0};
+const int MUL24[] = {0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0};
+const int Q6R4[] = {0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0};
+const int LDS[] = {0, 0, 0, 0, 0, 0, 0, 1, 1, 11, 15, 15, 0, 16};
+const int IACC[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7};
+constexpr int NCFG = 14;
+constexpr int CFG_PROD_WAVE = 4;   // prod's wave config (WAVE_ROWS 2, MUL24); prod takes iacc for the K-quants
+constexpr int CFG_IACC = 12;
+const char* cfg_name(int ri) {
+    static const char* names[NCFG] = {"R1", "R2", "R4", "R1m24", "R2m24", "R2q6r4", "R2m24q6r4", "R1xl", "R2m24xl",
+                                      "x4w4", "x4w8m24", "x4w8", "iacc", "iaccxl"};
+    return names[ri];
+}
 
 uint16_t sane_half(std::mt19937& rng) {
     const uint32_t r = rng();
@@ -107,6 +118,8 @@ int run_case(const Case& c, int T, bool bench, cudaStream_t s) {
         strata::kernels::native_mmvq_set_wave_rows(ROWS[ri]);
         strata::kernels::native_mmvq_set_mul24(MUL24[ri]);
         strata::kernels::native_mmvq_set_q6k_r4(Q6R4[ri]);
+        strata::kernels::native_mmvq_set_wave_lds(LDS[ri]);
+        strata::kernels::native_mmvq_set_iacc(IACC[ri], 0, 0);
         try {
             cudaMemsetAsync(dy, 0xff, ybytes, s);
             strata::kernels::native_mmvq(c.type, dw, xq, dy, c.n_in, c.n_out, T, s);
@@ -115,9 +128,10 @@ int run_case(const Case& c, int T, bool bench, cudaStream_t s) {
             return -1;
         }
         if (!ck(cudaStreamSynchronize(s), "mmvq")) return -1;
-        std::vector<uint32_t>& dst = ri == 0 ? ref : got;
+        const bool is_ref = ri == 0 || ri == CFG_IACC;
+        std::vector<uint32_t>& dst = is_ref ? ref : got;
         if (!ck(cudaMemcpy(dst.data(), dy, ybytes, cudaMemcpyDeviceToHost), "read y")) return -1;
-        if (ri > 0) {
+        if (!is_ref) {
             long long diff = 0, nonfinite = 0;
             for (std::size_t i = 0; i < ref.size(); ++i) {
                 float f;
@@ -126,8 +140,8 @@ int run_case(const Case& c, int T, bool bench, cudaStream_t s) {
                 if (ref[i] != got[i]) ++diff;
             }
             if (diff != 0 || nonfinite != 0) {
-                std::printf("%-10s T=%d cfg %d (R=%d m24 %d q6r4 %d): %lld of %zu outputs differ from R=1, %lld non-finite  FAIL\n",
-                            c.name, T, ri, ROWS[ri], MUL24[ri], Q6R4[ri], diff, ref.size(), nonfinite);
+                std::printf("%-10s T=%d cfg %d (%s): %lld of %zu outputs differ from %s, %lld non-finite  FAIL\n",
+                            c.name, T, ri, cfg_name(ri), diff, ref.size(), ri > CFG_IACC ? "iacc" : "R1", nonfinite);
                 verdict = 1;
             }
         }
@@ -156,15 +170,20 @@ int run_case(const Case& c, int T, bool bench, cudaStream_t s) {
     strata::kernels::native_mmvq_set_wave_rows(0);
     strata::kernels::native_mmvq_set_mul24(-1);
     strata::kernels::native_mmvq_set_q6k_r4(-1);
+    strata::kernels::native_mmvq_set_wave_lds(-1);
+    strata::kernels::native_mmvq_set_iacc(-1, 0, 0);
     if (bench) {
-        std::printf("BENCH %-10s T=%d %6.2f MB", c.name, T, wbytes / 1e6);
-        for (int ri = 0; ri < NCFG; ++ri)
-            std::printf(" | R%d%s%s %6.1fus", ROWS[ri], MUL24[ri] ? "m24" : "", Q6R4[ri] ? "q4" : "", us[ri]);
-        std::printf(" | R2: m24 %+5.1f%% q6r4 %+5.1f%% both %+5.1f%%%s\n", 100.0 * (us[1] / us[4] - 1.0),
-                    100.0 * (us[1] / us[5] - 1.0), 100.0 * (us[1] / us[6] - 1.0), verdict ? "  FAIL" : "");
+        const bool kq = c.type == 12 || c.type == 13 || c.type == 14;   // prod: iacc for the K-quants
+        const double prod = kq ? us[CFG_IACC] : us[CFG_PROD_WAVE];
+        std::printf("BENCH %-13s T=%d %6.2f MB", c.name, T, wbytes / 1e6);
+        for (int ri = 0; ri < NCFG; ++ri) std::printf(" | %s %6.1f", cfg_name(ri), us[ri]);
+        std::printf(" | vs prod(%s %.1fus): R1xl %+5.1f%% R2m24xl %+5.1f%% x4w4 %+5.1f%% x4w8 %+5.1f%% iaccxl %+5.1f%%%s\n",
+                    kq ? "iacc" : "R2m24", prod, 100.0 * (us[7] / prod - 1.0), 100.0 * (us[8] / prod - 1.0),
+                    100.0 * (us[9] / prod - 1.0), 100.0 * (us[10] / prod - 1.0), 100.0 * (us[13] / prod - 1.0),
+                    verdict ? "  FAIL" : "");
     }
     else if (verdict == 0)
-        std::printf("%-10s T=%d: R=2/R=4/MUL24/Q6K_R4 bitwise equal to R=1 (%zu outputs)\n", c.name, T, ref.size());
+        std::printf("%-13s T=%d: every wave config bitwise R=1, iacc xl bitwise iacc (%zu outputs)\n", c.name, T, ref.size());
     cudaFree(dw); cudaFree(xq); cudaFree(dx); cudaFree(dy);
     return verdict;
 }
