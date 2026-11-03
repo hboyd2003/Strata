@@ -368,6 +368,7 @@ function render(m) {
   if (!modelOp && !localLoad && live.queued > 0) setPill("queued", tr("pill.queued", "{n} queued", {n: live.queued}));
   if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
   if (tab === "monitor") renderConvCache(m.conversation_cache);
+  if (tab === "monitor") renderAutoSessions(m.auto_sessions);
   if (tab === "about") renderAbout(eng, hw, st);
 }
 
@@ -402,6 +403,45 @@ function renderConvCache(c) {
   $("cc-note").textContent = c.enabled
     ? "A request that continues a parked conversation gets its state back instead of reading it again; the oldest goes when the slots or the memory are full."
     : "The engine keeps the last conversation's state, so a follow-up reads only what is new. To keep several conversations (agents taking turns), add \"--conversation-cache-mib\", \"8192\" to the run config's args (docs/DETAILS.md).";
+}
+
+// auto sessions: the conversations the server saves to disk (slot_save_path) when a request switches to another one,
+// and restores when that conversation comes back ("auto_sessions": true in the run config, opt-in)
+function renderAutoSessions(a) {
+  $("as-card").hidden = !a;
+  if (!a) return;                                  // an older server
+  const pct = (x, y) => (y ? `${Math.min(100, (100 * x) / y)}%` : "0%");
+  const on = a.enabled && a.files != null;
+  $("as-bars").hidden = !on;
+  if (on) {
+    $("as-files-text").textContent = a.keep ? `${fmt(a.files)} / ${fmt(a.keep)}` : `${fmt(a.files)} (no limit)`;
+    $("as-files-bar").style.width = a.keep ? pct(a.files, a.keep) : "0%";
+    const cap = a.max_gb * 1073741824;
+    $("as-disk-text").textContent = cap ? `${gb(a.files_bytes)} / ${gb(cap)} GB` : `${gb(a.files_bytes)} GB (no cap)`;
+    $("as-disk-bar").style.width = cap ? pct(a.files_bytes, cap) : "0%";
+  }
+  $("as-sum").textContent = a.enabled && a.switches ? `${fmt(a.switches)} conversation switch${a.switches === 1 ? "" : "es"} since start` : "";
+  let held = null;
+  if (a.enabled && a.held_tokens != null) {
+    held = a.held_tokens >= a.min_tokens
+      ? `${fmt(a.held_tokens)} tokens · saved on the next switch${a.held_on_disk ? " (an older copy is on disk)" : ""}`
+      : `${fmt(a.held_tokens)} tokens · under ${fmt(a.min_tokens)}, not saved`;
+  }
+  const last = a.last_event
+    ? `${a.last_event === "saved" ? "Saved" : "Restored"} ${fmt(a.last_tokens)} tokens` +
+      `${a.last_event === "saved" && a.last_bytes ? ` (${gb(a.last_bytes)} GB)` : ""} in ${fmt(a.last_ms || 0)} ms, ${since(a.last_at)}`
+    : null;
+  facts($("as-facts"), [
+    ["Held conversation", held],
+    ["Saved / restored", a.enabled ? `${fmt(a.saves)} / ${fmt(a.restores)}${a.pruned ? ` · ${fmt(a.pruned)} pruned` : ""}` : null],
+    ["Last save or restore", a.enabled ? last : null],
+    ["Failures", a.failures ? `${fmt(a.failures)}${a.last_error ? ` · last: ${a.last_error}` : ""}` : null],
+    ["Newest file", a.enabled && a.newest_at ? since(a.newest_at) : null],
+    ["Folder", a.enabled ? a.path : null, true],
+  ]);
+  $("as-note").textContent = a.enabled
+    ? `A conversation of ${fmt(a.min_tokens)} prompt tokens or more is saved to disk when a request switches to another one, and restored instead of read again when it comes back; the oldest files go past the limits.`
+    : "Off. To save long conversations to disk when you switch between them, set \"slot_save_path\" (a writable folder) and \"auto_sessions\": true in the run config.";
 }
 
 function renderTotals(t) {
