@@ -34,6 +34,8 @@ import tempfile
 import threading
 import time
 
+from serve import session_files
+
 MIN_TOKENS = 2048                    # the decode engine's own tail below this is read in place
 KNOWN_KEYS = {"prefill_gpu", "decode_gpu", "min_prompt_tokens", "dir", "shared_arena", "prefill_args", "decode_args"}
 FORBIDDEN_ARGS = {                   # engine arguments that cannot be used in a split-serve engine, and why
@@ -421,10 +423,7 @@ class SplitEngine:
                 rec["ok"] = restored["tokens"] > 0
         finally:
             self.__dict__["cur"] = D
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            session_files.remove(path)            # the head and, with STRATA_SESSION_DELTA, its K/V log
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         D = self.decode

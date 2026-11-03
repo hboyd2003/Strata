@@ -6421,3 +6421,26 @@ class PrepareCancelled(unittest.TestCase):
             ids, _, _ = svc.prepare(self.msgs(), None, {}, cancel=threading.Event())
             self.assertEqual(ids.count(ByteTokenizer().encode("<|image_pad|>", parse_special=True)[0]), 6)
             svc.embeddings.path.unlink(missing_ok=True)
+
+
+class AutoSessionDeltaLogs(unittest.TestCase):
+    """STRATA_SESSION_DELTA: an auto session's K/V log counts toward its size and goes with it when pruned."""
+
+    def test_logs_count_and_go_with_their_file(self):
+        from serve import server
+        with tempfile.TemporaryDirectory() as d:
+            def put(name, n):
+                with open(os.path.join(d, name), "wb") as f:
+                    f.write(b"x" * n)
+            put("auto-aaaa.bin", 100)
+            put("auto-aaaa.bin.0123456789abcdef.kv", 1000)
+            put("auto-bbbb.bin", 50)
+            put("manual.bin.0123456789abcdef.kv", 7)       # not an auto session's log
+            put("auto-aaaa.bin.notalog.kv", 3)              # not a log name
+            svc = SimpleNamespace(slot_save_path=d, _DELTA_LOG=server.Service._DELTA_LOG)
+            entries = server.Service._auto_session_files(svc)
+            sizes = {os.path.basename(p): size for _, size, p in entries}
+            self.assertEqual(sizes, {"auto-aaaa.bin": 1100, "auto-bbbb.bin": 50})
+            server.Service._remove_auto_session(svc, os.path.join(d, "auto-aaaa.bin"))
+            self.assertEqual(sorted(os.listdir(d)),
+                             ["auto-aaaa.bin.notalog.kv", "auto-bbbb.bin", "manual.bin.0123456789abcdef.kv"])
