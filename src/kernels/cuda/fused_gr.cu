@@ -1505,6 +1505,25 @@ template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false>
 __global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m);
 #if defined(STRATA_HIP_GFX906)
 bool gr_up_exact_t();
+bool gr_up_occ();
+template <int MT>
+__global__ void __launch_bounds__(THREADS) __attribute__((amdgpu_waves_per_eu(3))) gr_up_occ_kernel(GrMulti m);
+// #5033 STRATA_GR_UP_OCC=1: the up read in gr_up_occ_kernel<T> (bitwise gr_up_fast_kernel); false = not taken
+inline bool launch_up_occ(const GrMulti& m, cudaStream_t st) {
+    if (!gr_up_occ()) return false;
+    static_assert(kFusedGrMaxT == 8, "one case per token count");
+    switch (m.T) {
+        case 1: gr_up_occ_kernel<1><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 2: gr_up_occ_kernel<2><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 3: gr_up_occ_kernel<3><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 4: gr_up_occ_kernel<4><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 5: gr_up_occ_kernel<5><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 6: gr_up_occ_kernel<6><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 7: gr_up_occ_kernel<7><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        default: gr_up_occ_kernel<8><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+    }
+    return true;
+}
 #endif
 }  // namespace
 static bool gr_fast();
@@ -1705,7 +1724,8 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         // exp/grup STRATA_GR_UP_EXACT_T=1: a 1-token read as its own instantiation (doubr c3d0ca379c).  Cold, 48 sets:
         // up 21.8 -> 18.6 us at T 1, 107 VGPRs.  T 2-4 were flat (+0.8 / +0.3 / -0.9 us): fully unrolled they hold every
         // token's loads, 142 / 182 / 225 VGPRs, one wave a SIMD against the generic kernel's 119 / two
-        if (n_tok == 1 && !no_multi_gr && gr_up_exact_t()) gr_up_fast_kernel<1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+        if (!no_multi_gr && launch_up_occ(m, st)) {}
+        else if (n_tok == 1 && !no_multi_gr && gr_up_exact_t()) gr_up_fast_kernel<1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m);
         else
 #endif
         gr_up_fast_kernel<><<<UPM_BLOCKS, THREADS, 0, st>>>(m);
@@ -1931,6 +1951,86 @@ __global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m) {
 bool gr_up_exact_t() {
     static const bool on = [] { const char* v = std::getenv("STRATA_GR_UP_EXACT_T"); return v != nullptr && std::atoi(v) != 0; }();
     return on;
+}
+// #5033 (freapsy 3a8815b4) STRATA_GR_UP_OCC=1 (opt-in): gr_up_fast_kernel built per token count and walked chunk-major
+// (an unpacked weight chunk is live for its chunk only, not for all tokens), at 3 waves a SIMD so all 160 blocks are
+// resident on 60 CUs (the generic kernel's 119+ VGPRs were 2 waves: 120 blocks, then a second round of 40).  Every dot8
+// and every sum as gr_up_fast_kernel's, in the same order: bitwise.  #5033: up T=3 23.4 -> 18.4 us.
+bool gr_up_occ() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_GR_UP_OCC"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+template <int MT>
+__global__ void __launch_bounds__(THREADS) __attribute__((amdgpu_waves_per_eu(3))) gr_up_occ_kernel(GrMulti m) {
+    __shared__ __align__(16) float lo[MT][LR];
+    __shared__ float g[MT][HC][UPM_COLS];
+    const int t = threadIdx.x, j = t & 7, grp = t >> 3;
+    constexpr int T = MT;   // == m.T (launch_up_occ)
+    const int d0 = blockIdx.x * UPM_COLS;
+    static_assert(LR == 40 * 8 && HC * UPM_COLS == 64 && THREADS == 256, "geometry");
+    uint4 w[2][5];
+    float rv[2] = {0.0f, 0.0f}, wn[2] = {0.0f, 0.0f}, rsc[2] = {0.0f, 0.0f}, bo[2] = {0.0f, 0.0f}, ip[2] = {0.0f, 0.0f};
+    const bool apply = j < T && m.a[j < T ? j : 0].apply;
+#pragma unroll
+    for (int p = 0; p < 2; ++p) {
+        const int r = grp + 32 * p, c = r / UPM_COLS, dd = r - c * UPM_COLS, i = c * N + d0 + dd;
+        const uint4* w4 = reinterpret_cast<const uint4*>(m.a[0].w_up + (size_t) i * LR);
+#pragma unroll
+        for (int q = 0; q < 4; ++q) w[p][q] = __ldg(w4 + j + 8 * q);
+        w[p][4] = __ldg(w4 + 32 + j);
+        if (j < T) {
+            const FusedGrArgs& a = m.a[j];
+            rv[p] = a.R[i];
+            wn[p] = a.w_norm[i];
+            rsc[p] = a.rs[c];
+            if (apply) { bo[p] = a.bo_prev[d0 + dd]; ip[p] = a.inj_prev[c]; }
+        }
+    }
+    // float4 when every token's lo is 16-byte aligned (the engine's are): one pass for up to 3 tokens
+    bool lo4 = true;
+    for (int k = 0; k < T; ++k) lo4 = lo4 && ((uintptr_t) m.a[k].lo & 15u) == 0;
+    if (lo4)
+        for (int i = t; i < T * (LR / 4); i += THREADS)
+            reinterpret_cast<float4*>(lo[i / (LR / 4)])[i % (LR / 4)] = reinterpret_cast<const float4*>(m.a[i / (LR / 4)].lo)[i % (LR / 4)];
+    else
+        for (int i = t; i < T * LR; i += THREADS) lo[i / LR][i % LR] = m.a[i / LR].lo[i % LR];
+    __syncthreads();
+#pragma unroll
+    for (int p = 0; p < 2; ++p) {
+        const int r = grp + 32 * p, c = r / UPM_COLS, dd = r - c * UPM_COLS, i = c * N + d0 + dd;
+        float dk[T][5];
+#pragma unroll
+        for (int q = 0; q < 5; ++q) {
+            const int off = (q < 4 ? j + 8 * q : 32 + j) * 8;   // chunks j, j+8, j+16, j+24 (old lanes j..j+24), 32+j (old lane j's second)
+#pragma unroll
+            for (int k = 0; k < T; ++k) dk[k][q] = dot8(w[p][q], lo[k] + off);
+        }
+        float mine = 0.0f;
+#pragma unroll
+        for (int k = 0; k < T; ++k) {
+            const float p0 = dk[k][0] + dk[k][4];   // old lane j
+            const float s = xor8((p0 + dk[k][2]) + (dk[k][1] + dk[k][3]));   // stage 16: (j, j+16), (j+8, j+24); stage 8; then 4, 2, 1
+            if (j == k) mine = s;
+        }
+        if (j < T) {
+            float x0 = rv[p];
+            if (apply) {
+                x0 = fmaf(bo[p], 2.0f * sigmoidf_(ip[p] / (float) HC), x0);
+                m.a[j].R_out[i] = x0;
+            }
+            const float x = x0 * wn[p] * rsc[p];
+            g[j][c][dd] = x * sigmoidf_(mine);
+        }
+    }
+    __syncthreads();
+    for (int i = t; i < T * UPM_COLS; i += THREADS) {
+        const int k = i / UPM_COLS, col = i - k * UPM_COLS;
+        float s = 0.0f;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) s += g[k][c][col];
+        m.a[k].mixed[d0 + col] = s / (float) HC;
+    }
+    if (m.a[0].q8_mixed != nullptr) gr_q8_tail(m, d0);   // S26 STRATA_QFUSE, as gr_up_multi_kernel
 }
 #endif
 
@@ -3088,7 +3188,7 @@ void launch_ro(const GrMulti& m, float* part, float* sq, unsigned* cnt, cudaStre
         else gr_ro_down_kernel<T, 8><<<dim3(KS, RG), RB / 8 * 64, 0, st>>>(m, part, sq, cnt);
     }
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
-    if (g_ro_parts & 4) gr_up_fast_kernel<><<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+    if (g_ro_parts & 4) { if (!launch_up_occ(m, st)) gr_up_fast_kernel<><<<UPM_BLOCKS, THREADS, 0, st>>>(m); }
 }
 }  // namespace
 
