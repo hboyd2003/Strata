@@ -146,5 +146,8 @@ endif()
 if(STRATA_HIP_GFX906)
   add_executable(gfx906_qsa_query_swizzle_probe bench/gfx906_qsa_query_swizzle_probe.cpp)
   target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  # the prompt path's own kernel against the decode kernel it replaces: accuracy (max |diff|) and time, one run
+  add_executable(gfx906_qsa_prompt_attn_probe bench/gfx906_qsa_prompt_attn_probe.cpp)
+  target_link_libraries(gfx906_qsa_prompt_attn_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()
 endmacro()
