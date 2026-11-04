@@ -1509,35 +1509,20 @@ template <int MT>
 __global__ void __launch_bounds__(THREADS) __attribute__((amdgpu_waves_per_eu(3))) gr_up_occ_kernel(GrMulti m);
 template <int MT>
 __global__ void __launch_bounds__(THREADS) gr_up_cm_kernel(GrMulti m);
-int gr_up_occ_mode();
-// #5033 STRATA_GR_UP_OCC: the up read in gr_up_occ_kernel<T> / gr_up_cm_kernel<T> (bitwise gr_up_fast_kernel); false =
-// not taken.  1: T = 1 at 3 waves a SIMD, T >= 2 untouched; 2: T = 1 at 3 waves, T 2-4 chunk-major at the compiler's
-// occupancy (hc_ro_parity, GR_RO graph: T1 31.3 -> 29.1, T3 44.9 -> 43.9, T4 51.2 -> 49.5 us; T5 +5 us, so not taken); 3: every T at 3 waves (#5033's form; spills here from T = 2: 216-1360 bytes a lane on ROCm 10.1).
-template <int MT, bool OCC>
-inline void launch_up_one(const GrMulti& m, cudaStream_t st) {
-    if constexpr (OCC) gr_up_occ_kernel<MT><<<UPM_BLOCKS, THREADS, 0, st>>>(m);
-    else gr_up_cm_kernel<MT><<<UPM_BLOCKS, THREADS, 0, st>>>(m);
-}
-template <bool OCC>
-inline void launch_up_t(const GrMulti& m, cudaStream_t st) {
-    static_assert(kFusedGrMaxT == 8, "one case per token count");
-    switch (m.T) {
-        case 1: launch_up_one<1, OCC>(m, st); break;
-        case 2: launch_up_one<2, OCC>(m, st); break;
-        case 3: launch_up_one<3, OCC>(m, st); break;
-        case 4: launch_up_one<4, OCC>(m, st); break;
-        case 5: launch_up_one<5, OCC>(m, st); break;
-        case 6: launch_up_one<6, OCC>(m, st); break;
-        case 7: launch_up_one<7, OCC>(m, st); break;
-        default: launch_up_one<8, OCC>(m, st); break;
-    }
-}
+bool gr_up_occ();
+// #5033 STRATA_GR_UP_OCC=1: the up read in gr_up_occ_kernel<1> (3 waves a SIMD) / gr_up_cm_kernel<2..4> (chunk-major at the
+// compiler's occupancy), bitwise gr_up_fast_kernel; false = not taken.  hc_ro_parity, GR_RO graph: T1 31.3 -> 29.1,
+// T3 44.9 -> 43.9, T4 51.2 -> 49.5 us.  T >= 5 stays on gr_up_fast_kernel (chunk-major +5 us there), and #5033's 3 waves at
+// every T spills 216-1360 bytes a lane from T = 2 on ROCm 10.1 (2-3x slower).
 inline bool launch_up_occ(const GrMulti& m, cudaStream_t st) {
-    const int mode = gr_up_occ_mode();
-    if (mode == 0) return false;
-    if (m.T == 1 || mode == 3) { launch_up_t<true>(m, st); return true; }
-    if (mode == 2 && m.T <= 4) { launch_up_t<false>(m, st); return true; }   // T 5+: 256 VGPRs, slower (hc_ro_parity)
-    return false;
+    if (!gr_up_occ()) return false;
+    switch (m.T) {
+        case 1: gr_up_occ_kernel<1><<<UPM_BLOCKS, THREADS, 0, st>>>(m); return true;
+        case 2: gr_up_cm_kernel<2><<<UPM_BLOCKS, THREADS, 0, st>>>(m); return true;
+        case 3: gr_up_cm_kernel<3><<<UPM_BLOCKS, THREADS, 0, st>>>(m); return true;
+        case 4: gr_up_cm_kernel<4><<<UPM_BLOCKS, THREADS, 0, st>>>(m); return true;
+        default: return false;
+    }
 }
 #endif
 }  // namespace
@@ -1968,12 +1953,11 @@ bool gr_up_exact_t() {
     return on;
 }
 // #5033 (freapsy 3a8815b4) STRATA_GR_UP_OCC=1 (opt-in): gr_up_fast_kernel built per token count and walked chunk-major
-// (an unpacked weight chunk is live for its chunk only, not for all tokens), at 3 waves a SIMD so all 160 blocks are
-// resident on 60 CUs (the generic kernel's 119+ VGPRs were 2 waves: 120 blocks, then a second round of 40).  Every dot8
-// and every sum as gr_up_fast_kernel's, in the same order: bitwise.  #5033: up T=3 23.4 -> 18.4 us.
-int gr_up_occ_mode() {
-    static const int m = [] { const char* v = std::getenv("STRATA_GR_UP_OCC"); const int n = v ? std::atoi(v) : 0; return n >= 0 && n <= 3 ? n : 0; }();
-    return m;
+// (an unpacked weight chunk is live for its chunk only, not for all tokens).  Every dot8 and every sum as
+// gr_up_fast_kernel's, in the same order: bitwise.  See launch_up_occ for which T take which occupancy.
+bool gr_up_occ() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_GR_UP_OCC"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
 }
 template <int MT>
 __device__ __forceinline__ void gr_up_cm_body(const GrMulti& m);
