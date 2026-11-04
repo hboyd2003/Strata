@@ -2476,6 +2476,10 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         // keeps the old kernel.
         // #371: the compute capability with its minor - sm_70 (V100) has no m16n8k8 (the kernels trap below sm_75)
 #if defined(STRATA_HIP_GFX906)
+        // gfx906 prompt attention (qsa_prompt_attn_gfx906.cu): one block per (query, KV head) with a running softmax,
+        // no split-K scratch and no merge. Not bitwise the decode kernel; STRATA_PROMPT_ATTN_GFX906=0 forces the old
+        // loop, and a geometry/pool this kernel does not serve falls through to it as well.
+        if (qsa_prompt_attn_gfx906_batch(q, pools, ids, steps, cap, s, attn, n_q, stream)) return true;
         return false;   // gfx906: the tensor-core and WMMA kernels are not for it; the FP32 kernel runs
 #endif
         static int cc[64] = {};

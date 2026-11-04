@@ -559,6 +559,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/cvec.cu
                           src/kernels/cuda/qsa_decode_attn.cu
                           src/kernels/cuda/qsa_prompt_attn.cu
+                          src/kernels/cuda/qsa_prompt_attn_gfx906.cu
                           src/kernels/cuda/fused_gdn.cu
                           src/kernels/cuda/dequant_bf16.cu
                           src/kernels/cuda/qsa_select.cu
@@ -3098,6 +3099,9 @@ endif()
 if(STRATA_HIP_GFX906)
   add_executable(gfx906_qsa_query_swizzle_probe bench/gfx906_qsa_query_swizzle_probe.cpp)
   target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  # the prompt path's own kernel against the decode kernel it replaces: accuracy (max |diff|) and time, one run
+  add_executable(gfx906_qsa_prompt_attn_probe bench/gfx906_qsa_prompt_attn_probe.cpp)
+  target_link_libraries(gfx906_qsa_prompt_attn_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()
 
 # ---- DeepSeek-V4.1 on a box with no GPU toolkit ------------------------------------------------
