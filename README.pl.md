@@ -1,3 +1,8 @@
+> [!WARNING]
+> **This is a personal fork of Strata, mostly written by Claude, and it is force-pushed often.**
+> Read the warning at the top of the [English README](README.md) before using it. This translation is upstream's
+> and describes upstream Strata.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
