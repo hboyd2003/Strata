@@ -75,6 +75,7 @@ default that is on in this build:
 | `GR_RO=1` | `perf/gfx906-hc-ro` | rounding only |
 | `MMVQ_IACC_XLDS=q6k`, `MMVQ_XLDS=4`, `GR_UP_OCC=1` | `perf/gfx906-pr5033` | exact |
 | `MMVQ_Q6X4=1` | `perf/gfx906-pr5033` | rounding only |
+| `PROMPT_ATTN_GFX906=1` | `perf/gfx906-prompt-attn` | rounding only |
 
 `DECODE_TIMING=1` is also set: it only logs per-window timings and does not change speed or output.
 
@@ -128,6 +129,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-hc-ro`](branches/perf-gfx906-hc-ro.md) | own | rounding-only hyper-connection read (split-K `down`, norm folded in), ~+4% decode |
 | [`perf/gfx906-dpp-shfl`](branches/perf-gfx906-dpp-shfl.md) | own | exact DPP / `ds_swizzle` xor shuffles in the HIP layer instead of `ds_bpermute`, ~+1.9% decode |
 | [`perf/gfx906-pr5033`](branches/perf-gfx906-pr5033.md) | port of upstream #5033 (freapsy) | LDS-staged Q6_K GEMVs, a four-lane Q6_K kernel at T = 1, hc `up` per token count, ~−2.7% ms per window |
+| [`perf/gfx906-prompt-attn`](branches/perf-gfx906-prompt-attn.md) | from pfandl/strata-gfx906 | a prompt attention kernel without split-K scratch or a merge pass, +1.6..+2.1% on long prompts |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
