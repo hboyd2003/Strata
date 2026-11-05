@@ -11,6 +11,17 @@ macro(strata_hip_gfx906_toolchain)
   enable_language(HIP)
   find_package(hip REQUIRED)
   find_package(hipblas REQUIRED)
+  # gfx906: the prompt path's rocBLAS solution table (xxDoman/gfx906 E5b).  The reader in src/prefill/gemm.cu is
+  # gated on STRATA_ROCBLAS_AVAILABLE, which the HIP backend sets only for STRATA_ENABLE_HIP; this branch takes
+  # the HIP_GFX906 path, so without this it compiles to nothing and still reports a clean build.
+  find_package(rocblas CONFIG QUIET)
+  if(TARGET roc::rocblas)
+    set(STRATA_ROCBLAS_AVAILABLE ON)
+    message(STATUS "Strata: gfx906 rocBLAS solution table available (roc::rocblas found)")
+  else()
+    set(STRATA_ROCBLAS_AVAILABLE OFF)
+    message(STATUS "Strata: gfx906: rocBLAS CMake package not found; solution table unavailable")
+  endif()
   add_library(CUDA::cudart INTERFACE IMPORTED)
   target_link_libraries(CUDA::cudart INTERFACE hip::host)
   target_compile_definitions(CUDA::cudart INTERFACE STRATA_HIP_GFX906=1 __HIP_PLATFORM_AMD__=1)
