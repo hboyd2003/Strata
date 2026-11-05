@@ -30,6 +30,9 @@ Options (any of them makes the suite "custom"):
                       ~7K new tokens that each generate 400 (~2.5 min a rep). --live-reps N, --live-ctx N_CHARS,
                       --live-turns N,N,..; --live-interleave sends a short other-conversation request before each turn
                       (the turn then pays the disk auto-session save/restore)
+  --temperature T     sample at T instead of greedy (--seed S, default 42). Answers still differ between identical
+                      requests on the MI50 (seen 2026-11-05), so compare ms/window and stages against a control arm, not hashes
+  --thinking          thinking on, as agent clients run it; answer hashes then cover the reasoning text too
 Server and machine (these don't change the suite):
   --url URL           server (default http://127.0.0.1:8080)      --model NAME   (default strata)
   --api-key KEY       or STRATA_API_KEY in the environment
@@ -361,8 +364,11 @@ def http(path, body=None, timeout=3600):
 
 
 def chat(content, n, history=()):
-    body = {"model": OPT["model"], "max_tokens": n, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
+    body = {"model": OPT["model"], "max_tokens": n, "temperature": OPT["temperature"],
+            "chat_template_kwargs": {"enable_thinking": OPT["thinking"]},
             "messages": [*history, {"role": "user", "content": content}]}
+    if OPT["temperature"] > 0:
+        body["seed"] = OPT["seed"]
     off = LOG.mark()
     with Sampler() as s:
         t0 = time.time()
@@ -372,12 +378,14 @@ def chat(content, n, history=()):
         time.sleep(0.5)   # the per-request log lines are written right after the reply
     lines = LOG.since(off)
     t = r.get("timings") or {}
-    text = r["choices"][0]["message"].get("content") or ""
+    msg = r["choices"][0]["message"]
+    text = msg.get("content") or ""
+    reasoning = msg.get("reasoning_content") or ""
     row = {"decode_tps": t.get("predicted_per_second"), "decoded": t.get("predicted_n"),
            "api_prompt_n": t.get("prompt_n"), "api_prompt_tps": t.get("prompt_per_second"),
            "api_prompt_ms": t.get("prompt_ms"), "api_cache_n": t.get("cache_n"),
            "api_drafts": t.get("draft_n"), "api_drafts_accepted": t.get("draft_n_accepted"),
-           "wall_s": round(wall, 3), "sha": hashlib.sha1(text.encode()).hexdigest()[:12]}
+           "wall_s": round(wall, 3), "sha": hashlib.sha1((reasoning + text).encode()).hexdigest()[:12]}
     if row["api_drafts"]:
         row["api_accept"] = round(row["api_drafts_accepted"] / row["api_drafts"], 4)
     row.update(parse_request_log(lines))
@@ -389,7 +397,7 @@ def chat(content, n, history=()):
             row["overhead_ms"] = round(wall * 1000 - prompt_ms - gen_ms, 1)
     row.update(s.summary())
     row["_log"] = [l for l in lines if l.startswith("strata ")][:40]
-    row["_text"] = text   # dropped before writing (the follow-up turns need the reply)
+    row["_text"] = text or reasoning   # dropped before writing (the follow-up turns need the reply; with --thinking a capped reply can be reasoning only)
     return row
 
 
@@ -615,12 +623,13 @@ def cmd_run():
     global CORPUS, LOG, CARD, HWMON, CARD_FACTS, PROMPTS, LIVE_CTX, LIVE_TURNS
     out = Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
-    OPT.update(url=arg("--url", OPT["url"]).rstrip("/"), model=arg("--model", OPT["model"]), api_key=arg("--api-key", OPT["api_key"]))
+    OPT.update(url=arg("--url", OPT["url"]).rstrip("/"), model=arg("--model", OPT["model"]), api_key=arg("--api-key", OPT["api_key"]),
+               temperature=arg("--temperature", 0.0, float), seed=arg("--seed", 42, int), thinking="--thinking" in sys.argv)
     LOG = Log(arg("--log"))
     CARD, HWMON, CARD_FACTS = find_card(arg("--card", None, int))
     CORPUS = Corpus(arg("--source"))
     suite_opts = [a for a in ("--reps", "--pf-reps", "--no-prefill", "--no-long", "--pf-long", "--long", "--live", "--live-reps",
-                              "--live-ctx", "--live-turns", "--live-interleave", "--source") if a in sys.argv]
+                              "--live-ctx", "--live-turns", "--live-interleave", "--source", "--temperature", "--seed", "--thinking") if a in sys.argv]
     if "--long" in sys.argv:
         PROMPTS = [("long", CORPUS.text(arg("--long", cast=int)) + "\n\nAbove is source code from an inference engine. "
                     "Summarize, in about 400 words, what the files do.", 400)]
