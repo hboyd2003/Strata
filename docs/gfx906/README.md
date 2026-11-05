@@ -119,6 +119,7 @@ In merge order. "Source" says where the code came from.
 | [`serve/qwen-code-tail`](branches/serve-qwen-code-tail.md) | own | keeps Qwen Code's per-turn reminder out of the prompt cache checkpoint |
 | [`perf/prefill-cpu-tokens`](branches/perf-prefill-cpu-tokens.md) | own (from baptisterajaut) | CPU share for short prefill chunks |
 | `rebased/pr-4411` | upstream PR #4411 | pipelined session-file saves |
+| `rebased/pr-5183` | upstream PR #5183 | tool parser: one stray backtick no longer hides the tool calls after it |
 | [`perf/gfx906-decode-kernels`](branches/perf-gfx906-decode-kernels.md) | own | gfx906 decode kernel switches |
 | [`perf/gfx906-router`](branches/perf-gfx906-router.md) | own (partly from VlDubr) | 64-lane router top-10 and router GEMV |
 | [`perf/gfx906-gu16`](branches/perf-gfx906-gu16.md) | own (partly from VlDubr) | 16-lane expert gate/up |
