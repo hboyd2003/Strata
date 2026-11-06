@@ -49,6 +49,7 @@ start from a fresh start.
 | `--pf-long N[,N]` | extra fresh prefill prompts of N characters (350000 ≈ 105K tokens) |
 | `--long N` | one N-character prompt of source text instead of the decode prompts |
 | `--live` | the long-context agent shape: a fresh ~80K-token prompt, then turns of ~1.2K / 5K / 7K new tokens that each generate 400 (~2.5 min a rep; `--live-reps`, `--live-ctx`, `--live-turns`, `--live-interleave`) |
+| `--temperature T`, `--seed S`, `--thinking` | sample at T (seed default 42) and turn thinking on, the shape agent clients use. The seed doesn't reproduce answers on the MI50, so compare ms/window and stages against a control arm, not hashes; answer hashes then cover the reasoning too. Measured: temperature 1 + thinking reads about 9% below the greedy suite (~82 vs ~90 tok/s), with windows narrowing from T 2.88 to about 2.27 |
 | `--source DIR` | build the prompts from DIR instead (not comparable with anyone else's) |
 
 Any pass option makes the run "custom".
