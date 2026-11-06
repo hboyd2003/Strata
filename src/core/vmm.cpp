@@ -213,6 +213,27 @@ const Api& api() {
 }
 }  // namespace
 
+#if defined(STRATA_HIP_GFX906)
+// On gfx906 (ROCm 10.1, in-tree amdgpu) hipMemUnmap + hipMemMap leave the GPU's old translation of a reused address live:
+// reads and writes keep reaching the chunk it held before, so two addresses can end up on one chunk (found with a soak of
+// the K/V's moves).  Freeing a real allocation flushes them; 64 MiB always reaches the driver, a 4 KiB buffer does not.
+// The caller has the device quiet (the K/V moves only then); about 2.4 ms.
+// TODO: remove once the amdgpu fix ships. Root cause (ROCm/TheRock#8744): with all VRAM BAR-visible, amdgpu updates a
+// compute VM's page tables by CPU, gets no fence, and amdgpu_vm_tlb_flush returns early, so a GEM_VA unmap never
+// invalidates the TLB. Fix under review on amd-gfx (Christian Koenig, 2026-10-08). When amdgpu_vm_tlb_flush in the
+// running kernel no longer returns early on a missing fence, drop this flush and re-run the K/V move soak to confirm.
+static bool flush_stale_translations() {
+    void* b = nullptr;
+    if (const hipError_t e = hipMalloc(&b, 64ull << 20); e != hipSuccess) { fail("hipMalloc (translation flush)", e); return false; }
+    hipError_t e = hipMemset(b, 0, 64);
+    if (e == hipSuccess) e = hipDeviceSynchronize();
+    const hipError_t f = hipFree(b);
+    if (e == hipSuccess) e = f;
+    if (e != hipSuccess) { fail("the translation flush", e); return false; }
+    return true;
+}
+#endif
+
 bool vmm_available() { return api().ok; }
 uint64_t vmm_granularity() { return api().ok ? api().gran : 0; }
 
@@ -283,7 +304,11 @@ bool VmmRange::set_access(int64_t lo, int64_t hi) {
 }
 
 bool VmmRange::commit_run(int64_t lo, int64_t hi) {
+#if defined(STRATA_HIP_GFX906)
+    if (set_access(lo, hi) && flush_stale_translations()) return true;
+#else
     if (set_access(lo, hi)) return true;
+#endif
     for (int64_t c = lo; c < hi; ++c) vmm_chunk_free(unmap(c));
     return false;
 }
