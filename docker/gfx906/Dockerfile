@@ -13,9 +13,10 @@
 #   /opt/strata                      the server, the tools (iq_pack, mtp_fetch / mtp_pack / mtp_rt, ...), data/ (draft
 #                                    vocabularies, expert profiles), llama.cpp at the pinned commit (gguf-py), a venv
 #   /models /data /config /cache     volumes: model files, prepared packs and MTP files, the server config, caches
+#   /tuning                          volume: the rocBLAS tables tuned for this card; keep it, a new one costs about 16 minutes
 #
 #   docker run --device /dev/kfd --device /dev/dri --group-add video --ipc host --ulimit memlock=-1 -p 127.0.0.1:8080:8080 \
-#     -v ./models:/models:ro -v ./data:/data:ro -v ./config:/config:ro strata-gfx906:local      # serves /config/active.json
+#     -v ./models:/models:ro -v ./data:/data:ro -v ./config:/config:ro -v ./tuning:/tuning strata-gfx906:local      # serves /config/active.json
 #
 # Model preparation runs from the same image with another entrypoint (sh, python3 tools/iq_pack.py ...); see
 # docs/gfx906/CONTAINER.md. AB/CD is not in this source tree. Plain legacy-builder features only (no heredocs, no --mount).
@@ -107,7 +108,7 @@ RUN set -e; \
     find /opt/strata -name __pycache__ -prune -exec rm -rf {} +
 ENV PATH=/opt/strata/venv/bin:$PATH PYTHONPATH=/opt/strata PYTHONUNBUFFERED=1 \
     STRATA_GGUF_PY=/opt/strata/third_party/llama.cpp/gguf-py \
-    STRATA_ROCBLAS_TUNING=/cache/rocblas
+    STRATA_ROCBLAS_TUNING=/tuning
 # every binary's libraries resolve in this image (the ROCm runtime and its gfx906 kernels are the base image's), and the server,
 # the preparation tools and the converter import
 RUN set -e; \
@@ -119,7 +120,7 @@ RUN set -e; \
     for t in iq_pack mtp_fetch mtp_pack mtp_rt nvfp4_local_pack; do python3 tools/$t.py --help > /dev/null; done; \
     python3 setup.py --help > /dev/null; \
     python3 tools/gfx906.py --help > /dev/null
-VOLUME ["/models", "/data", "/config", "/cache"]
+VOLUME ["/models", "/data", "/config", "/cache", "/tuning"]
 EXPOSE 8080
 LABEL org.opencontainers.image.title="Strata gfx906" \
       org.opencontainers.image.description="Strata for AMD gfx906 (MI50 / MI60 / Radeon VII) on ROCm 10.1 (mixa3607/ML-gfx906); serial and batch slots, no AB/CD" \

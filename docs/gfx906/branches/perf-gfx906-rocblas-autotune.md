@@ -9,10 +9,10 @@ Before the engine loads, the server runs `tune_rocblas --ensure` on the table di
 | Switch | What | Default |
 | --- | --- | --- |
 | `STRATA_ROCBLAS_AUTOTUNE=0` | turns the startup check and tuning off | on |
-| `STRATA_ROCBLAS_TUNING=<dir>` | where tables live | `/cache/rocblas` in the image |
+| `STRATA_ROCBLAS_TUNING=<dir>` | where tables live | `/tuning` in the image |
 | `STRATA_ROCBLAS_TUNING=<file>` | uses that table as it is and never re-tunes it | |
 
-Mount `/cache` on persistent storage, or every new container tunes again.
+Mount `/tuning` on persistent, writable storage, such as `-v ./tuning:/tuning`, or every new container tunes again. It holds only tables and their backups.
 
 ## What causes a re-tune
 
