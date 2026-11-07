@@ -1,4 +1,5 @@
 // src/kernels/cuda/elementwise.cu - P2.S5's glue kernels.  See the header for why each exists.
+#include "strata/kernels/fence.cuh"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/dp4a.hpp"
 
@@ -386,12 +387,12 @@ __global__ void doorbell_publish_kernel(const float* __restrict__ x, const int32
         ids_out[threadIdx.x] = ids[threadIdx.x];
         if (w_out != nullptr) w_out[threadIdx.x] = w[threadIdx.x];
     }
-    __threadfence_system();
+    STRATA_FENCE_SYSTEM_RELEASE();
     __syncthreads();
     if (threadIdx.x == 0) {
         *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;
 #if defined(__HIPCC__)  // #697: HIP only; on RDNA4 the volatile store alone can sit in L2 until the stream syncs
-        __threadfence_system();
+        STRATA_FENCE_SYSTEM_RELEASE();
 #endif
     }
 }
@@ -407,15 +408,15 @@ __global__ void doorbell_publish_res_kernel(const float* __restrict__ x, const i
     }
     if (__syncthreads_or(any_miss)) {
         for (int i = threadIdx.x; i < n; i += blockDim.x) x_out[i] = x[i];
-        __threadfence_system();
+        STRATA_FENCE_SYSTEM_RELEASE();
     } else if ((int) threadIdx.x < k) {
-        __threadfence_system();
+        STRATA_FENCE_SYSTEM_RELEASE();
     }
     __syncthreads();
     if (threadIdx.x == 0) {
         *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;
 #if defined(__HIPCC__)  // #697: HIP only; on RDNA4 the volatile store alone can sit in L2 until the stream syncs
-        __threadfence_system();
+        STRATA_FENCE_SYSTEM_RELEASE();
 #endif
     }
 }
