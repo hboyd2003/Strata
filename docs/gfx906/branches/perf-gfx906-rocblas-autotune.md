@@ -9,10 +9,10 @@ Before the engine loads, the server runs `tune_rocblas --ensure` on the table di
 | Switch | What | Default |
 | --- | --- | --- |
 | `STRATA_ROCBLAS_AUTOTUNE=0` | turns the startup check and tuning off | on |
-| `STRATA_ROCBLAS_TUNING=<dir>` | where tables live | `/cache/rocblas` in the image |
+| `STRATA_ROCBLAS_TUNING=<dir>` | where tables live | `/tuning` in the image |
 | `STRATA_ROCBLAS_TUNING=<file>` | uses that table as it is and never re-tunes it | |
 
-Mount `/cache` on persistent storage, or every new container tunes again.
+Mount `/tuning` on persistent, writable storage, such as `-v ./tuning:/tuning`, or every new container tunes again. It holds only tables and their backups.
 
 ## What causes a re-tune
 
@@ -25,6 +25,8 @@ The table being replaced is renamed to `<name>.bak-<UTC time>` once the new one 
 The first start takes about 16 minutes longer on an MI50 (120 shapes, 970 s), and the server doesn't serve during that time. An unchanged restart skips tuning. The container can show as unhealthy during a tune, because the compose health check's start period is shorter.
 
 A new table can change rounding, so answers can differ slightly after a re-tune. Relative L2 against the default kernel was about 2e-5 on the shapes read for the earlier table.
+
+Which table it picks doesn't change speed or power: the production table, the earlier hand-made one and two other tunes read 722-728 tok/s at 4K and 155-162 W within one A/B (2026-11-08). The table itself costs prefill power, see [perf/gfx906-pf-rocblas-h16](perf-gfx906-pf-rocblas-h16.md).
 
 ## Measured
 
