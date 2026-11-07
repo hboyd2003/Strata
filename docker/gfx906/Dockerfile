@@ -41,7 +41,7 @@ RUN python3 -c "import setup; print(setup.get_llama_cpp())"
 # extra HIP compiler flags for the engine and the GPU picture reader (empty: none), e.g. "-mllvm -amdgpu-sched-strategy=max-ilp"
 ARG CMAKE_HIP_FLAGS=
 ARG STRATA_PORTABLE=OFF
-ARG ENGINE_TOOLS="strata-concurrent strata-dequant strata-device strata-gguf strata-load strata-overlap strata-plan strata-q36ref"
+ARG ENGINE_TOOLS="strata-concurrent strata-dequant strata-device strata-gguf strata-load strata-overlap strata-plan strata-q36ref tune_rocblas"
 RUN set -e; \
     cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
         -DSTRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
@@ -106,7 +106,8 @@ RUN set -e; \
     /opt/strata/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements-nvfp4-local.txt; \
     find /opt/strata -name __pycache__ -prune -exec rm -rf {} +
 ENV PATH=/opt/strata/venv/bin:$PATH PYTHONPATH=/opt/strata PYTHONUNBUFFERED=1 \
-    STRATA_GGUF_PY=/opt/strata/third_party/llama.cpp/gguf-py
+    STRATA_GGUF_PY=/opt/strata/third_party/llama.cpp/gguf-py \
+    STRATA_ROCBLAS_TUNING=/cache/rocblas
 # every binary's libraries resolve in this image (the ROCm runtime and its gfx906 kernels are the base image's), and the server,
 # the preparation tools and the converter import
 RUN set -e; \
