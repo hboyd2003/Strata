@@ -76,7 +76,7 @@ default that is on in this build:
 | `MMVQ_IACC_XLDS=q6k`, `MMVQ_XLDS=4`, `GR_UP_OCC=1` | `perf/gfx906-pr5033` | exact |
 | `MMVQ_Q6X4=1` | `perf/gfx906-pr5033` | rounding only |
 | `PROMPT_ATTN_GFX906=1` | `perf/gfx906-prompt-attn` | rounding only |
-| `ROCBLAS_TUNING=/opt/strata/tools/hip` | `perf/gfx906-pf-rocblas-h16` | rounding only |
+| `ROCBLAS_TUNING=/tuning` (the image default, tuned at server start) | `perf/gfx906-pf-rocblas-h16`, `perf/gfx906-rocblas-autotune` | rounding only |
 | `HC_MIX_H16=1` | `perf/gfx906-pf-rocblas-h16` | exact |
 
 `DECODE_TIMING=1` is also set: it only logs per-window timings and does not change speed or output.
