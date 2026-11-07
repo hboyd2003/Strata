@@ -13,6 +13,14 @@
 //
 //   cmake --build build-hip --target tune_rocblas
 //   ./build-hip/tune_rocblas --tuning-out tools/hip/<arch>-rocblas-<version>.txt
+//   ./build-hip/tune_rocblas --tuning-dir DIR     (the same file name, in DIR)
+//   ./build-hip/tune_rocblas --ensure DIR [--force]
+//
+// --ensure is what the server runs at startup (serve/rocblas_autotune.py): it compares the table in DIR with this setup
+// and tunes only when they differ: no table, another card or rocBLAS build, another HIP runtime, compute unit count,
+// VBIOS or power table, or another shape list.  A replaced table is kept, renamed to <name>.bak-<UTC time>; it is renamed
+// only once the new one is complete, so a failed run leaves it in place.  `tune:` lines are the status for the log.
+// `# meta` lines under the table's header record what it was measured on.  --reps and --top trade time for less noise.
 //
 // Defaults: the engine's 14 FP16 dense shapes at T = 256 ... 8192 (--tokens); --case T,N,K,ldy adds one shape.
 #define ROCBLAS_BETA_FEATURES_API
@@ -26,10 +34,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <map>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -51,14 +64,16 @@ struct Shape { int t, n, k, ldy; };
 struct Options {
     std::vector<Shape> shapes;
     std::vector<int> tokens{256, 512, 768, 1024, 1536, 2048, 4096, 8192};
-    std::string tuning_out;
+    std::string tuning_out, tuning_dir, ensure_dir;
+    bool force = false, explicit_tokens = false;
     double min_gain = 1.05;
+    int reps = 3, top = 8;
     bool explicit_shapes = false;
 };
 struct Err { double rel_l2 = 0, max_abs = 0; bool finite = true, ok = true; size_t padding_writes = 0; };
 struct Row { Shape s; bool tuned; int solution; float default_ms, best_ms; };
 
-constexpr int WARMUPS = 2, REPS = 3, TOP = 8;
+constexpr int WARMUPS = 2;
 constexpr uint16_t CANARY = 0x7BFF;   // the largest finite FP16 (65504): never a product of (-1, 1) inputs
 
 uint16_t f16_bits(float x) { const __half h = __float2half_rn(x); uint16_t b; std::memcpy(&b, &h, 2); return b; }
@@ -81,7 +96,7 @@ int positive(const std::string& s, const char* label) {
     return (int) v;
 }
 void usage(const char* p) {
-    std::printf("Usage: %s [--case T,N,K,ldy]... [--tokens T1,T2,...] [--min-gain 1.05] [--tuning-out PATH]\n", p);
+    std::printf("Usage: %s [--case T,N,K,ldy]... [--tokens T1,T2,...] [--min-gain 1.05] [--reps 3] [--top 8] [--tuning-out PATH] [--tuning-dir DIR] [--ensure DIR [--force]]\n", p);
     std::printf("Defaults: the engine's 14 FP16 dense shapes (ldy = N) at T = 256,512,768,1024,1536,2048,4096,8192.\n");
 }
 Options options(int argc, char** argv) {
@@ -100,19 +115,28 @@ Options options(int argc, char** argv) {
             if (s.ldy < s.n) { std::fprintf(stderr, "ldy must be >= N\n"); std::exit(2); }
             o.shapes.push_back(s); o.explicit_shapes = true;
         } else if (a == "--tokens") {
-            o.tokens.clear();
+            o.tokens.clear(); o.explicit_tokens = true;
             for (const auto& x : csv(next())) o.tokens.push_back(positive(x, "token bucket"));
         } else if (a == "--min-gain") { o.min_gain = std::atof(next().c_str()); if (o.min_gain < 1.0) o.min_gain = 1.0; }
+        else if (a == "--reps") o.reps = positive(next(), "reps");
+        else if (a == "--top") o.top = positive(next(), "top");
         else if (a == "--tuning-out") o.tuning_out = next();
+        else if (a == "--tuning-dir") o.tuning_dir = next();
+        else if (a == "--ensure") o.ensure_dir = next();
+        else if (a == "--force") o.force = true;
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); std::exit(2); }
     }
+    // --ensure covers prefill reads up to the engine's 32768-token batches
+    if (!o.ensure_dir.empty() && !o.explicit_tokens) o.tokens = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
     if (!o.explicit_shapes) {
         // Qwen3.8-Flash-Next's dense FP16 products, prompt_f16() on (the hc read, GDN and QSA projections, the router
-        // and the shared expert), ldy = N for every one of them.  N K as the engine calls Gemm (ROCBLAS_LAYER=2).
+        // and the shared expert), ldy = N for these.  N K as the engine calls Gemm (ROCBLAS_LAYER=2).
         const int nk[][2] = {{10240, 2560}, {12288, 2560}, {6144, 2560}, {2560, 6144}, {2560, 640}, {2560, 2560},
                              {640, 2560}, {512, 2560}, {128, 2560}, {48, 2560}, {320, 10240}, {10240, 320},
                              {4, 10240}, {1, 2560}};
         for (const auto& p : nk) for (int t : o.tokens) o.shapes.push_back({t, p[0], p[1], p[0]});
+        // the one product the engine calls with ldy != N (48 rows, stride 96), seen in its log
+        for (int t : o.tokens) o.shapes.push_back({t, 48, 2560, 96});
     }
     return o;
 }
@@ -149,6 +173,74 @@ Err compare(const std::vector<uint16_t>& ref, const std::vector<uint16_t>& got, 
     e.ok = e.finite && e.padding_writes == 0 && e.rel_l2 <= 2e-3 && e.max_abs <= 4.0 * ulp;
     return e;
 }
+// ---- what a table was measured on, and whether it still holds -----------------------------------------------------
+using Meta = std::map<std::string, std::string>;
+namespace fs = std::filesystem;
+
+std::string read_text(const std::string& path) {
+    std::ifstream f(path); std::string s;
+    if (f) std::getline(f, s);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\r')) s.pop_back();
+    return s;
+}
+std::string file_hash(const std::string& path) {   // FNV-1a; "" when the file can't be read
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "";
+    uint64_t h = 0xcbf29ce484222325ull; char c;
+    while (f.get(c)) { h ^= (unsigned char) c; h *= 0x100000001b3ull; }
+    char out[32]; std::snprintf(out, sizeof out, "%016llx", (unsigned long long) h);
+    return out;
+}
+std::string no_spaces(std::string s) { for (auto& c : s) if (c == ' ') c = '_'; return s; }
+
+// A key whose value can't be read here (no sysfs in a container) is left out and isn't compared.
+Meta this_setup(const hipDeviceProp_t& prop, const Options& o) {
+    Meta m;
+    int hip_version = 0; HIP_CHECK(hipRuntimeGetVersion(&hip_version));
+    m["hip_runtime"] = std::to_string(hip_version);
+    m["compute_units"] = std::to_string(prop.multiProcessorCount);
+    m["device"] = no_spaces(prop.name);
+    char pci[80];
+    std::snprintf(pci, sizeof pci, "/sys/bus/pci/devices/%04x:%02x:%02x.0/", prop.pciDomainID, prop.pciBusID, prop.pciDeviceID);
+    const std::string vbios = no_spaces(read_text(std::string(pci) + "vbios_version")), table = file_hash(std::string(pci) + "pp_table");
+    if (!vbios.empty()) m["vbios"] = vbios;
+    if (!table.empty()) m["pp_table"] = table;
+    uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&](int v) { for (int i = 0; i < 4; ++i) { h ^= (v >> (8 * i)) & 0xff; h *= 0x100000001b3ull; } };
+    for (const auto& s : o.shapes) { mix(s.t); mix(s.n); mix(s.k); mix(s.ldy); }
+    char shapes[32]; std::snprintf(shapes, sizeof shapes, "%016llx", (unsigned long long) h);
+    m["shapes"] = shapes;
+    return m;
+}
+
+// Why the table in `path` doesn't fit this setup; empty when it does.
+std::vector<std::string> table_differences(const std::string& path, const std::string& arch, const std::string& ver, const Meta& now) {
+    std::ifstream f(path); std::vector<std::string> why; Meta then; std::string line, header_arch, header_ver;
+    bool header = false;
+    while (std::getline(f, line)) {
+        if (line.rfind("# meta ", 0) == 0) {
+            std::istringstream fields(line.substr(7)); std::string field;
+            while (fields >> field) if (const auto eq = field.find('='); eq != std::string::npos) then[field.substr(0, eq)] = field.substr(eq + 1);
+        } else if (line.rfind("STRATA_ROCBLAS_TUNING_V1 ", 0) == 0) {
+            std::istringstream fields(line); std::string magic;
+            fields >> magic >> header_arch >> header_ver; header = true;
+        }
+    }
+    if (!header) { why.push_back("the table has no header"); return why; }
+    if (header_arch != arch) why.push_back("card type " + header_arch + " -> " + arch);
+    if (header_ver != ver) why.push_back("rocBLAS " + header_ver + " -> " + ver);
+    for (const auto& [key, value] : now) {
+        const auto it = then.find(key);
+        if (it == then.end()) why.push_back(key + " not recorded");
+        else if (it->second != value) why.push_back(key + " " + it->second + " -> " + value);
+    }
+    return why;
+}
+std::string utc_stamp(const char* format) {
+    char out[32] = {0}; const std::time_t now = std::time(nullptr);
+    std::strftime(out, sizeof out, format, std::gmtime(&now));
+    return out;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -161,11 +253,42 @@ int main(int argc, char** argv) {
     HIP_CHECK(hipGetDevice(&device)); HIP_CHECK(hipGetDeviceProperties(&prop, device));
     std::string arch(prop.gcnArchName); if (const auto c = arch.find(':'); c != std::string::npos) arch.resize(c);
     std::printf("meta device_arch=%s rocblas_version=%s shapes=%zu min_gain=%.3f\n", arch.c_str(), ver, o.shapes.size(), o.min_gain);
+    const Meta setup = this_setup(prop, o);
+    std::string table_name;
+    {
+        std::string tag(ver);   // as the engine resolves a directory: trailing dots dropped
+        while (!tag.empty() && tag.back() == '.') tag.pop_back();
+        table_name = arch + "-rocblas-" + tag + ".txt";
+    }
+    const auto started = std::chrono::steady_clock::now();
+    if (!o.ensure_dir.empty()) {
+        std::error_code ec;
+        fs::create_directories(o.ensure_dir, ec);
+        if (ec) { std::printf("tune: cannot create %s: %s\n", o.ensure_dir.c_str(), ec.message().c_str()); return 3; }
+        const std::string current = o.ensure_dir + "/" + table_name;
+        std::vector<std::string> why;
+        if (fs::exists(current)) why = table_differences(current, arch, ver, setup);
+        else {
+            why.push_back("no table for this card and rocBLAS build");
+            for (const auto& e : fs::directory_iterator(o.ensure_dir, ec)) {
+                const std::string n = e.path().filename().string();
+                if (n.size() > 4 && n.compare(n.size() - 4, 4, ".txt") == 0 && n.find("-rocblas-") != std::string::npos) why.push_back("found " + n);
+            }
+        }
+        if (why.empty() && !o.force) { std::printf("tune: the table fits this setup (%s), no tuning needed\n", table_name.c_str()); fflush(stdout); return 0; }
+        if (o.force) why.push_back("--force");
+        std::string reasons;
+        for (const auto& w : why) reasons += (reasons.empty() ? "" : "; ") + w;
+        std::printf("tune: tuning %zu shapes because: %s\n", o.shapes.size(), reasons.c_str()); fflush(stdout);
+    }
     hipEvent_t ea, eb; HIP_CHECK(hipEventCreate(&ea)); HIP_CHECK(hipEventCreate(&eb));
 
     std::vector<Row> rows;
     for (size_t ci = 0; ci < o.shapes.size(); ++ci) {
         const Shape& s = o.shapes[ci];
+        if (!o.ensure_dir.empty() && ci && ci % (o.shapes.size() / 10 + 1) == 0) {
+            std::printf("tune: %zu of %zu shapes\n", ci, o.shapes.size()); fflush(stdout);
+        }
         const size_t na = (size_t) s.n * s.k, nb = (size_t) s.t * s.k, ldc = (size_t) s.ldy * 2, nc = ldc * s.t;
         std::vector<uint16_t> ha(na), hb(nb), canary(nc, CANARY);
         std::mt19937 rng(0x5A17C3u + (uint32_t) ci * 0x10001u);
@@ -186,7 +309,7 @@ int main(int argc, char** argv) {
         bool ok = true;
         HIP_CHECK(hipMemcpy(dc.p, canary.data(), nc * 2, hipMemcpyHostToDevice));
         for (int i = 0; i < WARMUPS; ++i) RB_CHECK(gemm(rocblas_gemm_algo_standard, 0));
-        const float default_ms = time_ms(stream, ea, eb, [&] { return gemm(rocblas_gemm_algo_standard, 0); }, REPS, ok);
+        const float default_ms = time_ms(stream, ea, eb, [&] { return gemm(rocblas_gemm_algo_standard, 0); }, o.reps, ok);
         HIP_CHECK(hipDeviceSynchronize());
         std::vector<uint16_t> ref(nc);
         HIP_CHECK(hipMemcpy(ref.data(), dc.p, nc * 2, hipMemcpyDeviceToHost));
@@ -217,12 +340,12 @@ int main(int argc, char** argv) {
         }
         std::sort(quick.begin(), quick.end());
         rocblas_int best = 0; float best_ms = std::numeric_limits<float>::infinity();
-        for (size_t i = 0; i < quick.size() && i < (size_t) TOP; ++i) {
+        for (size_t i = 0; i < quick.size() && i < (size_t) o.top; ++i) {
             const rocblas_int id = quick[i].second;
             HIP_CHECK(hipMemcpy(dc.p, canary.data(), nc * 2, hipMemcpyHostToDevice));
             for (int w = 0; w < WARMUPS; ++w) if (gemm(rocblas_gemm_algo_solution_index, id) != rocblas_status_success) { ok = false; break; }
             if (!ok) continue;
-            const float ms = time_ms(stream, ea, eb, [&] { return gemm(rocblas_gemm_algo_solution_index, id); }, REPS, ok);
+            const float ms = time_ms(stream, ea, eb, [&] { return gemm(rocblas_gemm_algo_solution_index, id); }, o.reps, ok);
             if (!ok) continue;
             HIP_CHECK(hipDeviceSynchronize());
             std::vector<uint16_t> got(nc);
@@ -260,20 +383,48 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!o.tuning_out.empty()) {
-        std::ofstream f(o.tuning_out);
-        if (!f) { std::fprintf(stderr, "cannot write tuning output: %s\n", o.tuning_out.c_str()); return 2; }
+    std::string out_path = o.tuning_out;
+    if (out_path.empty() && !o.tuning_dir.empty()) out_path = o.tuning_dir + "/" + table_name;
+    if (!o.ensure_dir.empty()) out_path = o.ensure_dir + "/" + table_name + ".new";
+    if (!out_path.empty()) {
+        std::ofstream f(out_path);
+        if (!f) { std::fprintf(stderr, "cannot write tuning output: %s\n", out_path.c_str()); return 2; }
         f << "# rocBLAS solution indices for the prompt path's FP16-out GEMMs; valid for this architecture and rocBLAS build only\n";
         f << "# rows: type N K ldy T solution   (type f16o: FP16 in, FP16 out, FP32 compute; Gemm::f16_inplace)\n";
         f << "# solution: rocBLAS's solution index, or `default` where its own choice measured best at that bucket\n";
         f << "STRATA_ROCBLAS_TUNING_V1 " << arch << " " << ver << "\n";
+        for (const auto& [key, value] : setup) f << "# meta " << key << "=" << value << "\n";
+        std::string tokens;
+        for (int t : o.tokens) tokens += (tokens.empty() ? "" : ",") + std::to_string(t);
+        f << "# meta measured=" << utc_stamp("%Y-%m-%d") << "\n";
+        f << "# meta tokens=" << tokens << "\n";
+        f << "# meta reps=" << o.reps << " top=" << o.top << " min_gain=" << o.min_gain << "\n";
         size_t tuned = 0;
         for (const auto& r : rows) {
             f << "f16o " << r.s.n << " " << r.s.k << " " << r.s.ldy << " " << r.s.t << " ";
             if (r.tuned) { f << r.solution << "   # " << r.default_ms << " ms -> " << r.best_ms << " ms\n"; ++tuned; }
             else f << "default   # " << r.default_ms << " ms\n";
         }
-        std::printf("wrote %zu rows (%zu with a solution) to %s\n", rows.size(), tuned, o.tuning_out.c_str());
+        std::printf("wrote %zu rows (%zu with a solution) to %s\n", rows.size(), tuned, out_path.c_str());
+        f.close();
+        if (!f) { std::printf("tune: writing %s failed\n", out_path.c_str()); return 2; }
+    }
+    if (!o.ensure_dir.empty()) {
+        // the new table is whole: keep the ones it replaces under another name, then put it in place
+        std::error_code ec;
+        const std::string stamp = utc_stamp("%Y%m%d-%H%M%S");
+        for (const auto& e : fs::directory_iterator(o.ensure_dir, ec)) {
+            const std::string n = e.path().filename().string();
+            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".txt") == 0 && n.find("-rocblas-") != std::string::npos) {
+                std::error_code ren;
+                fs::rename(e.path(), e.path().string() + ".bak-" + stamp, ren);
+                std::printf("tune: %s -> %s.bak-%s%s\n", n.c_str(), n.c_str(), stamp.c_str(), ren ? " FAILED" : "");
+            }
+        }
+        fs::rename(out_path, o.ensure_dir + "/" + table_name, ec);
+        if (ec) { std::printf("tune: cannot install the table: %s\n", ec.message().c_str()); return 2; }
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        std::printf("tune: wrote %s in %.0f s\n", table_name.c_str(), secs);
     }
     HIP_CHECK(hipEventDestroy(ea)); HIP_CHECK(hipEventDestroy(eb));
     HIP_CHECK(hipStreamDestroy(stream)); RB_CHECK(rocblas_destroy_handle(h));
