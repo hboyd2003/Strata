@@ -1,5 +1,6 @@
 // src/prefill/gemm.cu - see include/strata/prefill/gemm.hpp.
 #include "strata/prefill/gemm.hpp"
+#include <set>
 #include <map>
 #include <string>
 #include "strata/kernels/dequant_bf16.hpp"
@@ -463,6 +464,7 @@ struct RocBlasState {
     strata::prefill::rocblas_tuning::Table table;
     struct Pick { bool tuned = false; int solution = 0; int refusals = 0; };
     std::map<std::tuple<int, int, int, int>, Pick> cache;   // (T, N, K, ldy) -> the solution to run, or the default
+    std::set<std::tuple<int, int, int>> unmeasured_shapes;  // (N, K, ldy) already reported as having no row
     uint64_t tuned_launches = 0;
     uint64_t fallbacks = 0;
 
@@ -474,6 +476,28 @@ struct RocBlasState {
         if (handle) rocblas_destroy_handle(handle);
     }
 };
+
+constexpr const char* kRocblasRetune = "The server re-tunes at its next start unless STRATA_ROCBLAS_AUTOTUNE=0 (by hand, server stopped: tune_rocblas --ensure DIR)";
+
+// The table loaded (card type and rocBLAS build match), but it may no longer be the best one: say what else has changed.
+void report_rocblas_table_age(const strata::prefill::rocblas_tuning::Table& table, const hipDeviceProp_t& properties) {
+    int hip_version = 0;
+    (void) hipRuntimeGetVersion(&hip_version);
+    const std::pair<const char*, std::string> now[] = {{"hip_runtime", std::to_string(hip_version)},
+                                                       {"compute_units", std::to_string(properties.multiProcessorCount)}};
+    bool stale = false;
+    for (const auto& [key, value] : now) {
+        const std::string then = table.meta(key);
+        if (then.empty()) {
+            std::fprintf(stderr, "prefill gemm: rocBLAS table doesn't record %s (now %s)\n", key, value.c_str());
+            stale = true;
+        } else if (then != value) {
+            std::fprintf(stderr, "prefill gemm: rocBLAS table measured with %s=%s, this setup has %s\n", key, then.c_str(), value.c_str());
+            stale = true;
+        }
+    }
+    if (stale) std::fprintf(stderr, "prefill gemm: the table still applies, but its picks may not be the fastest here. %s\n", kRocblasRetune);
+}
 
 std::unique_ptr<RocBlasState> create_rocblas_state(void* stream) {
     const char* path = std::getenv("STRATA_ROCBLAS_TUNING");
@@ -513,8 +537,8 @@ std::unique_ptr<RocBlasState> create_rocblas_state(void* stream) {
     }
     std::string error;
     if (!state->table.load(file.string(), arch, version, error)) {
-        std::fprintf(stderr, "prefill gemm: %s (%s); rocBLAS's default kernels run\n", error.c_str(),
-                     file.string().c_str());
+        std::fprintf(stderr, "prefill gemm: %s (%s); rocBLAS's default kernels run. %s\n", error.c_str(),
+                     file.string().c_str(), kRocblasRetune);
         return nullptr;
     }
     // rocBLAS loads its kernel library on the first product through a handle; a solution-index call before that
@@ -531,6 +555,7 @@ std::unique_ptr<RocBlasState> create_rocblas_state(void* stream) {
             (void) hipFree(tiny);
         }
     }
+    report_rocblas_table_age(state->table, properties);
     size_t tuned_rows = 0;
     for (const auto& row : state->table.rows()) tuned_rows += row.tuned ? 1 : 0;
     std::fprintf(stderr, "prefill gemm: rocBLAS tuning enabled (%zu rows, %zu with a solution, %s, rocBLAS %s)\n",
@@ -548,10 +573,14 @@ bool try_rocblas_f16o(void* opaque_state, const uint16_t* X, const uint16_t* W, 
     auto it = state->cache.find(key);
     if (it == state->cache.end()) {
         RocBlasState::Pick pick;
-        if (const auto* row = state->table.closest((int) N, (int) K, (int) ldy, (int) T); row && row->tuned) {
+        const auto* row = state->table.closest((int) N, (int) K, (int) ldy, (int) T);
+        if (row && row->tuned) {
             pick.tuned = true;
             pick.solution = row->solution;
         }
+        if (!row && state->unmeasured_shapes.insert({(int) N, (int) K, (int) ldy}).second)   // once a shape: a different model
+            std::fprintf(stderr, "prefill gemm: rocBLAS table has no row for N=%lld K=%lld ldy=%lld; its default kernel runs. %s\n",
+                         (long long) N, (long long) K, (long long) ldy, kRocblasRetune);
         if (std::getenv("STRATA_ROCBLAS_VERBOSE")) {
             if (pick.tuned)
                 std::fprintf(stderr, "prefill gemm: rocBLAS solution %d for T=%lld N=%lld K=%lld ldy=%lld\n",
