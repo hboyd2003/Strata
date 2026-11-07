@@ -135,6 +135,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-prompt-attn`](branches/perf-gfx906-prompt-attn.md) | from pfandl/strata-gfx906 | a prompt attention kernel without split-K scratch or a merge pass, +1.6..+2.1% on long prompts |
 | [`perf/gfx906-pf-rocblas-h16`](branches/perf-gfx906-pf-rocblas-h16.md) | from logicalor and andrewprock, own rocBLAS 5.7 table | tuned rocBLAS prompt GEMMs + hc skip-widen, +3.2..+7.9% prefill |
 | [`perf/gfx906-adapter-correct`](branches/perf-gfx906-adapter-correct.md) | own | HIP semantics in the adapter: one-sided fences, device-scope fork/join events, native unsigned dot, half-wave votes; no measured speed change |
+| [`perf/gfx906-rocblas-autotune`](branches/perf-gfx906-rocblas-autotune.md) | own | tunes rocBLAS at server start instead of shipping a table, re-tunes when the setup changes |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
