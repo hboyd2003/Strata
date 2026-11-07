@@ -259,15 +259,22 @@ static __device__ __forceinline__ T strata_shfl_xor(T var, int m, int w) {
 // the gfx906-native kernels call HIP's __shfl_xor directly (64-lane wave sums): same exact mapping
 #define __shfl_xor(var, lanemask, ...) strata_shfl_xor(var, lanemask, STRATA_SHFL_W64(__VA_ARGS__))
 #endif
-#define __all_sync(mask, pred) __all(pred)
-#define __any_sync(mask, pred) __any(pred)
-
 static __device__ __forceinline__ unsigned int strata_ballot32(int pred) {
     const unsigned long long b = __ballot(pred);
     return (unsigned int) (b >> (__lane_id() & 32u));
 }
 #define __ballot_sync(mask, pred) strata_ballot32(pred)
 #define __activemask() ((unsigned int) (__ballot(1) >> (__lane_id() & 32u)))
+// the vote of the caller's own 32-lane warp, as __ballot_sync (HIP's __any / __all vote over the whole wavefront)
+#define __any_sync(mask, pred) ((int) (strata_ballot32(pred) != 0u))
+#define __all_sync(mask, pred) ((int) (strata_ballot32(pred) == __activemask()))
+
+// One-sided fences.  HIP's __threadfence / __threadfence_system are sequentially consistent, so a fence that only
+// publishes this thread's stores also invalidates the CU's L1 (buffer_wbinvl1_vol).  Publish with release; take acquire
+// where the thread goes on to read what others published.  Other backends get __threadfence (strata/kernels/fence.cuh).
+static __device__ __forceinline__ void strata_fence_release() { __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent"); }
+static __device__ __forceinline__ void strata_fence_acquire() { __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent"); }
+static __device__ __forceinline__ void strata_fence_system_release() { __builtin_amdgcn_fence(__ATOMIC_RELEASE, ""); }
 
 static __device__ __forceinline__ void strata_syncwarp() {
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
@@ -296,6 +303,9 @@ static __device__ __forceinline__ int strata_dp4a(int a, int b, int c) {
 #endif
 }
 static __device__ __forceinline__ unsigned int strata_dp4a(unsigned int a, unsigned int b, unsigned int c) {
+#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) || defined(__GFX11__) || defined(__GFX12__)
+    return __builtin_amdgcn_udot4(a, b, c, false);
+#endif
     const uint8_t* va = reinterpret_cast<const uint8_t*>(&a);
     const uint8_t* vb = reinterpret_cast<const uint8_t*>(&b);
     return c + va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];

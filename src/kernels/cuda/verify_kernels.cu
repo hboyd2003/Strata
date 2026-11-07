@@ -2,6 +2,7 @@
 //
 // The per-token arithmetic of every kernel here is transcribed from its single-token original (fused_gdn.cu,
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
+#include "strata/kernels/fence.cuh"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/core/bw_dense_defaults.hpp"
 #include "strata/core/geometry.hpp"
@@ -927,12 +928,12 @@ __global__ void argmax_rows_kernel(const float* __restrict__ logits, int n, int 
     if (threadIdx.x == 0) {
         pv[b] = bv;
         pi[b] = bi;
-        __threadfence();
+        STRATA_FENCE_RELEASE();
         last = atomicAdd(counter, 1u) == (unsigned) (nb - 1);
     }
     __syncthreads();
     if (!last) return;
-    __threadfence();
+    STRATA_FENCE_ACQUIRE();
     bv = __int_as_float(0xff800000);
     bi = n;
     if ((int) threadIdx.x < nb) {
@@ -968,11 +969,11 @@ __global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int 
     for (int i = vt; i < n_vocab; i += 1024) s += __expf(l[i] - m);
     for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
     if ((threadIdx.x & 31) == 0) parts[vt >> 5] = s;
-    __threadfence();
+    STRATA_FENCE_RELEASE();
     if (blockDim.x > 32) __syncthreads();
     if (threadIdx.x != 0) return;
     if (atomicAdd(&rows[row].counter, 1u) != (unsigned) (gridDim.x - 1)) return;
-    __threadfence();
+    STRATA_FENCE_ACQUIRE();
     float tot = 0.0f;
     for (int w = 0; w < 32; ++w) tot += ((volatile const float*) parts)[w];
     probs[row] = 1.0f / tot;
@@ -1543,7 +1544,7 @@ __global__ void __launch_bounds__(NT) resident_plan_kernel(const int32_t* __rest
         counts[1] = n;
         counts[2] = 0;
         if (skip != nullptr) {
-            __threadfence();
+            STRATA_FENCE_RELEASE();
             *skip = ring;
         }
     }
@@ -1609,7 +1610,7 @@ __global__ void resident_plan_par_kernel(const int32_t* __restrict__ ids, int n,
             counts[2] = 0;
         }
     }
-    __threadfence();
+    STRATA_FENCE_RELEASE();
     __syncthreads();
     if (i == 0) *skip = ring;
 }
