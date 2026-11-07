@@ -1,4 +1,5 @@
 // src/kernels/cuda/fused_gr.cu - see include/strata/kernels/fused_gr.hpp.
+#include "strata/kernels/fence.cuh"
 #include "strata/core/emulate.hpp"
 #include "strata/core/sm75_series.hpp"
 #include "strata/core/sm120_series.hpp"
@@ -257,7 +258,7 @@ struct GrQ81 { half2 ds; int8_t qs[32]; };
 static_assert(2 * 16 == 32, "two up blocks per q8_1 group");
 __device__ __forceinline__ void gr_q8_tail(const GrMulti& m, int d0) {
     __shared__ int last;
-    __threadfence();
+    STRATA_FENCE_RELEASE();
     __syncthreads();
     if (threadIdx.x == 0) {
         unsigned* c = m.a[0].q8_cnt + d0 / 32;
@@ -266,7 +267,7 @@ __device__ __forceinline__ void gr_q8_tail(const GrMulti& m, int d0) {
     }
     __syncthreads();
     if (!last) return;
-    __threadfence();
+    STRATA_FENCE_ACQUIRE();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     if (warp >= m.T) return;
     const int c0 = (d0 / 32) * 32;
@@ -3115,12 +3116,12 @@ __global__ void __launch_bounds__(ro::RB / RW * 64) gr_ro_down_kernel(GrMulti m,
     }   // row_live(rbase)
     // the last block to finish reduces every token's partials in a fixed order (deterministic), then re-arms the counter
     __shared__ bool last;
-    __threadfence();
+    STRATA_FENCE_RELEASE();
     __syncthreads();
     if (t == 0) last = atomicAdd(cnt + rg, 1u) == gridDim.x - 1;   // one counter per row group: its 20 chunk blocks
     __syncthreads();
     if (!last) return;
-    __threadfence();
+    STRATA_FENCE_ACQUIRE();
     __shared__ float rsS[T][HC];
     if (t < T * HC) {
         const int k = t / HC, cc = t - k * HC;
