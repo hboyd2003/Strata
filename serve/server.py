@@ -83,6 +83,7 @@ from serve import owner_guard  # noqa: E402
 from serve import launch_identity  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
 from serve import lifeline  # noqa: E402
+from serve import rocblas_autotune  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json, extract_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
@@ -10569,6 +10570,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         # The engine's own environment. It carries the offline policy too: an engine that fetched a
         # missing shard or a plugin would break the promise the flag makes.
         env = child_env(cfg, offline=a.offline)
+        rocblas_autotune.ensure_table(env, cfg.get("backend"), popen=lambda args, **kw: lifeline.popen(args, "tune_rocblas", **kw))
         configure_batch_telemetry_env(env, cfg, a.batch_telemetry)
         sampling_defaults = sampling_defaults_from_config(cfg)
         if sampling_defaults:

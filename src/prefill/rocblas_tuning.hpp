@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -43,6 +44,13 @@ public:
         size_t line_number = 0;
         while (std::getline(input, line)) {
             ++line_number;
+            if (line.rfind("# meta ", 0) == 0) {   // what the table was measured on: key=value pairs for the engine's re-tune check
+                std::istringstream fields(line.substr(7));
+                std::string field;
+                while (fields >> field)
+                    if (const auto eq = field.find('='); eq != std::string::npos) meta_[field.substr(0, eq)] = field.substr(eq + 1);
+                continue;
+            }
             if (const auto hash = line.find('#'); hash != std::string::npos) line.resize(hash);
             const auto first = line.find_first_not_of(" \t\r\n");
             if (first == std::string::npos) continue;
@@ -119,11 +127,14 @@ public:
     const std::vector<Row>& rows() const { return rows_; }
     const std::string& arch() const { return arch_; }
     const std::string& version() const { return version_; }
+    /// A `# meta` value, or "" when the table doesn't record it.
+    std::string meta(const std::string& key) const { const auto it = meta_.find(key); return it == meta_.end() ? std::string() : it->second; }
 
 private:
     std::string arch_;
     std::string version_;
     std::vector<Row> rows_;
+    std::map<std::string, std::string> meta_;
 };
 
 }  // namespace strata::prefill::rocblas_tuning
