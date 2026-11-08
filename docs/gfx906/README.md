@@ -15,7 +15,7 @@ nothing was kept unless it made that machine faster (see the warning in the [REA
 
 The rest of `docs/` is upstream's and describes upstream Strata. It is left untouched so catch-ups stay clean.
 
-Numbers below are as of 2026-11-03, unless a line gives its own date.
+Numbers below are as of 2026-11-08, unless a line gives its own date.
 
 ## The box
 
@@ -30,7 +30,7 @@ Numbers below are as of 2026-11-03, unless a line gives its own date.
 Things about this card that shaped the work:
 
 - **Decode is latency bound, not bandwidth bound.** About 70% of a decode window is the host waiting for
-  the GPU to get through many small kernels (gemv, router, hc, experts). Power sits around 150 W during decode.
+  the GPU to get through many small kernels (gemv, router, hc, experts). Board power sits around 170 W during decode and 190 W while reading a prompt.
   Wins come from fewer, faster small kernels, not from the CPU side.
 - **The SDMA engine caps host-to-device copies at ~13 GB/s** on this card, while a kernel reading mapped host
   memory gets 25–27 GB/s. Expert swaps therefore use a kernel copy.
@@ -93,11 +93,11 @@ All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did 
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
-**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md)): about 85 tok/s decode on short prompts
-(85.9 on 2026-11-03 after the catch-up to upstream of 2026-11-02; 85.8 on 2026-11-02 after `perf/gfx906-dpp-shfl`). On real agent traffic (the last 100 requests on 2026-10-30: context median
+**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), release `v0.2.12+0.4-gfx906` on 2026-11-08): about 90 tok/s
+decode on short prompts and 85 tok/s at ~32K context. Prompt reading: ~730 tok/s at 4K, ~827 tok/s at 16K, ~802 tok/s on a 32K
+document, ~605 tok/s for a follow-up turn on an 18K-token cached conversation. On real agent traffic (the last 100 requests on 2026-10-30: context median
 144K tokens, p90 185K, ~730 new tokens a turn) decode is 82 tok/s median with 0.74 draft acceptance, and prompt
-reading takes ~45% of engine time. Prefill ~780 tok/s at 16K and ~736 tok/s on a 32K document (2026-11-03), ~720
-tok/s at 100K (measured 2026-10-30, before the GDN prompt switches). The fork started at ~59 tok/s decode on the same box and model.
+reading takes ~45% of engine time. Prefill ~720 tok/s at 100K (measured 2026-10-30, before the GDN prompt switches). The fork started at ~59 tok/s decode on the same box and model.
 
 ## Branches merged into `main`
 

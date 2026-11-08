@@ -55,11 +55,18 @@ only when the fork itself changes, so a catch-up that only moves the upstream ba
 `v0.2.9+0.1-gfx906`). Tags are the only refs that are never rewritten, so a release tag is the thing to pin.
 
 Each release has a GitHub Release and an image, `ghcr.io/hboyd2003/strata-gfx906:<upstream>-<fork>` (plus `:latest`).
-The image is the one production runs on the MI50 box, pushed from there; the tag then starts a workflow that checks it
-and writes the notes. Since `v0.2.9+0.2-gfx906` each release also has a portable image of the same code (AVX2
+The image is normally the one production runs on the MI50 box, pushed from there (`v0.2.12+0.4-gfx906` shipped the
+image its release A/B measured, before production moved to it). The tag then starts a workflow that checks it and
+writes the notes; when the workflow can't run, the same steps are run by hand. Since `v0.2.9+0.2-gfx906` each release also has a portable image of the same code (AVX2
 baseline, for other host CPUs): `:<upstream>-<fork>-portable`, plus `:latest-portable`. Details: [branches/gfx906-release.md](branches/gfx906-release.md).
 
 The fork carries no upstream tags. Upstream's own releases are at [Niko1221/Strata](https://github.com/Niko1221/Strata/releases).
+
+## GitHub Actions
+
+Only the `gfx906 release` workflow runs on this fork. Upstream's CI workflows are disabled here: they ran on every
+pushed branch, and a catch-up force-pushes about 35 branches at once. Builds and tests run on the MI50 box instead
+(the parity tests and the A/B described below).
 
 ## How a change gets in
 
