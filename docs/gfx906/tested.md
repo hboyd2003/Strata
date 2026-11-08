@@ -12,6 +12,10 @@ variant against the build running at the time with a repeat of the base as the n
 come from the parity tests' `--bench` modes.
 
 **Legend.** Percentages are decode tok/s against the build running at the time, unless a row says otherwise.
+Rows also name the sub-metrics that improved beyond the control arms' spread (stage times, the draft step, waits,
+acceptance, tokens per window) even when tok/s didn't move; a row without them had none, or predates sub-metric
+recording (before 2026-10-25). Host planning time, commit time and small adapt-wait changes swing as much between
+identical arms, so they aren't quoted.
 The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 
 - **N** neutral: inside the noise (about ±1%; each A/B repeats the base as a control)
@@ -29,7 +33,7 @@ The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 | PR #3455 | 16-byte LDS staging in the expert gate/up loops (`NIB_GU_PROTO`) | H, −9..−14%, exact | VGPRs 77 → 116 drops occupancy from 3 to 2 waves/SIMD. With launch bounds it spills and is neutral. |
 | PR #3455 | 4-bit slot transcode | X | CUDA only, and needs every expert resident. |
 | PR #3820 | `STRATA_SELECT_LONG` | X | CUDA sm_60 only. |
-| PR #3073 | `STRATA_SELECT_SIMT=2` | N | Bitwise equal to `SELECT_SIMT=1` (already upstream and in use), no faster end to end. |
+| PR #3073 | `STRATA_SELECT_SIMT=2` | N | Bitwise equal to `SELECT_SIMT=1` (already upstream and in use), no faster end to end. Improved: the KV-resolve stage −33%, a 0.01 ms stage. |
 | PR #4567 | `STRATA_QSA_ATTN_VARIANT=2` (32-cell attention chunks) | H, rounding | Attention −26% at short context but +1% overall (noise); prefill −1.3..−2.2%; at 80K context the drafter gets 9% slower. |
 | PR #4158 | `PF_MMVQ` (MMVQ for short prefill projections) | N | It engages, but ~200-token prefill is flat, likely because our dense prompt projections already use int8 MMQ (not measured). |
 | PR #4039 | `PF_HC_REGION` / `PF_GROUP_SCRATCH` | N, exact / B | The scratch variant gives non-finite logits after every prefill on this fork. Re-tested 2026-11-03 on upstream's 10-31 rewrite of both: `PF_HC_REGION` N again (every prefill size inside the base's spread); `PF_GROUP_SCRATCH` still gives non-finite logits (on a 256-token chunk). |
@@ -49,10 +53,10 @@ The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 | bitaccesscomau | refills of lent expert slots on their own stream | X (not built) | It only changes the one-shot command-line prompt path; `--serve` refills slots through its own code. |
 | samnolak | `PF_ROUTE_EVENT=1` (hand port) | N, exact | +0.3% at 16K prefill, the rest flat: the host already waited only on the router. |
 | mgendre | `POOL_ONE_PHASE=1` | N, exact | Host CPU-expert time −5% in decode, hidden behind the wait for the GPU. The short decode right after a prompt may get slower. |
-| bsorensen110 | `MOE_BUCKET_PLAN=1` | N, exact | Our windows' top-10 groups rarely hold more than one entry, so there is little to bucket; 4K prefill 1.7% slower. |
-| PR #4856 | `STRATA_SPEC_PCUM` (stop drafting once the drafts' cumulative probability falls below a bar; 0.3–0.5 and a spec-5 combination) | N | The drafter does stop earlier (draft time −2..−3%), but tokens per window fall with it; every setting landed inside the control's own −2.1% swing. |
+| bsorensen110 | `MOE_BUCKET_PLAN=1` | N, exact | Our windows' top-10 groups rarely hold more than one entry, so there is little to bucket; 4K prefill 1.7% slower. Improved: draft step −5.4%. |
+| PR #4856 | `STRATA_SPEC_PCUM` (stop drafting once the drafts' cumulative probability falls below a bar; 0.3–0.5 and a spec-5 combination) | N | The drafter does stop earlier (draft time −2..−3%), but tokens per window fall with it; every setting landed inside the control's own −2.1% swing. Improved: acceptance +8.8% at 0.5. |
 | bitaccesscomau | `QSA_ROWS56=1` (upstream's rows score kernel extended to 5–6 queries) | N, rounding | Live 80K ms/window −1.6% against −1.7% for `QSA_ROWS=1` alone (which is used): the 5–6-query windows are a minority and gain only ~13% in the kernel. |
-| 3chet | `--aux-cpus auto` | N, exact | Window time flat (−0.1%). This box has one CPU socket, so the host thread doesn't share a core with driver threads the way it did on theirs. |
+| 3chet | `--aux-cpus auto` | N, exact | Window time flat (−0.1%). This box has one CPU socket, so the host thread doesn't share a core with driver threads the way it did on theirs. Improved: CPU experts per layer-window −12.7%, host CPU-expert time −11.9%, host per-layer −7.4%; the GPU wait absorbed it. |
 | serboox | IQ3_S gate/up CPU rows with AVX-512 VBMI (`IQ_VBMI=1`) | N, rounding | 2.3× faster on one thread, but the 16-thread CPU pool already sits at the ~55 GB/s DRAM ceiling for the 1–4-token rows decode runs, so decode and prefill stay flat. |
 | phoenixclyde | a per-shape MMVQ rows table (`MMVQ_ROWS_TABLE=1`, their method on our kernels) | N, exact | Out-proj −5.7% and shared-expert quant −2.9% per stage, but window time flat in the speed pass and no gain on the 80K live pass. |
 
@@ -66,9 +70,9 @@ Upstream switches and my own experiments that are in the code but left off.
 | `FUSE_WAIT=2`, `HIP_ROUTER_FAST`, `GR_UP75`, `FUSE_CONVAB` + `FUSE_HITS`, `PLE_BATCH` | N | |
 | `LFUSE` | X | Never engaged: it only runs when every expert is resident in VRAM, which never holds on this box. |
 | `GDN_SPLIT=1`, `TSUM=1`, LDS-only GDN barriers + PR #3225 | N, exact | |
-| `SH_STREAM=0` (the generic HIP default) | H, −0.8..−1.7% | The shared-expert stream helps on gfx906, unlike gfx1201/gfx1030. Left on. |
-| `MTP_SHARED_BRANCH=0`, `ONE_TOKEN_COMMIT=0`, `HEAD_MIX_MULTI=0` | N, exact | The CUDA-side defaults are right here. |
-| `MTP_HIP_PRIO=1`, `COPY_HIP_PRIO=1` (priority streams) | N | Queue priority does not arbitrate compute units on gfx906; they only move the wait around. |
+| `SH_STREAM=0` (the generic HIP default) | H, −0.8..−1.7% | The shared-expert stream helps on gfx906, unlike gfx1201/gfx1030. Left on. With `MTP_SHARED_BRANCH=0` the draft step is 35% faster, but decode is slower overall. |
+| `MTP_SHARED_BRANCH=0`, `ONE_TOKEN_COMMIT=0`, `HEAD_MIX_MULTI=0` | N, exact | The CUDA-side defaults are right here. Improved: the draft step −35% (`MTP_SHARED_BRANCH=0`, `HEAD_MIX_MULTI=0`) and −20% (`ONE_TOKEN_COMMIT=0`, plus GDN recurrence −7.6%), with decode tok/s flat. |
+| `MTP_HIP_PRIO=1`, `COPY_HIP_PRIO=1` (priority streams) | N | Queue priority does not arbitrate compute units on gfx906; they only move the wait around. Measured: adapt wait −16% (−45% with a 32-block copy grid); the rest of the window absorbed it. |
 | `VERIFY_DEVICE_PLAN=1` | H, −1.5% | Changes output. |
 | `QFUSE=1` | B | Upstream bug: one-token windows lose their GDN state update (accept 0.71 → 0.645, −8..−9%). With `ONE_TOKEN_COMMIT=0` it is correct but neutral. |
 | `SPEC_COST=1` | H, −7.3% | |
@@ -76,23 +80,23 @@ Upstream switches and my own experiments that are in the code but left off.
 | `ADAPT_OVERLAP=1` | N, exact | Adapt wait −1.1 ms, verify +1.05 ms: the swap copies just move into the window. |
 | `--adapt-async 1` + `ADAPT_ASYNC_WAIT=0` | H, −3.4% | Copies in flight slow verify's latency-bound PCIe round trips. |
 | `ADAPT_LAG=2` | H, −0.8%, exact | |
-| `ADAPT_ASYNC_BATCH=4` (with the async tier) | H, −5.9% | Swap rounds drag over many windows; hit rate 94 → 89%. |
+| `ADAPT_ASYNC_BATCH=4` (with the async tier) | H, −5.9% | Swap rounds drag over many windows; hit rate 94 → 89%. Improved: adapt wait −86%, swaps per window −77%, GPU-reach wait −9%; the lost hits cost more. |
 | `GR_DOWN_TG` (enabled on HIP) | H, −1.1%, exact | The hc down stage gets ~10% slower, opposite to its kernel bench. |
-| `--mtp-q4 head` | H, −0.6% | The Q4_0 draft head is faster per step but loses acceptance. |
-| `DOORBELL_STORE`, `MMVQ_Q6K_R4`, `NIB_SHIFT` (own) | N | `Q6K_R4` and `NIB_SHIFT` benched 5–11% faster; it didn't carry end to end. Still on `perf/gfx906-decode-kernels`, off. |
+| `--mtp-q4 head` | H, −0.6% | The Q4_0 draft head is faster per step but loses acceptance. Improved: draft step −8.9%. |
+| `DOORBELL_STORE`, `MMVQ_Q6K_R4`, `NIB_SHIFT` (own) | N | `Q6K_R4` and `NIB_SHIFT` benched 5–11% faster; it didn't carry end to end. Still on `perf/gfx906-decode-kernels`, off. `DOORBELL_STORE` also cut the GDN CPU wait 20%. |
 | `GFX906_ROUTER_FUSED` (own) | N (kernel bench only, not A/B'd) | One launch instead of three; the top-10 is no longer slow, so nothing to win. |
 | `ADAPT_COPY_BATCH` (own) | N | One launch per swap round ≈ one per swap. |
 | 4-rows-per-warp expert down kernel (own) | H, −8..−55%, exact | |
 | `HC_PERSIST` / `GR_SPLIT=1` | X / N (bench only) | `HC_PERSIST` is off on wave64; `GR_SPLIT` changes output and benched about even. |
 | `PREFILL_STREAM_MIN=3072` (staging short chunks without the CPU share) | H | 2K follow-up turns 3.4% slower: the CPU share's gain is the CPU work, not the staging. |
-| `HSA_ENABLE_SDMA=0` | N decode, H prefill (4K −6.8%) | |
+| `HSA_ENABLE_SDMA=0` | N decode, H prefill (4K −6.8%) | Improved: adapt wait −89% (no SDMA queue to wait on). |
 | `GPU_MAX_HW_QUEUES=8` / `=2` | H, −23% / −4% | |
 | `STRATA_DMA_BATCH` | X | CUDA 13+ only. |
 | `-mllvm -amdgpu-sched-strategy=max-ilp` (compiler flag) | H, −6.6% | |
-| `MMVQ_IACC_OCC` (own: a waves-per-SIMD cap on the Q6_K head and projection gemv) | N, exact | Benched −5% at 3-token windows only, ~0 end to end. Raising occupancy spills on gfx906, and spilling is very slow here. |
-| `SMALL_UNR=1` / `2` / `3` (upstream constant-trip router and GDN a/b reads) | X, exact | The GDN a/b stage is already at the 0.05 ms timer floor, and the router read on this fork goes through its own `router_gemv_906`, which the switch doesn't reach. |
+| `MMVQ_IACC_OCC` (own: a waves-per-SIMD cap on the Q6_K head and projection gemv) | N, exact | Benched −5% at 3-token windows only, ~0 end to end. Raising occupancy spills on gfx906, and spilling is very slow here. Improved: hc norm stages −4..−11%, QSA scores −3.4%. |
+| `SMALL_UNR=1` / `2` / `3` (upstream constant-trip router and GDN a/b reads) | X, exact | The GDN a/b stage is already at the 0.05 ms timer floor, and the router read on this fork goes through its own `router_gemv_906`, which the switch doesn't reach. Improved: shared-expert quant −4% (`=1`, `=3`) and draft step −6.8% (`=3`, one run). |
 | `PF_SMALL=0` (upstream's small-card prompt rule, on by default) | X | The rule only applies to automatic prompt chunks under 8,192 tokens; this box's are 32,768. |
-| `MTP_MULTI_COPY=0` (upstream's combined draft-copy kernel is the default) | N, exact | The old one-launch-a-copy path is no faster. |
+| `MTP_MULTI_COPY=0` (upstream's combined draft-copy kernel is the default) | N, exact | The old one-launch-a-copy path is no faster. Improved: several GPU stages −3% (hc0 down, qkv gemv, router) and swaps per window −12%; window time flat. |
 | `QSA_FUSE_NR=0` (upstream's norm + rope fusion in the QSA prompt layers, on by default) | N | Same output on the decode prompts, prefill unchanged: the default stays. |
 | `LOOKUP_MAX_T=0` (turns off upstream's 12-row lookup window default) | H on copy-heavy replies | −8.5% when a reply copies its context (a file copy −12%, an edit −6%, a re-copy −7%), neutral on normal prompts. The default is kept; it costs 38 MiB of VRAM. Rounding only. |
 | `PENALTY_PROMPT=1` (upstream #4590's off switch) | not kept | Brings back the old penalty window: the last 64 tokens, which at the start of a reply are the prompt's. With the model card's presence penalty 1.5 (sent for thinking-off requests) that penalised the words the prompt asked for. Upstream now counts only the reply's tokens, as vLLM and SGLang do for presence and frequency penalties. It changed greedy outputs; speed is unchanged. |
@@ -116,17 +120,17 @@ Upstream switches and my own experiments that are in the code but left off.
 
 | Setting | Tried | Result |
 | --- | --- | --- |
-| `--spec` / `--spec-min-p` | 2, 3, 4, 5 × min-p 0.4–0.8 | **4 / 0.6 used** (+2.6% over 3 / 0.5); 4 / 0.7 was the steadiest runner-up (+1.2..+1.8%). Spec 5 −1.4..−3%, spec 2 −4.7%. |
+| `--spec` / `--spec-min-p` | 2, 3, 4, 5 × min-p 0.4–0.8 | **4 / 0.6 used** (+2.6% over 3 / 0.5); 4 / 0.7 was the steadiest runner-up (+1.2..+1.8%). Spec 5 −1.4..−3%, spec 2 −4.7%. Sub-metrics: min-p 0.7–0.8 raises acceptance 10–14% and cuts the draft step up to 21%, spec 4 over 3 gives +13% tokens per window; each costs window time. |
 | `--mtp-window` | 8192, 4096, 2048 (default 32768) | H at long context (acceptance 0.69 → 0.61, −4.7%), N short; changes output. |
-| `--adapt-swaps` / `--adapt-every` | swaps 0–160, every 1/2/4 | **80 / 1 used.** Swaps 0 −22%, 8 −2.3%, every 2 −17%. Re-tested 2026-11-01: 40 and 60 are neutral (the swap wait drops 33–47%, but the time moves to CPU experts and the draft). |
-| `--adapt-decay` | 0.95, 0.99 | **0.97 used.** Both neutral. |
+| `--adapt-swaps` / `--adapt-every` | swaps 0–160, every 1/2/4 | **80 / 1 used.** Swaps 0 −22%, 8 −2.3%, every 2 −17%. Re-tested 2026-11-01: 40 and 60 are neutral (the swap wait drops 33–47%, but the time moves to CPU experts and the draft). Swaps 8–16 cut the swap wait 76–93% and GPU-reach wait 3–6%, but hits drop. |
+| `--adapt-decay` | 0.95, 0.99 | **0.97 used.** Both neutral. Both cut the swap wait 16–30% and swaps per window 8–12%. |
 | `--expert-cache` pinned at the old size | 11635 slots vs auto | +0.8% (noise) for 480 MiB less VRAM headroom. Not taken. |
 | `--lookup-max-t 16` | | H, −1.6% on normal prompts. 12, upstream's default since 2026-11, is kept: see `LOOKUP_MAX_T` above. |
 | `--prefill 4096` | vs auto | H, −18% prefill. |
 | `STRATA_PREFILL_CPU_SHARE_MAX` / `CPU_TOKENS` | 4096 / 6144 / 8192, tokens 8 / 16 / 32 | **8192 / 16 used.** 6144 won as much on 4K prompts (−5.2%); 8192 covers more chunk sizes. 4096 and 32 neutral. |
-| English-only draft vocabulary | 40.5K-token draft head instead of 106K | +1.8% greedy, but every output changes and non-English text could lose acceptance; at temperature 1 it loses 0.9–1.9% (draft step +44%). On hold. |
-| `--spec` / `--spec-min-p` at temperature 1 + thinking | spec 3, 5, 6; min-p 0.5, 0.7 | All inside the noise; **4 / 0.6 stays**. Sampled requests run ~9% slower than greedy because windows get narrower (tokens per window 2.30 → ~1.84), not because acceptance drops. |
-| Coupled / Gumbel draft sampling (`SPEC_COUPLED`, `SPEC_GUMBEL`) at temperature 1 | alone, with min-p 0.3 / 0.4, with spec 6 | Gumbel raises acceptance slightly with tok/s flat; coupled −3.5%, Gumbel + spec 6 −2.6%. Neither recovers the temperature-1 loss. |
+| English-only draft vocabulary | 40.5K-token draft head instead of 106K | +1.8% greedy, but every output changes and non-English text could lose acceptance; at temperature 1 it loses 0.9–1.9% (draft step +44%). On hold. At temperature 1 acceptance rises 5.9% and tokens per window 3–12%. |
+| `--spec` / `--spec-min-p` at temperature 1 + thinking | spec 3, 5, 6; min-p 0.5, 0.7 | All inside the noise; **4 / 0.6 stays**. Sampled requests run ~9% slower than greedy because windows get narrower (tokens per window 2.30 → ~1.84), not because acceptance drops. Sub-metrics: min-p 0.7 acceptance +11%, spec 3 draft step −13..−30%, spec 6 tokens per window +7..+10%; window time moves with each. |
+| Coupled / Gumbel draft sampling (`SPEC_COUPLED`, `SPEC_GUMBEL`) at temperature 1 | alone, with min-p 0.3 / 0.4, with spec 6 | Gumbel raises acceptance slightly with tok/s flat; coupled −3.5%, Gumbel + spec 6 −2.6%. Neither recovers the temperature-1 loss. Gumbel acceptance +8.6%; Gumbel + min-p 0.3 tokens per window +7..+13%. |
 | `--expert-cache 7650` | 9,996 slots instead of 11,501 | H, −2.2% decode, −4.7% at long context: the cost of ~1,500 fewer slots. |
 | rocBLAS tables | production auto-tune, the earlier hand-made table, two more tunes | Same speed (722–728 tok/s at 4K) and power. The tuner's picks differ run to run (94 of 120 agree) without mattering. |
 | GPU clock pin `power_dpm_force_performance_level=high` | vs auto | X: under load the clock already sits at ~1,688 MHz either way. |
