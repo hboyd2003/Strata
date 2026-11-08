@@ -101,7 +101,12 @@ void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream);
 /// Plan v0.3 P3 token graph: copy `n` floats from MAPPED pinned host memory (`src` is its device pointer) into
 /// device memory with a kernel, so the handoff stays on the compute queue (a memcpy node is a copy-engine
 /// operation, which WDDM submits separately and which measured 67 flushes per token).
-void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream);
+/// `max_blocks` caps the grid (256 threads a block; the adaptive swaps pass STRATA_ADAPT_COPY_BLOCKS).
+void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream, int max_blocks = 64);
+/// `count` such copies (each `n[i]` floats, a multiple of 4, both ends 16-byte aligned) in one launch per 64 copies: every
+/// block walks the copies in order with a grid-stride loop, so the grid stays `max_blocks` for the whole batch.
+void copy_from_mapped_batch(float* const* dst, const float* const* src, const int64_t* n, int count, void* stream,
+                            int max_blocks = 64);
 /// `rows` rows of `width` floats from mapped memory, except the rows listed in hit_rows[0, *count) (device),
 /// which are written +0.0 instead (a verify window's GPU-computed entries: the pool leaves zeros there).
 /// multi-GPU: dst[rows[r] * width ..] = src[r * width ..] for r < n (float4; dst may be mapped host memory).
