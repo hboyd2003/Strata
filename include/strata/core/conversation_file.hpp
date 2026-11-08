@@ -26,13 +26,23 @@ struct SessionFileIdentity {
     uint64_t model = 0, config = 0;
 };
 
+// A SessionHasher's running state, so a hash over a file that only grows (the delta K/V log) goes on from where the
+// last write left it instead of reading the file again.
+struct SessionHashState {
+    std::array<uint64_t, 4> lane{};
+    std::array<uint8_t, 32> pending{};
+    uint64_t npending = 0, total = 0;
+};
+
 // Non-cryptographic 64-bit hash with xxHash64-style rounds (NOT the standard XXH64 stream): corruption and identity
 // checks, not adversarial input.  Streaming and one-shot agree.
 class SessionHasher {
 public:
     explicit SessionHasher(uint64_t seed = 0);
+    explicit SessionHasher(const SessionHashState& s);
     void update(const void* data, size_t n);
     uint64_t digest() const;
+    SessionHashState state() const;
 private:
     void block(const uint8_t* p);
     uint64_t lane_[4];
@@ -177,6 +187,9 @@ struct SessionKvSource {
     int format = 0;
     int64_t cells = 0, heads = 0, head_dim = 0, page_size = 0, pooled_rows = 0, idx_dim = 0;
     std::array<size_t, 5> sizes{};
+    // delta saves only: the leading bytes of each part that are unchanged since the save or restore the base log
+    // describes (whole pages below the first rewritten token); a delta save appends only the bytes past them
+    std::array<size_t, 5> stable{};
     std::function<bool(size_t part, size_t offset, void* dst, size_t n)> read;
     std::function<std::string()> error;
 };
@@ -184,6 +197,53 @@ struct SessionKvSource {
 bool session_file_write(const std::string& path, const SavedConversation& meta, const std::vector<SessionKvSource>& kv,
                         const SessionFileIdentity& id, size_t& bytes, std::string& error,
                         const SessionWriteOptions& options = {}, SessionStatus* status = nullptr);
+
+// ---- Delta session files (format v2, POSIX only): the K/V goes to an append-only log beside the file, so a save
+// after a turn writes the running state and the turn's new K/V cells instead of the whole conversation again.
+//
+// `path` holds a head file: the v1 metadata (geometry, layer range, live state, checkpoints), each K/V layer's
+// header and part sizes, and a reference to the log `<path>.<16 hex>.kv` (its id, committed length, digest and the
+// digest's running state).  The log is a 64-byte header and records (layer, part, offset, n, bytes); a later record
+// of the same bytes wins, every write ends on a 4 KiB boundary (direct I/O).  An append flushes the log first and
+// then replaces the head (temporary file + rename, as v1), so a crash leaves the old head and its committed prefix;
+// bytes past the committed length are ignored and cut by the next append.  A full write makes a new log and removes
+// the old one only after the head is published.  The reads below take v1 and v2 files alike.
+
+// What a delta save or a restore of a v2 file leaves behind for the next append: the log and its committed state.
+struct SessionLog {
+    uint64_t id = 0;            // 0: none (a v1 file, or nothing saved)
+    uint64_t bytes = 0;         // committed length, header included
+    SessionHashState hash;      // the digest's state over [0, bytes)
+    std::vector<std::array<uint64_t, 5>> parts;   // each K/V layer's part sizes in the head
+    uint64_t kv_bytes() const {
+        uint64_t n = 0;
+        for (const auto& p : parts) for (uint64_t b : p) n += b;
+        return n;
+    }
+};
+
+// What a delta save did, for the engine's log line.
+struct SessionDeltaStats {
+    bool appended = false;      // false: a full write (a new log)
+    std::string full_reason;    // why it was a full write ("no base", "log too large", ...)
+    uint64_t head_bytes = 0, log_written = 0, log_bytes = 0;
+};
+
+// Delta saves exist on this platform (POSIX); elsewhere the engine writes v1.
+bool session_delta_supported();
+// The log file of a head at `path` with log id `id`.
+std::string session_delta_log_path(const std::string& path, uint64_t id);
+
+// A delta save.  `base` (optional): the log state of the previous save or restore of this conversation at `path`;
+// with it, each source's `stable` bytes are already in that log and only the rest is appended.  The base is checked
+// against the files on disk (the head's log id and length, the log's header and size) and dropped for a full write
+// when they disagree, when the log would hold more than 1.25x the K/V plus 64 MiB, or when a source's stable bytes
+// exceed the base's part.  `out` is the new log state; `bytes` the bytes this call wrote (head + log).
+bool session_file_write_delta(const std::string& path, const SavedConversation& meta,
+                              const std::vector<SessionKvSource>& kv, const SessionFileIdentity& id,
+                              const SessionLog* base, SessionLog& out, SessionDeltaStats& stats, size_t& bytes,
+                              std::string& error, const SessionWriteOptions& options = {},
+                              SessionStatus* status = nullptr);
 
 // The checkpoints worth a disk write: the deepest one (the next turn's resume point when the live tail was
 // rewritten).  Earlier checkpoints only serve edits further back and cost ~118 MB each at this geometry.
@@ -260,10 +320,12 @@ bool session_file_read(const std::string& path, const SessionFileIdentity& id, S
 // `layer` counts as the save wrote them (main layers, then the draft); `part` 0..4 is k, v, k_scale, v_scale,
 // pooled; `offset` is within the part.
 using SessionKvBlock = std::function<bool(size_t layer, size_t part, uint64_t offset, const void* data, size_t n)>;
+// A v2 (delta) file: the head and then its log are read and checked (every part covered, the log digest); `log`
+// (optional) gets the log state for the next delta save, and stays empty (id 0) for a v1 file.
 bool session_file_read_streamed(const std::string& path, const SessionFileIdentity& id, SavedConversation& meta,
                                 size_t& bytes, std::string& error, const SessionReadLimits& limits = {},
                                 std::vector<std::array<uint64_t, 5>>* kv_part_bytes = nullptr,
-                                SessionStatus* status = nullptr);
+                                SessionStatus* status = nullptr, SessionLog* log = nullptr);
 bool session_file_apply_streamed(const std::string& path, const SessionFileIdentity& id, const SessionKvBlock& sink,
                                  const std::vector<std::array<uint64_t, 5>>& kv_part_bytes, std::string& error,
                                  SessionStatus* status = nullptr);
