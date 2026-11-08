@@ -87,6 +87,14 @@
 #include <exception>
 #include "strata/platform/cpu_relax.hpp"
 
+// Fork/join events only order GPU streams: nothing on the host inspects them.  gfx906 records them with a device-scope
+// release instead of the default system-scope one; other backends keep the default.
+#if defined(STRATA_HIP_GFX906)
+#define STRATA_FORK_JOIN_EVENT_FLAGS (cudaEventDisableTiming | hipEventReleaseToDevice)
+#else
+#define STRATA_FORK_JOIN_EVENT_FLAGS cudaEventDisableTiming
+#endif
+
 #if defined(STRATA_GPU_METAL)
 // The Metal backend's decode window (metal/src/engine/window.cpp): this file's init/run/commit hand over to it.
 namespace strata::metal_engine {
@@ -1285,8 +1293,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         return false;
     }
     if (cudaEventCreateWithFlags(&commit_done_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaEventCreateWithFlags(&ev_fork_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaEventCreateWithFlags(&ev_join_, cudaEventDisableTiming) != cudaSuccess) {
+        cudaEventCreateWithFlags(&ev_fork_, STRATA_FORK_JOIN_EVENT_FLAGS) != cudaSuccess ||
+        cudaEventCreateWithFlags(&ev_join_, STRATA_FORK_JOIN_EVENT_FLAGS) != cudaSuccess) {
         err = "verify: event create failed";
         return false;
     }
@@ -1296,10 +1304,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         const char* v = std::getenv("STRATA_DF_BRANCH");
         df_branch_ = v != nullptr && std::atoi(v) != 0;
         if (df_branch_ && df_fork_ == nullptr) {
-            bool okb = cudaEventCreateWithFlags(&df_fork_, cudaEventDisableTiming) == cudaSuccess;
+            bool okb = cudaEventCreateWithFlags(&df_fork_, STRATA_FORK_JOIN_EVENT_FLAGS) == cudaSuccess;
             for (int i = 0; i < 2 && okb; ++i)
                 okb = cudaStreamCreateWithFlags(&df_side_[i], cudaStreamNonBlocking) == cudaSuccess &&
-                      cudaEventCreateWithFlags(&df_join_[i], cudaEventDisableTiming) == cudaSuccess;
+                      cudaEventCreateWithFlags(&df_join_[i], STRATA_FORK_JOIN_EVENT_FLAGS) == cudaSuccess;
             if (!okb) { cudaGetLastError(); df_branch_ = false; }
         }
     }
