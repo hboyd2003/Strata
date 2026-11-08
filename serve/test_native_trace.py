@@ -11,6 +11,27 @@ from serve import native_trace
 from serve.server import Service, StrataEngine
 
 
+class ActiveRequests:
+    """CPU-only model of the IDs active in native batch slots."""
+
+    def __init__(self):
+        self._active: dict[str, int] = {}
+
+    def begin(self, request_id: str, slot: int) -> None:
+        native_trace.field(request_id)
+        if request_id in self._active:
+            raise ValueError("duplicate active correctness trace request ID")
+        self._active[request_id] = slot
+
+    def complete(self, request_id: str, slot: int, finish: str, produced: int) -> str:
+        if self._active.get(request_id) != slot:
+            raise ValueError("missing or mismatched correctness trace request ID")
+        del self._active[request_id]
+        # Deliberately excludes prompt, generated text, and token IDs.
+        return (f"strata correctness: request={request_id} slot={slot} state=native_leg_complete "
+                f"finish={finish} produced={produced}")
+
+
 class NativeTraceProtocol(unittest.TestCase):
     def test_opt_in_field_is_opaque_and_validated(self):
         rid = "a" * 32
@@ -94,13 +115,25 @@ class NativeTraceProtocol(unittest.TestCase):
         self.assertEqual(record["id"], "e" * 12)
         self.assertEqual(svc.request_trace.id, "e" * 32)
 
+    def test_engine_env_alone_turns_the_ids_on(self):
+        # the switch only in the run config's "env" block: the engine traces, so the server must send the IDs
+        with mock.patch.dict(os.environ, {}, clear=True):
+            native_trace.follow_engine_env({native_trace.TRACE_ENV: "1"})
+            try:
+                self.assertTrue(native_trace.enabled())
+                self.assertEqual(native_trace.command("GEN", 0, " prefill=1", "a" * 32),
+                                 f"GEN 0 prefill=1 trace_id={'a' * 32}")
+            finally:
+                native_trace.follow_engine_env({})
+            self.assertFalse(native_trace.enabled())
+
     def test_legacy_mode_adds_no_field(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(native_trace.enabled())
             self.assertEqual(native_trace.command("GEN", 3, " top_k=4", "a" * 32), "GEN 3 top_k=4")
 
     def test_concurrent_distinct_ids_complete_without_prompt_data(self):
-        ledger = native_trace.ActiveRequests()
+        ledger = ActiveRequests()
         left, right = "1" * 32, "2" * 32
         ledger.begin(left, 0)
         ledger.begin(right, 1)
@@ -115,7 +148,7 @@ class NativeTraceProtocol(unittest.TestCase):
         self.assertIn(left, ledger.complete(left, 0, "length", 8))
 
     def test_duplicate_active_and_missing_completion_are_rejected(self):
-        ledger = native_trace.ActiveRequests()
+        ledger = ActiveRequests()
         rid = "f" * 32
         with self.assertRaises(ValueError):
             ledger.complete(rid, 0, "stop", 1)
