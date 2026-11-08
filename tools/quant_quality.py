@@ -215,6 +215,9 @@ def cmd_prompt(a) -> int:
     if mem_available_gb() < a.min_free_gb:
         raise SystemExit(f"only {mem_available_gb():.0f} GB available (< {a.min_free_gb}): not starting an engine")
     args = engine_args(cfg, a.gpu_experts, max(PROMPT_LENS))
+    k = args.index("--kv")
+    args[k + 1] = a.kv                     # FIXED says fp16; a KV-format question (e.g. the int8-only
+                                           # attention switches) passes --kv int8 and keeps every other control
     k = args.index("--short-read")
     del args[k:k + 2]                      # the default (64): these prompts take the batched prompt path
     k = args.index("--prefill")
@@ -380,6 +383,10 @@ def main() -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--ids", default=str(SET_DIR / "set.ids.json"))
     p.add_argument("--env", action="append")
+    p.add_argument("--kv", default="fp16",
+                   help="KV format the yardstick runs (default fp16, the value every earlier gate used). The gfx906 "
+                        "attention switches (STRATA_GFX906_ATTN_QUERY_SWIZZLE / _REDUCE12) only engage on int8 KV, so "
+                        "an exactness claim about them needs --kv int8")
     p.add_argument("--gpu-experts", action="store_true")
     p.add_argument("--min-free-gb", type=float, default=16)
     p.add_argument("--wrap")
