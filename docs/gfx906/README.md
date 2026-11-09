@@ -78,6 +78,7 @@ default that is on in this build:
 | `PROMPT_ATTN_GFX906=1` | `perf/gfx906-prompt-attn` | rounding only |
 | `ROCBLAS_TUNING=/tuning` (the image default, tuned at server start) | `perf/gfx906-pf-rocblas-h16`, `perf/gfx906-rocblas-autotune` | rounding only |
 | `HC_MIX_H16=1` | `perf/gfx906-pf-rocblas-h16` | exact |
+| `KV_GROW=1` (the K/V maps only what the conversation needs; the expert cache keeps the rest) | `perf/gfx906-kv-grow` | rounding only |
 
 `DECODE_TIMING=1` is also set: it only logs per-window timings and does not change speed or output.
 
@@ -136,6 +137,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-pf-rocblas-h16`](branches/perf-gfx906-pf-rocblas-h16.md) | from logicalor and andrewprock, own rocBLAS 5.7 table | tuned rocBLAS prompt GEMMs + hc skip-widen, +3.2..+7.9% prefill |
 | [`perf/gfx906-adapter-correct`](branches/perf-gfx906-adapter-correct.md) | own | HIP semantics in the adapter: one-sided fences, device-scope fork/join events, native unsigned dot, half-wave votes; no measured speed change |
 | [`perf/gfx906-rocblas-autotune`](branches/perf-gfx906-rocblas-autotune.md) | own | tunes rocBLAS at server start instead of shipping a table, re-tunes when the setup changes |
+| [`perf/gfx906-kv-grow`](branches/perf-gfx906-kv-grow.md) | own | `--kv-grow` on gfx906: the virtual-memory path plus a TLB flush after each remap (amdgpu bug); +1,629 expert slots at short context |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
