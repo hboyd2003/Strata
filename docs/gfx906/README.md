@@ -43,10 +43,12 @@ Things about this card that shaped the work:
 ## What runs in production
 
 **Model:** Qwen3.8-Flash-Next at IQ3_S (experts IQ2_S / IQ3_XXS / IQ3_S gate/up, IQ4_NL down, Q2_0 down in 9 layers), int8 KV cache,
-up to 262,144 tokens of context, MTP speculative decoding.
+up to 524,288 tokens of context (the trained 262,144, then YaRN up to factor 2 only for conversations that need it,
+`serve/dynamic-yarn`), MTP speculative decoding.
 
 **Engine flags:** `--spec 4 --spec-min-p 0.6`, `--expert-cache auto`, `--pcie-frac 0`, `--prefill auto:32768`,
-`--adapt-every 1 --adapt-swaps 80 --adapt-decay 0.97`, `--conversation-cache-min-free-mib 1536`.
+`--adapt-every 1 --adapt-swaps 80 --adapt-decay 0.97`, `--conversation-cache-min-free-mib 1536`,
+`--max-context 524288 --rope-scaling dynamic`.
 
 **Server config:** `"auto_sessions": true` (conversations saved to disk on a switch), `"qwen_code_tail": true`,
 `"gpu_temp_sensor": "junction"`.
@@ -138,6 +140,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-adapter-correct`](branches/perf-gfx906-adapter-correct.md) | own | HIP semantics in the adapter: one-sided fences, device-scope fork/join events, native unsigned dot, half-wave votes; no measured speed change |
 | [`perf/gfx906-rocblas-autotune`](branches/perf-gfx906-rocblas-autotune.md) | own | tunes rocBLAS at server start instead of shipping a table, re-tunes when the setup changes |
 | [`perf/gfx906-kv-grow`](branches/perf-gfx906-kv-grow.md) | own | `--kv-grow` on gfx906: the virtual-memory path plus a TLB flush after each remap (amdgpu bug); +1,629 expert slots at short context |
+| [`serve/dynamic-yarn`](branches/serve-dynamic-yarn.md) | upstream PR #2961 (sergqwer), own fixes | `--rope-scaling dynamic`: YaRN only past the trained context, cached keys rotated on a factor change; pinned table copies make switching back ~10 ms |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
