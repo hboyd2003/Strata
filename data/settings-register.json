@@ -29343,6 +29343,42 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_PREFILL_CPU_TOKENS",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/prefill.cpp",
+     "line": 338,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-prefill-cpu-tokens.md:10",
+    "docs/gfx906/branches/perf-prefill-cpu-tokens.md:18"
+   ],
+   "first_commit": "150d7cdb47",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "150d7cdb47",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "prefill",
+   "note": "[gfx906 fork] lets the prefill CPU share take experts above 8 tokens (baptisterajaut); on in the gfx906 fork's MI50 production config (16, with STRATA_PREFILL_CPU_SHARE=auto). [branch perf/prefill-cpu-tokens]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_PREFILL_DUMP_R",
    "backends": [
     "cuda-hip",
