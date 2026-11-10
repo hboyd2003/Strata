@@ -21329,6 +21329,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_MMVQ_WAVE_ROWS",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2471,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "1",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/gfx906-mmvq-wave-rows.md:17"
+   ],
+   "first_commit": "3e8c43560f",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "3b450ffd74",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] 2 or 4 rows a wavefront in the wave64 MMVQ; bitwise; on in the gfx906 fork's MI50 production config (2). [branch gfx906/mmvq-wave-rows]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_MMVQ_WIDE",
    "backends": [
     "sycl"
