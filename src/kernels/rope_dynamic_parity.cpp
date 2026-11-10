@@ -31,6 +31,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -121,7 +122,44 @@ struct Stats {
 
 }  // namespace
 
-int main() {
+// --bench: where a table switch's time goes (host vectors, the threaded build, pageable vs pinned upload), at 512K and 1M
+static int bench() {
+    using clk = std::chrono::steady_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    for (int max_pos : {524288, 1048576}) {
+        const size_t n = (size_t) max_pos * 32;
+        float *dc = nullptr, *ds = nullptr;
+        ck(cudaMalloc(&dc, n * 4), "malloc"); ck(cudaMalloc(&ds, n * 4), "malloc");
+        for (int rep = 0; rep < 3; ++rep) {
+            const auto t0 = clk::now();
+            std::vector<float> hc(n), hs(n);
+            const auto t1 = clk::now();
+            k::build_rope_table_mt(64, scaling(1.5 + 0.125 * rep), max_pos, hc.data(), hs.data(), 16);
+            const auto t2 = clk::now();
+            ck(cudaMemcpy(dc, hc.data(), n * 4, cudaMemcpyHostToDevice), "h2d");
+            ck(cudaMemcpy(ds, hs.data(), n * 4, cudaMemcpyHostToDevice), "h2d");
+            const auto t3 = clk::now();
+            std::printf("max_pos %d rep %d: vectors %.1f ms, build(16 thr) %.1f ms, pageable upload %.1f ms\n", max_pos, rep,
+                        ms(t0, t1), ms(t1, t2), ms(t2, t3));
+        }
+        float *pc = nullptr, *ps = nullptr;
+        ck(cudaMallocHost((void**) &pc, n * 4), "pinned"); ck(cudaMallocHost((void**) &ps, n * 4), "pinned");
+        for (int threads : {1, 16, 32}) {
+            const auto t1 = clk::now();
+            k::build_rope_table_mt(64, scaling(1.875), max_pos, pc, ps, threads);
+            const auto t2 = clk::now();
+            ck(cudaMemcpy(dc, pc, n * 4, cudaMemcpyHostToDevice), "h2d");
+            ck(cudaMemcpy(ds, ps, n * 4, cudaMemcpyHostToDevice), "h2d");
+            const auto t3 = clk::now();
+            std::printf("max_pos %d pinned: build(%d thr) %.1f ms, pinned upload %.1f ms\n", max_pos, threads, ms(t1, t2), ms(t2, t3));
+        }
+        cudaFreeHost(pc); cudaFreeHost(ps); cudaFree(dc); cudaFree(ds);
+    }
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--bench") == 0) return bench();
     k::QsaShapes s = k::qsa_real_shapes();
     const int H = (int) s.n_head_kv, D = (int) s.head_dim, P = (int) s.page_size, G = D / k::KV_Q8_GROUP;
     const int64_t positions = 520000, lpages = positions / P;
