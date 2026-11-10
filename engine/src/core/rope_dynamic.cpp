@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <thread>
 #include <vector>
@@ -63,25 +64,84 @@ bool rope_rerotate_state(const QsaState& st, int64_t cells, bool index, const st
     return true;
 }
 
-bool rope_table_rebuild(const QsaState& owner, const strata::kernels::RopeScaling& to, std::string& error) {
+namespace {
+bool same_table(const strata::kernels::RopeScaling& a, const strata::kernels::RopeScaling& b) {
+    return a.type == b.type && a.freq_base == b.freq_base && a.factor == b.factor && a.freq_scale_in == b.freq_scale_in &&
+           a.orig_ctx == b.orig_ctx && a.ext_factor == b.ext_factor && a.attn_factor == b.attn_factor &&
+           a.beta_fast == b.beta_fast && a.beta_slow == b.beta_slow;
+}
+// Two pinned host copies of the table, each remembering the scaling it holds: a switch back to a factor still held
+// (a long conversation and a short one taking turns) is only an upload; otherwise the copy not holding the table on
+// the device is rebuilt.  Pinned once: no zeroed vectors and page faults per switch, and the upload runs at full speed.
+struct HostTable {
+    float* cos = nullptr;
+    float* sin = nullptr;
+    size_t n = 0;
+    bool valid = false;
+    strata::kernels::RopeScaling scaling;
+    uint64_t used = 0;
+};
+HostTable g_host[2];
+uint64_t g_clock = 0;
+}  // namespace
+
+bool rope_table_rebuild(const QsaState& owner, const strata::kernels::RopeScaling& to, std::string& error,
+                        RopeTableTiming* timing) {
     using namespace strata::kernels;
+    using clk = std::chrono::steady_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
     if (owner.cos_tab == nullptr || owner.sin_tab == nullptr || owner.max_cells <= 0) {
         error = "dynamic rope: no rope table";
         return false;
     }
+    const auto t0 = clk::now();
     const QsaShapes s = qsa_real_shapes();
     const size_t n = (size_t) owner.max_cells * (size_t) (s.n_rot / 2);
-    std::vector<float> hc(n), hs(n);
-    const int threads = (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
-    build_rope_table_mt((int) s.n_rot, to, (int) owner.max_cells, hc.data(), hs.data(), threads);
-    if (cudaDeviceSynchronize() != cudaSuccess ||
-        cudaMemcpy(owner.cos_tab, hc.data(), n * 4, cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(owner.sin_tab, hs.data(), n * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+    HostTable* h = nullptr;
+    for (HostTable& c : g_host)
+        if (c.valid && c.n == n && same_table(c.scaling, to)) h = &c;
+    const bool hit = h != nullptr;
+    if (!hit) {   // the least recently used copy
+        h = g_host[0].used <= g_host[1].used ? &g_host[0] : &g_host[1];
+        if (h->n != n) {
+            if (h->cos) cudaFreeHost(h->cos);
+            if (h->sin) cudaFreeHost(h->sin);
+            h->cos = h->sin = nullptr;
+            h->n = 0;
+            h->valid = false;
+            if (cudaMallocHost((void**) &h->cos, n * 4) != cudaSuccess ||
+                cudaMallocHost((void**) &h->sin, n * 4) != cudaSuccess) {
+                (void) cudaGetLastError();
+                error = "dynamic rope: no pinned host memory for the table";
+                return false;
+            }
+            h->n = n;
+        }
+        h->valid = false;
+    }
+    const auto t1 = clk::now();
+    if (!hit) {
+        const int threads = (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+        build_rope_table_mt((int) s.n_rot, to, (int) owner.max_cells, h->cos, h->sin, threads);
+        h->scaling = to;
+        h->valid = true;
+    }
+    h->used = ++g_clock;
+    const auto t2 = clk::now();
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        error = "dynamic rope: the device failed before the table upload";
+        return false;
+    }
+    const auto t3 = clk::now();
+    if (cudaMemcpy(owner.cos_tab, h->cos, n * 4, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(owner.sin_tab, h->sin, n * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
         error = "dynamic rope: the table upload failed";
         return false;
     }
+    const auto t4 = clk::now();
     rope_table_set(owner.cos_tab, owner.sin_tab, (int) owner.max_cells, to);
     rope_scaling_set(to);
+    if (timing) *timing = {hit, ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4)};
     return true;
 }
 
