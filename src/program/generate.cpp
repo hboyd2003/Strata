@@ -12333,18 +12333,24 @@ int main(int argc, char** argv) {
                 rope_dyn.rotated_cells += cells;
             }
             const auto t1 = Clock::now();
-            if (rope_dyn.table != to) {
-                if (!strata::core::rope_table_rebuild(ss.qsa_states[ss.qsa_primary()], rope_dyn.config(to), e)) {
+            strata::core::RopeTableTiming tt;
+            const bool rebuilt = rope_dyn.table != to;
+            if (rebuilt) {
+                if (!strata::core::rope_table_rebuild(ss.qsa_states[ss.qsa_primary()], rope_dyn.config(to), e, &tt)) {
                     err = e;
                     return false;
                 }
                 rope_dyn.table = to;
             }
             rope_dyn.live = to;
+            char tnote[160] = "";
+            if (rebuilt)
+                std::snprintf(tnote, sizeof tnote, " (%s: alloc %.1f, build %.1f, sync %.1f, upload %.1f)",
+                              tt.cached ? "held" : "built", tt.alloc_ms, tt.build_ms, tt.sync_ms, tt.upload_ms);
             std::fprintf(stderr, "strata serve: rope dynamic: factor %.4g -> %.4g (%s): %lld cells re-rotated in %.1f ms, "
-                                 "table %.1f ms\n", from, to, why, (long long) (from != to ? cells : 0),
+                                 "table %.1f ms%s\n", from, to, why, (long long) (from != to ? cells : 0),
                          std::chrono::duration<double, std::milli>(t1 - t0).count(),
-                         std::chrono::duration<double, std::milli>(Clock::now() - t1).count());
+                         std::chrono::duration<double, std::milli>(Clock::now() - t1).count(), tnote);
             return true;
         };
         // Disk sessions: what a session file is bound to.  The model fingerprint samples every model input this

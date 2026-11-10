@@ -40,8 +40,14 @@ struct RopeDynamic {
 bool rope_rerotate_state(const QsaState& st, int64_t cells, bool index, const strata::kernels::RopeScaling& from,
                          const strata::kernels::RopeScaling& to, void* stream, std::string& error);
 
-/// Rebuilds the table `owner` holds for `to`, in place, and makes `to` the process's scaling (rope_scaling_set and
+/// Rebuilds the table `owner` holds for `to`, in place (from a pinned host copy when one still holds it), and makes `to` the process's scaling (rope_scaling_set and
 /// the table registry).  Synchronizes the device first.
-bool rope_table_rebuild(const QsaState& owner, const strata::kernels::RopeScaling& to, std::string& error);
+/// Where a switch's table time went: `cached` = the table was still in a pinned host copy (upload only).
+struct RopeTableTiming {
+    bool cached = false;
+    double alloc_ms = 0, build_ms = 0, sync_ms = 0, upload_ms = 0;
+};
+bool rope_table_rebuild(const QsaState& owner, const strata::kernels::RopeScaling& to, std::string& error,
+                        RopeTableTiming* timing = nullptr);
 
 }  // namespace strata::core
