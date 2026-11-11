@@ -11391,6 +11391,111 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_GFX906_ROUTER_T1_ROWS",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_bf16.cu",
+     "line": 738,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-topk-router.md:16"
+   ],
+   "first_commit": "1de82be8c3",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "f54199e39f",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] 1-token 2560x512 router kernel (0FL01); bitwise. Still set in production but inert when STRATA_GFX906_ROUTER_GEMV is on (it takes T=1-4 first). [src/kernels/cuda/native_bf16.cu, branch perf/topk-router]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_GFX906_ROUTER_T2_EXACT",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_bf16.cu",
+     "line": 654,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-topk-router.md:16"
+   ],
+   "first_commit": "1de82be8c3",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "f54199e39f",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] exact 2-token router kernel (0FL01); bitwise. Still set in production but inert when STRATA_GFX906_ROUTER_GEMV is on. [src/kernels/cuda/native_bf16.cu, branch perf/topk-router]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_GFX906_TOPK_SPLIT",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/qsa_select.cu",
+     "line": 3169,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-topk-router.md:15"
+   ],
+   "first_commit": "1d81d691e3",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "1d81d691e3",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] two-stage split for the decode top-k (upstream #3987); exact; on in the gfx906 fork's MI50 production config. [branch perf/topk-router]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_GGUF_PLAN_READ",
    "backends": [
     "sycl"
