@@ -11426,6 +11426,84 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_GFX906_ROUTER_FUSED",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_bf16.cu",
+     "line": 500,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-router.md:11"
+   ],
+   "first_commit": "45008af256",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "45008af256",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] router GEMV + top-10 + doorbell in one launch; bitwise, A/B ~neutral, left off. [branch perf/gfx906-router]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_GFX906_ROUTER_GEMV",
+   "backends": [
+    "cuda-hip",
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/router_fused_parity.cpp",
+     "line": 56,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_bf16.cu",
+     "line": 468,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "string",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-topk-router.md:24",
+    "docs/gfx906/branches/perf-gfx906-router.md:10"
+   ],
+   "first_commit": "d8adee6636",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "2c37ba8104",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] 2560x512 router GEMV rows a block (1|2|4, auto = best per T on the MI50); bitwise; on in the gfx906 fork's MI50 production config (auto). [branch perf/gfx906-router]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_GFX906_ROUTER_T1_ROWS",
    "backends": [
     "hip"
@@ -11492,6 +11570,54 @@
    "status": "opt-in",
    "owner": "kernels/cuda",
    "note": "[gfx906 fork] exact 2-token router kernel (0FL01); bitwise. Still set in production but inert when STRATA_GFX906_ROUTER_GEMV is on. [src/kernels/cuda/native_bf16.cu, branch perf/topk-router]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_GFX906_ROUTER_W64",
+   "backends": [
+    "cuda-hip",
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/router_w64_parity.cpp",
+     "line": 26,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/router_fused_parity.cpp",
+     "line": 56,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_router.cu",
+     "line": 311,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-router.md:9"
+   ],
+   "first_commit": "324ecf4b22",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "2c37ba8104",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] the 512/10 router top-10 as one 64-lane wave per token; bitwise; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-router]",
    "retire_after": "",
    "retired_in": ""
   },
