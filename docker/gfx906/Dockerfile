@@ -82,7 +82,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # search; only that library is linked in, not the whole LLVM directory
 RUN ln -sf /opt/rocm/llvm/lib/libomp.so /usr/local/lib/libomp.so && ldconfig
 WORKDIR /opt/strata
-COPY --from=build /src/setup.py /src/strata.py /src/chat.py /src/LICENSE /src/README.md /opt/strata/
+COPY --from=build /src/setup.py /src/strata.py /src/LICENSE /src/README.md /opt/strata/
 COPY --from=build /src/requirements.txt /src/requirements-build.txt /src/requirements-monitor.txt \
      /src/requirements-nvfp4-local.txt /opt/strata/
 COPY --from=build /src/serve /opt/strata/serve
