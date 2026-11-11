@@ -263,3 +263,41 @@ class ConversationCacheCard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoSessionsCard(unittest.TestCase):
+    """/metrics' "auto_sessions": the limits, the conversation the engine holds, the auto-*.bin files on disk (not
+    the ones saved by hand) and what the switches did."""
+
+    def test_metrics(self):
+        import tempfile
+        tok = ByteTokenizer()
+        engine = MockEngine(tok, "Thought.</think>\nHello.", max_context=4096)
+        svc = Service(engine, tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        self.assertFalse(svc.auto_sessions_view()["enabled"])
+        self.assertIsNone(svc.auto_sessions_view()["files"])
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "auto-aaaa.bin").write_bytes(b"x" * 100)
+            (Path(d) / "by-hand.bin").write_bytes(b"x" * 1000)
+            svc.slot_save_path, svc.auto_sessions = d, True
+            svc.auto_conv = {"key": "aaaa", "tokens": 20000}
+            svc._auto_session_note("restored", {"tokens": 20000, "ms": 140.0})
+            httpd = serve(svc, port=0)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/metrics", timeout=10) as r:
+                    a = json.loads(r.read())["auto_sessions"]
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+        self.assertEqual((a["enabled"], a["files"], a["files_bytes"], a["keep"], a["min_tokens"]),
+                         (True, 1, 100, 12, 16000))
+        self.assertEqual((a["held_tokens"], a["held_on_disk"]), (20000, True))
+        self.assertEqual((a["restores"], a["saves"], a["last_event"], a["last_tokens"]), (1, 0, "restored", 20000))
+
+    def test_the_card_is_on_the_page(self):
+        web = Path(__file__).parent / "web"
+        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
+        for el in ("as-card", "as-files-text", "as-disk-text", "as-facts", "as-note"):
+            self.assertIn(f'id="{el}"', html)
+        self.assertIn("renderAutoSessions(m.auto_sessions)", js)
+        self.assertLess(html.index('id="cc-card"'), html.index('id="as-card"'))   # under the Conversation cache
