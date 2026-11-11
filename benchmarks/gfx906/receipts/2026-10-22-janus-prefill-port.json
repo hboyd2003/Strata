@@ -1,0 +1,38 @@
+{
+  "schema": "gfx906-port-measurement-v1",
+  "date_utc": "2026-10-22",
+  "classification": "single-run coding-agent workload comparison on one MI50; not a parity test of the whole engine",
+  "source": {
+    "repository": "cassettesgoboom/strata-gfx906",
+    "branch": "gfx906/prefill-repack (off sync/upstream-v0.2.2)",
+    "ported_from": "janus-reith/strata-gfx906 b0f440d80e6fa30c374ed60d025ae2f4b4571210 (upstream v0.1.45 + 16 commits)",
+    "image": "strata-gfx906:0.2.2-repack-native-local (docker/gfx906/Dockerfile, STRATA_PORTABLE=OFF, built on the measuring host)",
+    "base_image": "docker.io/mixa3607/rocm-gfx906:10.1-complete@sha256:b1d72163863a56b6b2bf498d159c1dc17627f8751aed6c8b8de2ebe9882972b4",
+    "engine_version_reported": "0.1.47"
+  },
+  "environment": {
+    "hardware_class": "one AMD Instinct MI50 32 GB (gfx906), Ryzen 9 7945HX (Zen 4, AVX-512), 59 GB RAM",
+    "model_assets": "external Swift Qwen3.8 Flash-Next GSQ-RCO IQ3_S assets; not distributed",
+    "config": "one slot, --max-context 262144, int8 KV, --spec 3 with the MTP draft layer, --prefill auto:32768, adaptive tier tuned, gfx906 attention switches, CPU vision; expert cache 11636 slots in every arm"
+  },
+  "workload": "tools/agent_turns_bench.py sessions through the tuning harness's agent_bench.py: one agent (8 turns), then two simultaneous agents (8 turns); temperature 1, top-p 0.95, top-k 20, fixed seed, reasoning high, 256 tokens per turn. The grep tool results were empty in all arms (the source checkout used had no git metadata), identically for every arm.",
+  "parity_checks": {
+    "native_grouped_parity": "0 failures (IQ4_NL gate/up included)",
+    "rp_expert_bench": "0 failures; repacked IQ4_NL expert products bitwise equal to MMQ, 23-81% faster per product",
+    "dense_mmq_bench_T4096": "int8 dense products 46-74% faster than dequant + hipBLAS FP16; IQ4_XS repack bitwise equal to MMQ; Q6_K / Q5_K repack differ from MMQ in summation order with the same error against an FP64 reference (5.3e-3 / 1.1e-2); the FP16 path's error is 2.9e-4",
+    "engine_STRATA_PF_RP_CHECK": "2000 repacked products compared against MMQ on a 15,000-token prompt of the real model: 0 differ"
+  },
+  "results": [
+    {"arm": "current image, as-is", "big_prompt_prefill_tok_s": 504, "one_agent_s": 185.7, "two_agents_s": 159.0, "decode_median_tok_s": 55.2, "draft_acceptance": 0.754},
+    {"arm": "current image + STRATA_HIP_PROMPT_F16, STRATA_DENSE_MMQ, STRATA_MMQ_KQ", "big_prompt_prefill_tok_s": 624, "one_agent_s": 156.8, "two_agents_s": 133.1, "decode_median_tok_s": 57.8, "draft_acceptance": 0.779},
+    {"arm": "same, rerun as drift control", "big_prompt_prefill_tok_s": 621, "one_agent_s": 156.8, "two_agents_s": 135.6, "decode_median_tok_s": 57.8, "draft_acceptance": 0.779},
+    {"arm": "janus-reith image (v0.1.45)", "big_prompt_prefill_tok_s": 679, "one_agent_s": 145.7, "two_agents_s": 125.5, "decode_median_tok_s": 57.7, "draft_acceptance": 0.739},
+    {"arm": "port, native build", "big_prompt_prefill_tok_s": 677, "one_agent_s": 141.8, "two_agents_s": 128.0, "decode_median_tok_s": 59.1, "draft_acceptance": 0.781}
+  ],
+  "limitations": [
+    "One run per arm; the drift control reproduced its earlier run within 1% on prefill and exactly on the one-agent time.",
+    "The port's decode (59.1 against 57.8 tok/s median, means 58.4 against 58.6) does not show a measurable gain from the AVX-512 build on this workload.",
+    "The Q6_K / Q5_K dense repack and the int8 dense path are not bit-identical to the FP16 prompt path; draft acceptance did not drop here.",
+    "No sustained-load, long-context (above about 50K tokens) or batch-slot measurement of the port."
+  ]
+}
