@@ -13351,6 +13351,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_HC_MIX_H16",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/prefill.cpp",
+     "line": 662,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-pf-rocblas-h16.md:13"
+   ],
+   "first_commit": "ad5bf326f1",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "ad5bf326f1",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "prefill",
+   "note": "[gfx906 fork] prompt path: hc up rows stay packed FP16 (andrewprock); exact; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-pf-rocblas-h16]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_HC_PERSIST",
    "backends": [
     "cuda-hip"
