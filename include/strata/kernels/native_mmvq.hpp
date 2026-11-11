@@ -31,6 +31,9 @@ std::size_t native_q8_1_bytes(int n_in, int ncols = 1);
 // graph capture; captured graphs keep the kernels they captured.
 void native_mmvq_set_multi_exact(bool exact);
 bool native_mmvq_multi_exact();
+// gfx906 (tests, benchmarks): rows a wavefront of the wave64 layout, 1, 2 or 4 (0: STRATA_MMVQ_WAVE_ROWS, default 1).
+// Every choice gives the same bits. Other builds: no effect. Set before graph capture.
+void native_mmvq_set_wave_rows(int rows);
 // B6 (lab, opt-in STRATA_B6_MMVQ_ROWS=1): the exact multi-column layout with the activation blocks of every column
 // loaded once per weight block and reused across the block's rows (bitwise the same sums as the default exact
 // layout). 0 = off (default), 1 = 2 rows per block, 2 / 4 / 8 = that many rows. Q4_K, Q5_K, Q6_K and IQ4_XS only.
