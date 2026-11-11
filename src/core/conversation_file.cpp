@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1018,7 +1019,10 @@ void put_checkpoint(Out& o, const ConversationCheckpoint& c) {
 // everything before the K/V: the same bytes in v1 and in a v2 head
 void put_meta(Out& o, const SavedConversation& s) {
     for (int64_t g : s.geometry) o.i64(g);
-    o.i64(s.layer_lo); o.i64(s.layer_hi); o.u64(s.cvec ? 1 : 0);
+    o.i64(s.layer_lo); o.i64(s.layer_hi);
+    // bit 0: cvec; bits 1..: the dynamic rope factor x 2^20 (0 = 1, the word of a file without one)
+    const uint64_t rope_code = s.rope == 1.0 ? 0 : (uint64_t) std::llround(s.rope * 1048576.0);
+    o.u64((s.cvec ? 1 : 0) | (rope_code << 1));
     put_checkpoint(o, s.live);
     o.u64(s.checkpoints.size());
     for (const auto& c : s.checkpoints) put_checkpoint(o, c);
@@ -1166,8 +1170,11 @@ bool get_meta_prefix(In& in, SavedConversation& s) {
     if (in.limits.layer_range &&
         (in.limits.layer_range->first != s.layer_lo || in.limits.layer_range->second != s.layer_hi))
         return in.fail("saved with another layer range than this runtime's");
-    if (cvec > 1) return in.fail("invalid cvec flag");
-    s.cvec = cvec == 1;
+    const uint64_t rope_code = cvec >> 1;
+    if (rope_code != 0 && (rope_code < 1048576 || rope_code > (1ull << 40)))
+        return in.fail("invalid cvec flag");
+    s.cvec = (cvec & 1) == 1;
+    s.rope = rope_code == 0 ? 1.0 : (double) rope_code / 1048576.0;
     if (in.discard) {
         ConversationCheckpoint scratch;
         if (!get_checkpoint(in, scratch)) return false;
