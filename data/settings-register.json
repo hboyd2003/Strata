@@ -12611,6 +12611,48 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_GR_RO",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/fused_gr.cu",
+     "line": 3164,
+     "backend": "hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/fused_gr.cu",
+     "line": 3217,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "1",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-hc-ro.md:9",
+    "docs/gfx906/branches/perf-gfx906-hc-ro.md:10"
+   ],
+   "first_commit": "fb0f0ac6e4",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "67e2000ccc",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] =1 rounding-only hyper-connection read (split-K down, norm folded in); =2 the 4x8 shape; +3.7-4.2% decode; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-hc-ro]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_GR_SPLIT",
    "backends": [
     "hip"
