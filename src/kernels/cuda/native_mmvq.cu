@@ -3079,6 +3079,10 @@ bool g906_try(const void* w, const void* x, float* y, int n_in, int n_out, int n
     else if constexpr (std::is_same_v<F, Q5KTraits>) bit = 4;
     else if constexpr (std::is_same_v<F, IQ4XSTraits>) bit = 8;
     if (bit == 0 || !(g906_dense_mask() & bit) || n_in > g906_max_in() || n_in % 256 != 0 || ncols < 1 || ncols > 8) return false;
+    // Q6_K / Q4_K: not the 640-row shared-expert gate/up (20 blocks; slower than ours at T >= 2-3 in mmvq_bench,
+    // run 20261111-steddyman-port); IQ4_XS keeps them (faster there too).  STRATA_G906_MIN_OUT, default 1024 rows.
+    static const int min_out = [] { const char* e = std::getenv("STRATA_G906_MIN_OUT"); return e ? std::atoi(e) : 1024; }();
+    if ((bit == 1 || bit == 2) && n_out < min_out) return false;
     switch (ncols) {
         case 1: g906_launch_n<1, F>(w, x, y, n_in, n_out, s); break;
         case 2: g906_launch_n<2, F>(w, x, y, n_in, n_out, s); break;
