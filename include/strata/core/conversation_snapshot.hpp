@@ -67,8 +67,10 @@ bool conversation_kv_verify(const ConversationKv& image, const QsaState& state, 
                             int64_t upto, bool include_index, uint64_t& fingerprint, std::string& error);
 // Disk save without a host copy: the layer's authoritative K/V as a streamed source (same bytes and metadata as
 // conversation_kv_save).  Caller synchronizes the device first and keeps the state untouched while it is read.
+// `unchanged` (a delta save): no token below it was rewritten since the save or restore the base log describes, so
+// `source.stable` gets the bytes conversation_kv_save would keep for that prefix (whole pages, whole indexer rows).
 bool conversation_kv_source(SessionKvSource& source, const QsaState& state, const ModelGeometry& g,
-                            int64_t upto, bool include_index, std::string& error);
+                            int64_t upto, bool include_index, std::string& error, int64_t unchanged = 0);
 // The bytes of each K/V part (k, v, k_scale, v_scale, pooled) a snapshot of `upto` tokens holds: no state read.
 bool conversation_kv_part_sizes(const QsaState& state, const ModelGeometry& g, int64_t upto, bool include_index,
                                 std::array<uint64_t, 5>& sizes, std::string& error);
@@ -158,10 +160,13 @@ bool conversation_snapshot_save(SavedConversation& image, const ConversationView
                                 ConversationKvReuse reuse = {}, size_t* reused_bytes = nullptr);
 // Disk save without capturing the K/V on the host: `meta` gets everything but the K/V (running state copied,
 // checkpoints as given by the view), `sources` one streamed source per QSA layer then the draft.  Caller has
-// synchronized and must not run the session until the file is written.
+// synchronized and must not run the session until the file is written.  `unchanged` (a delta save): the tokens
+// unchanged since the base log's save or restore; each source's `stable` bytes follow from it (the draft one token
+// less: its last cell may be filled after the cap, as conversation_snapshot_save refreshes it).
 bool conversation_snapshot_sources(SavedConversation& meta, std::vector<SessionKvSource>& sources,
                                    const ConversationView& view, const SessionState& session,
-                                   const ModelGeometry& g, const QsaState& draft, std::string& error);
+                                   const ModelGeometry& g, const QsaState& draft, std::string& error,
+                                   int64_t unchanged = 0);
 bool conversation_snapshot_validate(const SavedConversation& image, const SessionState& session,
                                     const ModelGeometry& g, const QsaState& draft, std::string& error);
 /// #2409: true when a restore (or a copy) on CUDA device `device` from the calling thread creates no copy stream: this
