@@ -36140,6 +36140,54 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_SESSION_DELTA",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 12195,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [
+    "serve/images.py",
+    "serve/server.py",
+    "serve/session_files.py",
+    "serve/split.py"
+   ],
+   "launch_sets": [
+    {
+     "file": "serve/session_files.py",
+     "line": 1,
+     "value": "1"
+    }
+   ],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/serve-session-delta.md:16",
+    "docs/gfx906/branches/serve-session-delta.md:33",
+    "docs/gfx906/branches/serve-dynamic-yarn.md:20"
+   ],
+   "first_commit": "2026fc1361",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "4a482b4848",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "program",
+   "note": "[gfx906 fork] delta session files: append only a turn's new K/V (~250 MiB a save vs 1.3 GB); on in the gfx906 fork's MI50 production config; the server passes it to the engine. [branch serve/session-delta]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_SESSION_GOLDEN_PRINT",
    "backends": [
     "cuda-hip"
