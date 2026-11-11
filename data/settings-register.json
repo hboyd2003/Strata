@@ -3593,6 +3593,78 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_CORRECTNESS_TRACE",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 14625,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [
+    "serve/native_trace.py",
+    "serve/replicas.py",
+    "serve/split.py"
+   ],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/fix-rebased-review.md:34"
+   ],
+   "first_commit": "ba5caa055d",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "2bc8be441f",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "program",
+   "note": "[gfx906 fork, from cassettesgoboom] opt-in native correctness traces correlated per request; diagnostic. [branch rebased/cassettesgoboom]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_CORRECTNESS_WINDOW_TRACE",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 14627,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "2bc8be441f",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "2bc8be441f",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "program",
+   "note": "[gfx906 fork, from cassettesgoboom] serial-window token records for the correctness trace; diagnostic. [branch rebased/cassettesgoboom]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_CPU_IQ_ALL_EXACT1",
    "backends": [
     "cpu"
@@ -4453,6 +4525,72 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_DENSE_MMQ_PROFILE",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/gemm.cu",
+     "line": 1349,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "c4de3eb35e",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "c4de3eb35e",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "prefill",
+   "note": "[gfx906 fork, from janus-reith] times each dense MMQ call (events + a sync), summed per type and shape; debug. [branch rebased/janus-reith]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_DENSE_MMQ_SKIP",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/prefill.cpp",
+     "line": 3101,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "35f0f960f6",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "35f0f960f6",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "prefill",
+   "note": "[gfx906 fork, from janus-reith] under STRATA_DENSE_MMQ=1: projections kept on FP16 (default attn_k., attn_v.: MTP acceptance); empty = none. [src/prefill/prefill.cpp, branch rebased/janus-reith]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_DENSE_PFGEMM",
    "backends": [
     "hip"
@@ -4482,6 +4620,44 @@
    "status": "research",
    "owner": "dsv41",
    "note": "[auto] not documented for users; code default not readable from the call",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_DENSE_RP",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/rp_moe.cu",
+     "line": 166,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 3441
+    }
+   ],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "a783385f77",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "1a3303f314",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "prefill",
+   "note": "[gfx906 fork, from janus-reith] =1 dense IQ4_NL projections through the repacked GEMM on gfx906. Not used in production. [branch rebased/janus-reith]",
    "retire_after": "",
    "retired_in": ""
   },
@@ -27585,6 +27761,143 @@
    "status": "research",
    "owner": "prefill",
    "note": "[auto] not documented for users; code default not readable from the call",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_PF_RP",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/rp_moe.cu",
+     "line": 160,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 3438
+    }
+   ],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "2fbb3b3518",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "1a3303f314",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "prefill",
+   "note": "[gfx906 fork, from janus-reith] =1 IQ4_NL (and IQ3) prompt expert products through mx-llama.cpp's repacked GEMM (bitwise vs MMQ); =2 sizes the slots only. Not used in production. [branch rebased/janus-reith]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_PF_RP_CHECK",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/prefill.cpp",
+     "line": 5837,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "2fbb3b3518",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "2fbb3b3518",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "prefill",
+   "note": "[gfx906 fork, from janus-reith] under STRATA_PF_RP: runs MMQ beside the repacked GEMM and compares; debug. [branch rebased/janus-reith]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_PF_RP_IQ3",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/rp_moe.cu",
+     "line": 128,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "1",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "8c2aaceb83",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "8c2aaceb83",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "prefill",
+   "note": "[gfx906 fork, from janus-reith] under STRATA_PF_RP=1: which gate/up codebooks take the repacked GEMM (unset: IQ3_XXS + IQ3_S, 0: none, 2: + IQ2_S). [src/prefill/rp_moe.cu, branch rebased/janus-reith]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_PF_RP_W",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/prefill/rp_moe.cu",
+     "line": 150,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "2fbb3b3518",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "2fbb3b3518",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "prefill",
+   "note": "[gfx906 fork, from janus-reith] forces the repacked GEMM tile width (32 | 64); default mx's rule. [src/prefill/rp_moe.cu, branch rebased/janus-reith]",
    "retire_after": "",
    "retired_in": ""
   },
