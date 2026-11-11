@@ -1,0 +1,115 @@
+name: gfx906 CPU tooling
+
+on:
+  push:
+    paths:
+      - 'README.md'
+      - 'tools/gfx906.py'
+      - 'tests/gfx906/**'
+      - 'tests/core/batch_transaction_test.cpp'
+      - 'include/strata/core/batch_transaction.hpp'
+      - 'tests/core/on_device_scope_test.cpp'
+      - 'tests/fake_cuda/include/cuda_runtime.h'
+      - 'include/strata/core/on_device.hpp'
+      - 'include/strata/core/mtp.hpp'
+      - 'src/core/mtp.cpp'
+      - 'tests/core/verify_release_control_test.cpp'
+      - 'include/strata/core/verify_release.hpp'
+      - 'include/strata/core/verify.hpp'
+      - 'src/core/verify.cpp'
+      - 'src/program/generate.cpp'
+      - 'include/strata/program/native_trace_id.hpp'
+      - 'include/strata/program/native_window_trace.hpp'
+      - 'tests/program/native_trace_id_test.cpp'
+      - 'tests/program/native_window_trace_test.cpp'
+      - 'serve/server.py'
+      - 'serve/replicas.py'
+      - 'serve/native_trace.py'
+      - 'serve/test_native_trace.py'
+      - 'serve/test_replicas.py'
+      - 'CMakeLists.txt'
+      - 'benchmarks/gfx906/**'
+      - 'docs/gfx906/**'
+      - '.github/workflows/gfx906-cpu.yml'
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'tools/gfx906.py'
+      - 'tests/gfx906/**'
+      - 'tests/core/batch_transaction_test.cpp'
+      - 'include/strata/core/batch_transaction.hpp'
+      - 'tests/core/on_device_scope_test.cpp'
+      - 'tests/fake_cuda/include/cuda_runtime.h'
+      - 'include/strata/core/on_device.hpp'
+      - 'include/strata/core/mtp.hpp'
+      - 'src/core/mtp.cpp'
+      - 'tests/core/verify_release_control_test.cpp'
+      - 'include/strata/core/verify_release.hpp'
+      - 'include/strata/core/verify.hpp'
+      - 'src/core/verify.cpp'
+      - 'src/program/generate.cpp'
+      - 'include/strata/program/native_trace_id.hpp'
+      - 'include/strata/program/native_window_trace.hpp'
+      - 'tests/program/native_trace_id_test.cpp'
+      - 'tests/program/native_window_trace_test.cpp'
+      - 'serve/server.py'
+      - 'serve/replicas.py'
+      - 'serve/native_trace.py'
+      - 'serve/test_native_trace.py'
+      - 'serve/test_replicas.py'
+      - 'CMakeLists.txt'
+      - 'benchmarks/gfx906/**'
+      - 'docs/gfx906/**'
+      - '.github/workflows/gfx906-cpu.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install pinned JSON Schema test dependency
+        run: python -m pip install -r tests/gfx906/requirements-schema.txt
+      - name: CPU-only tests
+        run: python tools/gfx906.py test-cpu
+      - name: Install pinned service test dependencies
+        run: python -m pip install 'jinja2==3.1.6' 'markupsafe==3.0.3'
+      - name: Native request correlation contract
+        run: python -m unittest serve.test_native_trace serve.test_replicas
+      - name: Native trace ID parser contract
+        run: |
+          c++ -std=c++20 -Wall -Wextra -Werror -Iinclude tests/program/native_trace_id_test.cpp -o "$RUNNER_TEMP/native_trace_id_test"
+          "$RUNNER_TEMP/native_trace_id_test"
+      - name: Native serial window trace contract
+        run: |
+          c++ -std=c++20 -Wall -Wextra -Werror -Iinclude tests/program/native_window_trace_test.cpp -o "$RUNNER_TEMP/native_window_trace_test"
+          "$RUNNER_TEMP/native_window_trace_test"
+      - name: Batch transaction lifecycle contract
+        run: |
+          c++ -std=c++20 -Wall -Wextra -Werror -Iinclude tests/core/batch_transaction_test.cpp -o "$RUNNER_TEMP/batch_transaction_test"
+          "$RUNNER_TEMP/batch_transaction_test"
+      - name: Device selection scope contract
+        run: |
+          c++ -std=c++20 -Wall -Wextra -Werror -Itests/fake_cuda/include -Iinclude tests/core/on_device_scope_test.cpp -o "$RUNNER_TEMP/on_device_scope_test"
+          "$RUNNER_TEMP/on_device_scope_test"
+      - name: Verifier release-control lifecycle contract
+        run: |
+          c++ -std=c++20 -DNDEBUG -Wall -Wextra -Werror -pthread -Iinclude tests/core/verify_release_control_test.cpp -o "$RUNNER_TEMP/verify_release_control_test"
+          "$RUNNER_TEMP/verify_release_control_test"
+      - name: Validate synthetic fixture is rejected as run evidence
+        run: |
+          set +e
+          output="$(python tools/gfx906.py bench-validate tests/gfx906/fixtures/synthetic-not-run.json 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -eq 1
+          test "$output" = $'INVALID: tests/gfx906/fixtures/synthetic-not-run.json\n  - synthetic fixture cannot be reported as run evidence'
