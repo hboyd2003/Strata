@@ -31569,6 +31569,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_PROMPT_ATTN_GFX906",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/qsa_prompt_attn_gfx906.cu",
+     "line": 237,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-prompt-attn.md:11"
+   ],
+   "first_commit": "a2a56d28f5",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "a2a56d28f5",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] gfx906 prompt attention kernel without split-K scratch or merge (pfandl); rounding-only, prefill +1.3-2.1%; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-prompt-attn]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_PROMPT_ATTN_IMMA",
    "backends": [
     "cuda-hip"
