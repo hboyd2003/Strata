@@ -303,6 +303,76 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_ADAPT_COPY_BATCH",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 482,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-draft-copy.md:15"
+   ],
+   "first_commit": "789671a0b0",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "789671a0b0",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "program",
+   "note": "[gfx906 fork] =1 copies a swap round in one launch; A/B neutral, left off. [branch perf/gfx906-draft-copy]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_ADAPT_COPY_BLOCKS",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 472,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-draft-copy.md:14"
+   ],
+   "first_commit": "c278b1ba4b",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "789671a0b0",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "program",
+   "note": "[gfx906 fork] grid of the adaptive swap kernel copy (with STRATA_HIP_ADAPT_KERNEL_COPY=1); 16 keeps the copies from crowding the MTP draft, exact, +1.2-2.2% decode; on in the gfx906 fork's MI50 production config (16). [branch perf/gfx906-draft-copy]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_ADAPT_EVICT_SYNC",
    "backends": [
     "cuda-hip"
@@ -2632,6 +2702,41 @@
    "status": "opt-in",
    "owner": "program",
    "note": "[auto] documented for users (docs/BATCHING.md:336)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_BENCH_CASE",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/mmvq_wave_rows_parity.cpp",
+     "line": 198,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-draft-copy.md:23"
+   ],
+   "first_commit": "2859f2cf82",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "2859f2cf82",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels",
+   "note": "[gfx906 fork] mmvq_wave_rows_parity --bench: run one shape case (draft head shapes); bench only. [src/kernels/mmvq_wave_rows_parity.cpp]",
    "retire_after": "",
    "retired_in": ""
   },
