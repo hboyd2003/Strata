@@ -237,6 +237,7 @@
   "toast.requestFailed": "La solicitud falló",
   "tool.arguments": "Argumentos",
   "tool.beingWritten": "(se está escribiendo)",
+  "tool.called": "Llamada",
   "tool.chars": "{n} caracteres",
   "tool.cut": ", recortado para el modelo",
   "tool.done": "Hecho",
