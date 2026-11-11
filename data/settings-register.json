@@ -12887,6 +12887,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_GR_UP_OCC",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/fused_gr.cu",
+     "line": 1960,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-pr5033.md:15"
+   ],
+   "first_commit": "e583a26a87",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "7caba37a92",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] hc up kernel chosen per token count (port of upstream #5033); exact; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-pr5033]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_GR_UP_WIDE",
    "backends": [
     "cuda-hip"
@@ -21348,6 +21383,41 @@
    "status": "research",
    "owner": "kernels/cuda",
    "note": "[gfx906 fork] forces STRATA_MMVQ_IACC's rows a wavefront (1|2|4; default 4 on the big projections, 2 on the 640-row ones); tuning only. [branch perf/gfx906-decode-kernels]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_MMVQ_IACC_XLDS",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2572,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-pr5033.md:12"
+   ],
+   "first_commit": "b845e02818",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "7caba37a92",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] activations in LDS for the integer-accumulating MMVQ (port of upstream #5033); on in the gfx906 fork's MI50 production config (q6k). [branch perf/gfx906-pr5033]",
    "retire_after": "",
    "retired_in": ""
   },
