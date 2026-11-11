@@ -12672,6 +12672,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_GR_UP_EXACT_T",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/fused_gr.cu",
+     "line": 1953,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-gu16.md:10"
+   ],
+   "first_commit": "b2f7297250",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "b2f7297250",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] exact-T 1-token gr_up_fast; bitwise; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-gu16]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_GR_UP_ILP",
    "backends": [
     "sycl"
@@ -12866,6 +12901,41 @@
    "status": "research",
    "owner": "kernels/cuda",
    "note": "[auto] off unless set, not documented for users",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_GU16",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 4284,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-gu16.md:9"
+   ],
+   "first_commit": "7b466d1022",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "7b466d1022",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] 16-lane mode-8 fused gate/up; rounding-only, +2.0% decode; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-gu16]",
    "retire_after": "",
    "retired_in": ""
   },
