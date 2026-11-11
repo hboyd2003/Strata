@@ -6030,6 +6030,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_DOWN_LPR",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 4289,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:11"
+   ],
+   "first_commit": "79173f8437",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "79173f8437",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] =2|4|8|16: modes 7/8's expert down rows with that many lanes a row; rounding-only, part of the +6.4% decode-kernel set; on in the gfx906 fork's MI50 production config (4). [branch perf/gfx906-decode-kernels]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_DOWN_WS",
    "backends": [
     "cuda-hip"
@@ -20868,6 +20903,112 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_MMVQ_IACC",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2653,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:12",
+    "docs/gfx906/branches/gfx906-mmvq-wave-rows.md:26"
+   ],
+   "first_commit": "786a6cedfc",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "7caba37a92",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] integer-accumulating wave64 MMVQ for Q6_K/Q4_K/Q5_K; rounding-only; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-decode-kernels]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_MMVQ_IACC_K",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2888,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:23"
+   ],
+   "first_commit": "786a6cedfc",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "3b450ffd74",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] forces STRATA_MMVQ_IACC's K to 2 or 4 (default 4; 2 measured slower); tuning only. [branch perf/gfx906-decode-kernels]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_MMVQ_IACC_ROWS",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2668,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:22"
+   ],
+   "first_commit": "786a6cedfc",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "3b450ffd74",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] forces STRATA_MMVQ_IACC's rows a wavefront (1|2|4; default 4 on the big projections, 2 on the 640-row ones); tuning only. [branch perf/gfx906-decode-kernels]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_MMVQ_IL",
    "backends": [
     "cuda-hip"
@@ -21239,6 +21380,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_MMVQ_MUL24",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2489,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:9"
+   ],
+   "first_commit": "79173f8437",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "b845e02818",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] the mul24 variant of the wave64 MMVQ; exact; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-decode-kernels]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_MMVQ_PF",
    "backends": [
     "sycl"
@@ -21276,6 +21452,41 @@
    "note": "Retired in 0.2.13 (cleanup 4.5, batch B): code removed, the setting is no longer read. Evidence: [checked] Aligned weight-load prefetch in the wide Q6_K kernel (SYCL only): STRATA_MMVQ_PF=2/3/4/6 slower everywhere (qkv 70.8 -> 79.3 at PF 3), existing unaligned variants 2-4x slower (phaseA-tests/notes-intel-quants.md:212). Default 0, undocumented, not set by launch code; sycl/src/kernels/cuda/native_mmvq.dp.cpp:1712.",
    "retire_after": "",
    "retired_in": "0.2.13"
+  },
+  {
+   "name": "STRATA_MMVQ_Q6K_R4",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2498,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:13"
+   ],
+   "first_commit": "79173f8437",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "b845e02818",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] Q6_K with n_out >= 10240 at 2+ columns (lm head, GDN qkv, QSA q) takes 4 rows a wavefront, same bits; A/B neutral/negative, left off. [branch perf/gfx906-decode-kernels]",
+   "retire_after": "",
+   "retired_in": ""
   },
   {
    "name": "STRATA_MMVQ_RPW",
@@ -22600,6 +22811,41 @@
    "status": "opt-in",
    "owner": "kernels/cuda",
    "note": "[auto] documented for users (docs/OLDER_GPUS.md:242)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_NIB_SHIFT",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 4279,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:14"
+   ],
+   "first_commit": "79173f8437",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "79173f8437",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] IQ3_S gate/up (modes 7/8) on DotG<21, 2> with a nibble mask-shift, bitwise the same; A/B neutral/negative, left off. [branch perf/gfx906-decode-kernels]",
    "retire_after": "",
    "retired_in": ""
   },
@@ -29156,6 +29402,41 @@
    "status": "research",
    "owner": "kernels/cpu",
    "note": "[auto] not documented for users; code default not readable from the call",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_POST_COPY_WIDE",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/elementwise.cu",
+     "line": 281,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/gfx906/branches/perf-gfx906-decode-kernels.md:10"
+   ],
+   "first_commit": "79173f8437",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "79173f8437",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] float4 (wide) row copies in the post-op copy kernel; exact; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-decode-kernels]",
    "retire_after": "",
    "retired_in": ""
   },
