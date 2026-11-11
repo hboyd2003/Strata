@@ -6114,6 +6114,138 @@ __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned lon
     }
 }
 
+#if defined(STRATA_HIP_GFX906)
+// ---- 9 (gfx906) down, IQ4_NL and Q2_0: a row of n_ff = 640 inputs is 20 IQ4_NL / 10 Q2_0 blocks; mode 7/8's kernel gave it 32 lanes of
+// half-block calls (40 IQ4_NL calls: the second pass 8 of 32 lanes busy).  Here a row's lanes (4 / 2) take 5 whole
+// blocks each, decoded once for the chunk's tokens, then summed across the row's lanes (DPP).  The float sums run in another order than mode 8's (rounding-level), the same
+// for every window size.  Ported from steddyman/Strata ca498662 (their mode 9); here behind STRATA_G906_DOWN on our mode 7/8 path (default off).
+typedef int g9_v4 __attribute__((ext_vector_type(4), aligned(2)));
+typedef int g9_v4a __attribute__((ext_vector_type(4), aligned(4)));
+// the format's whole block: its weights as 8 or 16 signed-byte words (decode, once for every token) and its dot with
+// one token's activations (the block's q8_1 blocks in LDS)
+template<int TD> struct G9D;
+template<> struct G9D<20> {   // IQ4_NL: 32 values, one q8_1 block; 4 lanes x 5 blocks a 640-row
+    static constexpr int QK = 32, LPR = 4, NW = 8;
+    using B = block_iq4_nl;
+    struct W { int v[NW]; float d; };
+    __device__ static __forceinline__ void decode(const B* b, W& w) {
+        const g9_v4 q = *(const g9_v4*) b->qs;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { const int2 t = get_int_from_table_16(q[i], kvalues_iq4nl); w.v[i] = t.x; w.v[4 + i] = t.y; }
+        w.d = __half2float(b->d);
+    }
+    __device__ static __forceinline__ float dot(const W& w, const block_q8_1* xb) {
+        const g9_v4a u0 = *(const g9_v4a*) xb->qs, u1 = *(const g9_v4a*) (xb->qs + 16);
+        int sumi = 0;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { sumi = ggml_cuda_dp4a(w.v[i], u0[i], sumi); sumi = ggml_cuda_dp4a(w.v[4 + i], u1[i], sumi); }
+        return (w.d * __low2float(xb->ds)) * (float) sumi;
+    }
+};
+template<> struct G9D<42> {   // Q2_0: 64 values, two q8_1 blocks; 2 lanes x 5 blocks a 640-row; vec_dot_q2_0_q8_1's decode
+    static constexpr int QK = 64, LPR = 2, NW = 16;
+    using B = block_q2_0;
+    struct W { int v[NW]; float d; };
+    __device__ static __forceinline__ void decode(const B* b, W& w) {
+        const int16_t* qs = (const int16_t*) b->qs;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int q = qs[j];
+            const int qe = __byte_perm(0x020100FF, 0x020100FF, q >> 0);
+            const int qo = __byte_perm(0x020100FF, 0x020100FF, q >> 2);
+            w.v[2 * j] = __byte_perm(qe, qo, 0x5140);
+            w.v[2 * j + 1] = __byte_perm(qe, qo, 0x7362);
+        }
+        w.d = b->d;
+    }
+    __device__ static __forceinline__ float dot(const W& w, const block_q8_1* xb) {
+        float r = 0.0f;
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {   // the block's two q8_1 blocks (vec_dot_q2_0_q8_1's iqs 0 and 1)
+            const int* u = (const int*) xb[h].qs;
+            int sumi = 0;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                sumi = ggml_cuda_dp4a(u[2 * j], w.v[8 * h + 2 * j], sumi);
+                sumi = ggml_cuda_dp4a(u[2 * j + 1], w.v[8 * h + 2 * j + 1], sumi);
+            }
+            r += w.d * __low2float(xb[h].ds) * (float) sumi;
+        }
+        return r;
+    }
+};
+template<int TD>
+__global__ void __launch_bounds__(256) g906_down_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                        const int32_t* __restrict__ grp_start,
+                                                        const int32_t* __restrict__ n_groups,
+                                                        const int32_t* __restrict__ ent_dst,
+                                                        const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                        float* __restrict__ out) {
+    using D = G9D<TD>;
+    constexpr int LPR = D::LPR, RPB = 256 / LPR;   // rows a block: 64 (IQ4_NL), 128 (Q2_0)
+    extern __shared__ int sh_raw[];   // LDS_NT entries x hb blocks of q8_1
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int tid = threadIdx.x, lane = tid % LPR;
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
+    const int nb = (int) (L.n_ff / D::QK), hb = (int) (L.n_ff / 32), qpb = D::QK / 32;
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const int r = blockIdx.x * RPB + tid / LPR;
+    const bool live = r < (int) L.n_embd;
+    const typename D::B* wr = (const typename D::B*) (blob + L.down_off + (size_t) (live ? r : 0) * L.d_row);
+    const block_q8_1* sh = (const block_q8_1*) sh_raw;
+    for (int c0 = e0; c0 < e1; c0 += LDS_NT) {
+        const int cn = min(LDS_NT, e1 - c0);
+        __syncthreads();
+        {
+            const int* src = (const int*) (hq + (size_t) c0 * hb);
+            for (int i = tid; i < cn * hb * 9; i += 256) sh_raw[i] = src[i];
+        }
+        __syncthreads();
+        auto pass = [&](auto ntc) {
+            constexpr int NTC = decltype(ntc)::value;
+            float acc[NTC];
+#pragma unroll
+            for (int j = 0; j < NTC; ++j) acc[j] = 0.0f;
+            for (int kb = lane; live && kb < nb; kb += LPR) {
+                typename D::W w;
+                D::decode(wr + kb, w);
+#pragma unroll
+                for (int j = 0; j < NTC; ++j) acc[j] += D::dot(w, sh + (size_t) j * hb + kb * qpb);
+            }
+#pragma unroll
+            for (int j = 0; j < NTC; ++j) {
+                float a = acc[j];
+#pragma unroll
+                for (int o = 1; o < LPR; o <<= 1) a += __shfl_xor(a, o, 64);
+                if (live && lane == 0) out[(size_t) ent_dst[c0 + j] * L.n_embd + r] = a;
+            }
+        };
+        switch (cn) {
+            case 1: pass(std::integral_constant<int, 1>{}); break;
+            case 2: pass(std::integral_constant<int, 2>{}); break;
+            case 3: pass(std::integral_constant<int, 3>{}); break;
+            default: pass(std::integral_constant<int, 4>{}); break;
+        }
+    }
+}
+// STRATA_G906_DOWN (default off): 1 / iq4nl = the IQ4_NL down rows; all = IQ4_NL and Q2_0 (Q2_0 benched equal or
+// slower than STRATA_DOWN_LPR=4 at T 5: record 20261111-steddyman-kernel-bench).  Ahead of STRATA_DOWN_LPR.
+int g906_down_mask() {
+    static const int m = [] {
+        const char* v = std::getenv("STRATA_G906_DOWN");
+        if (!v || !*v || v[0] == '0') return 0;
+        const std::string s(v);
+        if (s == "all") return 3;
+        int r = 0;
+        if (s == "1" || s.find("iq4nl") != std::string::npos) r |= 1;
+        if (s.find("q2") != std::string::npos) r |= 2;
+        return r;
+    }();
+    return m;
+}
+#endif
+
 // exp/tier1 STRATA_DOWN_LPR=2|4|8|16 (exp/experts e7846c94): the down rows with LPR lanes per row (not 32): every lane
 // takes nb*ipb/LPR items, the reduction is log2(LPR) steps, a block = 256/LPR rows in one pass.  Rounding-only: the
 // per-row sum's order differs from mode 7/8's (not bitwise).
@@ -6731,6 +6863,19 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     if ((em0d == 7 || em0d == 8) && lds_down_ok) {
         const dim3 gl((unsigned) ((L.n_embd + LDS_RB - 1) / LDS_RB), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_ff / 32) * sizeof(block_q8_1);
+#if defined(STRATA_HIP_GFX906)
+        // STRATA_G906_DOWN: steddyman's whole-block down rows (IQ4_NL 64 rows a block, Q2_0 128), rounding-only
+        if ((g906_down_mask() & 1) && L.d_type == 20 && L.n_ff % 32 == 0) {
+            g906_down_kernel<20><<<dim3((unsigned) ((L.n_embd + 63) / 64), (unsigned) cap_groups), 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            check("native_expert_grouped/down g906");
+            return;
+        }
+        if ((g906_down_mask() & 2) && L.d_type == 42 && L.n_ff % 64 == 0) {
+            g906_down_kernel<42><<<dim3((unsigned) ((L.n_embd + 127) / 128), (unsigned) cap_groups), 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            check("native_expert_grouped/down g906");
+            return;
+        }
+#endif
         const int lpr = down_lpr();
         if (lpr != 0) {   // exp/tier1 STRATA_DOWN_LPR: LPR lanes a row (rounding-only)
             const dim3 gs((unsigned) ((L.n_embd + 256 / lpr - 1) / (256 / lpr)), (unsigned) cap_groups);
