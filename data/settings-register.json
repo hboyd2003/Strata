@@ -10122,6 +10122,303 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_G906_DENSE",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3026,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] =1|all, or a list of q6k,q4k,q5k,iq4xs: steddyman/Strata's gfx906 lane-group dense GEMVs (rows of <= STRATA_G906_MAX_IN inputs; Q6_K/Q4_K also >= STRATA_G906_MIN_OUT rows); rounding-only, ms/window -2.7% alone, -3.0% with STRATA_G906_DOWN; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_DOWN",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 6236,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] =1|iq4nl: steddyman/Strata's whole-block IQ4_NL expert down rows on modes 7/8 (ahead of STRATA_DOWN_LPR); all|q2 adds Q2_0 (benched slower, not used); rounding-only; on in the gfx906 fork's MI50 production config. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_LG",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2676,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "-1",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] STRATA_G906_DENSE lane-group launch: 0 never, 1 always; default by shape (>= 128 blocks). Bench/tuning knob. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_LG_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2688,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] rows a block for the STRATA_G906_DENSE lane-group launch (default: one group, doubled while >= 256 blocks). Bench knob. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_LPR",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2662,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] force 8|16|32|64 lanes a row in the STRATA_G906_DENSE lane-group kernels (default from the input width). Bench knob. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_MAX_IN",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3040,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "4096",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] widest input (default 4096) a matrix may have to take the STRATA_G906_DENSE kernels; the 6144-input matrices stay on the wave kernels. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_MIN_OUT",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3084,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "1024",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "0d131363f6",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "0d131363f6",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] fewest rows (default 1024) a Q6_K / Q4_K matrix needs to take the STRATA_G906_DENSE kernels; keeps the 640-row shared-expert gate/up on the wave kernels, which were faster there. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q4K_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3058,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] rows a block for the STRATA_G906_DENSE Q4_K wave-per-row launch (default from the row count). Bench knob. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3052,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "378fda697f",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "378fda697f",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "[gfx906 fork] rows a block for the STRATA_G906_DENSE Q6_K wave-per-row launch (default from the row count). Bench knob. [branch perf/gfx906-steddyman]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_GDN_CHUNK",
    "backends": [
     "cuda",
