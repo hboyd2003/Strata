@@ -59,6 +59,13 @@ The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 | 3chet | `--aux-cpus auto` | N, exact | Window time flat (−0.1%). This box has one CPU socket, so the host thread doesn't share a core with driver threads the way it did on theirs. Improved: CPU experts per layer-window −12.7%, host CPU-expert time −11.9%, host per-layer −7.4%; the GPU wait absorbed it. |
 | serboox | IQ3_S gate/up CPU rows with AVX-512 VBMI (`IQ_VBMI=1`) | N, rounding | 2.3× faster on one thread, but the 16-thread CPU pool already sits at the ~55 GB/s DRAM ceiling for the 1–4-token rows decode runs, so decode and prefill stay flat. |
 | phoenixclyde | a per-shape MMVQ rows table (`MMVQ_ROWS_TABLE=1`, their method on our kernels) | N, exact | Out-proj −5.7% and shared-expert quant −2.9% per stage, but window time flat in the speed pass and no gain on the 80K live pass. |
+| steddyman | mode 9 expert gate/up | X | Slower than this fork's 16-lane gate/up (`GU16`) in kernel benches. The rest of their kernels are in `perf/gfx906-steddyman`. |
+| steddyman | Q2_0 expert down rows (`G906_DOWN=all`) | H | 18–19% slower than `DOWN_LPR=4` at 2 and 5 tokens; only the IQ4_NL down is used. |
+| eddoursul/Lamina | draft-pass rule (`DRAFT_PASS=1`: a seeded coin keeps or drops each sampled draft against fitted pass rates, ported onto this fork's MTP drafter) | N so far, exact | At temperature 1 with thinking: decode +2.3% and acceptance 0.66 → 0.69, but the two control runs differed by 1.9%. Exact: the draws are keyed to the same per-position counters as the sampler, so only window sizes change. Kept on a branch for more runs. |
+| rocktboy1982 | eager MTP chain (`MTP_EAGER=1`: draft the full chain, then cut at min-p) | H | Draft step +15% greedy and +37% at temperature 1; decode −2.5% and −2.3%. |
+| rocktboy1982 | `WAIT_FUSE` | N | Its plan-wait half is this fork's `FUSE_WAIT=2` (neutral); `FUSE_WAIT=1` is neutral too (GPU wait +1.6%). Its combine half needs a CPU combine path this fork doesn't have. |
+| bsorensen110 | 8-token CPU expert down rows (this fork's analogue: `CPU_DOWN_NR8=1`, IQ4_NL and Q2_0) | N, exact | The 5–8-token rows are 10–19% faster in a microbench (Q2_0 at 8 tokens 2% slower), but decode is flat: the CPU experts finish while the GPU still works. |
+| bsorensen110 | MMVF rows for the 1-token BF16 GEMVs outside the router | X | The kernel they speed up takes ~0.085 ms a window here (a traced count), so even halving it is ~0.15%. |
 
 ## Engine switches
 
@@ -114,7 +121,9 @@ Upstream switches and my own experiments that are in the code but left off.
 | `GR_UP_W2` (own: hc `up` at 2 waves per SIMD) | H, exact | It spills at every token count. |
 | `OLD_Q80_SCALED=1`, `IL_PAD=0`, `AMD_COMMUNITY_TUNING=0`, `QSA_FUSE_GATE=0`, `PA_RPF=0`, `DRAFT_KEEP=0`, `MTP_KEEP=1` (off switches for upstream's 2026-11 defaults) | N | Each alone was speed-neutral; the defaults stay. |
 | `MULTI_BLOCK_ARGMAX=1` (own port: multi-block draft argmax and top-prob kernels, compiled out on gfx906 before) | on hold, bitwise | ms/window −0.9%, verify head stage −7.6%, drafter argmax step 0.079 → 0.031 ms; decode tok/s inside the noise. |
-| `--kv-grow` (own gfx906 port) + `KV_GROW_HOLD` | on hold, rounding / N | +1,629 expert slots and short-decode ms/window −1.8%, long context neutral, clean across restores and 6 interleaved conversations. It needs a flush after each remap: the amdgpu driver leaves a stale TLB translation when all VRAM is BAR-visible ([ROCm/TheRock#8744](https://github.com/ROCm/TheRock/issues/8744)). |
+| `PREFILL_COPY_WAIT_DEDUPE=1` (+ `PREFILL_COPY_EVENT_EVERY=4`) | N | The dedupe ran and changed nothing measurable; with `EVENT_EVERY=4` the follow-up turn was 3% slower. |
+| `KV_GROW_HOLD=1` | N | Keeps the K/V at the parked conversation's size, so the next short request gets fewer expert slots (the first short prompt after a 32K read was slower, one sample). |
+| `hipEventDisableSystemFence` on the fork/join events, non-coherent mapped memory for CPU-expert rows | X | Microbenches: in a captured graph the events are free with any flag; the mapped reads are bound by PCIe (~25 GB/s) either way. |
 
 ## Tuning
 
@@ -136,6 +145,8 @@ Upstream switches and my own experiments that are in the code but left off.
 | GPU clock pin `power_dpm_force_performance_level=high` | vs auto | X: under load the clock already sits at ~1,688 MHz either way. |
 | HBM clock via `pp_table` | 1,050 and 1,180 MHz (stock 1,000) | 1,050: decode about +0.9% at most, prefill flat, not adopted. **1,180: an uncorrectable HBM ECC error and a failed GPU reset within 31 s, at idle.** Don't. |
 | Unsloth UD-IQ3_XXS pack | instead of the IQ3_S pack | H, −2.3% decode (lower acceptance), −8% at 200-token prompts. Quality not measured. |
+| GPU top clock (pp_table) | 1725 → 1800 MHz | **Stock used.** Stable in one arm; ms/window −3.0% and decode +2.2%, but +22..25 W and 5–8 °C hotter, prefill flat. |
+| `expert_profile_save` (start from a learned expert set) | one profile learned on the benchmark prompts | N: the first prompt after a restart is +2.6%, then the adaptive cache catches up. |
 
 ## Things learned along the way
 
