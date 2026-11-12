@@ -97,9 +97,9 @@ All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did 
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
-**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), release `v0.2.12+0.4-gfx906` on 2026-11-08): about 90 tok/s
-decode on short prompts and 85 tok/s at ~32K context. Prompt reading: ~730 tok/s at 4K, ~827 tok/s at 16K, ~802 tok/s on a 32K
-document, ~605 tok/s for a follow-up turn on an 18K-token cached conversation. On real agent traffic (the last 100 requests on 2026-10-30: context median
+**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), release `v0.2.13+0.5-gfx906` on 2026-11-12): about 94 tok/s
+decode on short prompts and 87 tok/s at ~32K context. Prompt reading: ~724 tok/s at 4K, ~822 tok/s at 16K, ~800 tok/s on a 32K
+document, ~599 tok/s for a follow-up turn on an 18K-token cached conversation. On real agent traffic (the last 100 requests on 2026-10-30: context median
 144K tokens, p90 185K, ~730 new tokens a turn) decode is 82 tok/s median with 0.74 draft acceptance, and prompt
 reading takes ~45% of engine time. Prefill ~720 tok/s at 100K (measured 2026-10-30, before the GDN prompt switches). The fork started at ~59 tok/s decode on the same box and model.
 
