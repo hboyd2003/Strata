@@ -2692,7 +2692,7 @@ void g906_lg_launch(const G906LG<B>& ks, const B* w, const Q81Block* x, float* y
     const auto k = lpr == 8 ? ks.k8 : lpr == 16 ? ks.k16 : lpr == 32 ? ks.k32 : ks.k64;
     k<<<nb, 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
 }
-// ---- gfx906 Q6_K (STRATA_G906_Q6K=0: the wave kernel above).  One wavefront per row; a lane takes 64 weights of one
+// ---- gfx906 Q6_K (without q6k in STRATA_G906_DENSE: the wave kernel above).  One wavefront per row; a lane takes 64 weights of one
 // block - 16 consecutive l of one 128-value half n: ql[64n + l .. +16], ql[64n + 32 + l .. +16], qh[32n + l .. +16],
 // three 16-byte loads (gfx906 loads 16 bytes from the blocks' 2-byte alignment) - and unpacks them once for all
 // columns.  Per column it reads the four 16-value activation runs (q8_1 blocks 4n + k, values l .. l + 15) and runs
@@ -2773,7 +2773,7 @@ __global__ void g906_q6k_kernel(const Q6KBlock* __restrict__ w, const Q81Block* 
         }
     }
 }
-// ---- gfx906 Q4_K (STRATA_G906_Q4K=0: the wave kernel).  One wavefront per row; a lane takes one 64-value chunk j of
+// ---- gfx906 Q4_K (without q4k in STRATA_G906_DENSE: the wave kernel).  One wavefront per row; a lane takes one 64-value chunk j of
 // a block (sub-blocks 2j and 2j + 1): the block's 16-byte header (dm and the 12 scale bytes; 144-byte blocks are 16-byte
 // aligned in rows of 2560) and its 32 qs bytes in two 16-byte loads.  The activations and each q8_1 block's integer sum
 // (the sumf_m term of vec_dot_q4_K_q8_1_impl_vmmq, computed once here instead of per row) are staged in LDS.  The same
@@ -2860,7 +2860,7 @@ __global__ void g906_q4k_kernel(const Q4KBlock* __restrict__ w, const Q81Block* 
         }
     }
 }
-// ---- gfx906 Q5_K (STRATA_G906_Q5K=0: the wave kernel).  g906_q4k_kernel with the fifth bit: a lane task is a 64-value
+// ---- gfx906 Q5_K (without q5k in STRATA_G906_DENSE: the wave kernel).  g906_q4k_kernel with the fifth bit: a lane task is a 64-value
 // chunk j (sub-blocks 2j, 2j + 1) - the 16-byte header, its 32 qs bytes and all 32 qh bytes (bit 2j + h of qh[l] is
 // value l's fifth bit in sub-block 2j + h), five 16-byte loads; the activations and their q8_1 integer sums in LDS.
 // Per sub-block q5_q8_dot_impl's integers; float sums in another order (rounding-level), the same for every NCOLS.
@@ -2951,7 +2951,7 @@ __global__ void g906_q5k_kernel(const Q5KBlock* __restrict__ w, const Q81Block* 
         }
     }
 }
-// ---- gfx906 IQ4_XS (STRATA_G906_IQ4XS=0: the wave kernel).  As g906_q4k_kernel: a lane takes two 32-value sub-blocks
+// ---- gfx906 IQ4_XS (without iq4xs in STRATA_G906_DENSE: the wave kernel).  As g906_q4k_kernel: a lane takes two 32-value sub-blocks
 // (2p, 2p + 1) of a block - its 8-byte header and 32 qs bytes in two 16-byte loads - and looks them up in the IQ4 table
 // once for every column; activations staged in LDS.  Per sub-block the integer dot is IQ4XSTraits::apply's, in its order.
 typedef int g906_v2a __attribute__((ext_vector_type(2), aligned(4)));
