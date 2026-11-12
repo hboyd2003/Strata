@@ -81,6 +81,7 @@ default that is on in this build:
 | `ROCBLAS_TUNING=/tuning` (the image default, tuned at server start) | `perf/gfx906-pf-rocblas-h16`, `perf/gfx906-rocblas-autotune` | rounding only |
 | `HC_MIX_H16=1` | `perf/gfx906-pf-rocblas-h16` | exact |
 | `KV_GROW=1` (the K/V maps only what the conversation needs; the expert cache keeps the rest) | `perf/gfx906-kv-grow` | rounding only |
+| `G906_DENSE=1`, `G906_DOWN=1` (lane-group dense GEMVs, whole-block IQ4_NL expert down) | `perf/gfx906-steddyman` | rounding only |
 
 `DECODE_TIMING=1` is also set: it only logs per-window timings and does not change speed or output.
 
@@ -141,6 +142,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-rocblas-autotune`](branches/perf-gfx906-rocblas-autotune.md) | own | tunes rocBLAS at server start instead of shipping a table, re-tunes when the setup changes |
 | [`perf/gfx906-kv-grow`](branches/perf-gfx906-kv-grow.md) | own | `--kv-grow` on gfx906: the virtual-memory path plus a TLB flush after each remap (amdgpu bug); +1,629 expert slots at short context |
 | [`serve/dynamic-yarn`](branches/serve-dynamic-yarn.md) | upstream PR #2961 (sergqwer), own fixes | `--rope-scaling dynamic`: YaRN only past the trained context, cached keys rotated on a factor change; pinned table copies make switching back ~10 ms |
+| [`perf/gfx906-steddyman`](branches/perf-gfx906-steddyman.md) | from steddyman/Strata | gfx906 lane-group dense GEMVs (Q6_K / Q4_K / Q5_K / IQ4_XS) and a whole-block IQ4_NL expert down, −3.0% ms per window |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
