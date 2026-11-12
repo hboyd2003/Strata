@@ -50,13 +50,20 @@ def fork_tags(exclude=None):
     return sorted(tags, key=version_key, reverse=True)
 
 
+# A merge of one of the fork's branches: "Merge <branch>...", "Merge the <x> fork (rebased/...", "Merge upstream PR #N
+# (rebased/...". Upstream merges its own work branches too ("Merge f-... into f-main-..."), and those are upstream's.
+FORK_MERGE_RE = re.compile(r"^Merge (?:[^:(]*\()?(?:(?:rebased|gfx906|perf|serve|fix|ci)/|docs\b)")
+
+
 def upstream_base(rev):
-    """main is upstream + --no-ff merges, so below its merges the first-parent chain reaches upstream's head: the first
-    one-parent commit after a merge (one-parent commits above the merges, which main shouldn't have, are skipped)."""
+    """main is upstream + --no-ff merges of the fork's branches: walking down the first-parent chain, upstream's head is
+    the first commit below those merges that isn't one of them (one-parent commits above the merges, which main
+    shouldn't have, are skipped). Upstream's own merges are told apart by their subjects (FORK_MERGE_RE)."""
     merged = False
-    for line in git("rev-list", "--first-parent", "--parents", rev).splitlines():
-        h, *parents = line.split()
-        if len(parents) > 1:
+    out = git("log", "--first-parent", "--format=%H%x09%P%x09%s", rev)
+    for line in out.splitlines():
+        h, parents, subject = line.split("\t", 2)
+        if len(parents.split()) > 1 and FORK_MERGE_RE.match(subject):
             merged = True
         elif merged:
             return h
@@ -64,12 +71,14 @@ def upstream_base(rev):
 
 
 def merged_branches(rev):
-    """(branch, merge subject) for each --no-ff merge on main's first-parent chain, in merge order."""
+    """(branch, merge subject) for each fork branch merged on main's first-parent chain, in merge order. A branch merged
+    more than once since the base (docs between catch-ups) is listed once, at its last merge."""
     base = upstream_base(rev)
     out = []
     for line in git("log", "--first-parent", "--merges", "--reverse", "--format=%s", f"{base}..{rev}").splitlines():
         m = BRANCH_RE.search(line)
-        out.append((m.group(1) if m else line, line))
+        br = m.group(1) if m else line
+        out = [x for x in out if x[0] != br] + [(br, line)]
     return out
 
 
