@@ -487,6 +487,12 @@ if(STRATA_NATIVE_EXPERTS)
     add_executable(native_expert_bench src/kernels/native_expert_bench.cpp)
     target_include_directories(native_expert_bench PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(native_expert_bench PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})
+    if(STRATA_HIP_GFX906)   # gfx906 dense GEMV bench at the model's decode shapes (steddyman tools/gfx906)
+        add_executable(mmvq_bench tools/gfx906/mmvq_bench.cpp)
+        set_source_files_properties(tools/gfx906/mmvq_bench.cpp PROPERTIES LANGUAGE HIP)
+        target_include_directories(mmvq_bench PRIVATE ${_strata_gpu_include_directories})
+        target_link_libraries(mmvq_bench PRIVATE strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
+    endif()
     if(STRATA_ENABLE_CUDA AND STRATA_EXPERIMENTAL_SM60)
       # STRATA_EXPERT_NIBBLE (include/strata/core/expert_nibble.hpp): the 4-bit gate/up expert slots against the
       # production kernels and the GGUF blobs, bit for bit, on a real model's layers (needs a GP100); --header: the
