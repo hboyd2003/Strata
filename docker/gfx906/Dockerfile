@@ -11,7 +11,7 @@
 #   /usr/local/bin/strata-vision     the picture reader on the CPU; strata-vision-hip on the GPU
 #   /usr/local/bin/strata-*          the engine's command-line tools (strata-gguf, strata-plan, strata-dequant, ...)
 #   /opt/strata                      the server, the tools (iq_pack, mtp_fetch / mtp_pack / mtp_rt, ...), data/ (draft
-#                                    vocabularies, expert profiles), llama.cpp at the pinned commit (gguf-py), a venv
+#                                    vocabularies, expert profiles), the vendored third_party trees (gguf-py), a venv
 #   /models /data /config /cache     volumes: model files, prepared packs and MTP files, the server config, caches
 #
 #   docker run --device /dev/kfd --device /dev/dri --group-add video --ipc host --ulimit memlock=-1 -p 127.0.0.1:8080:8080 \
@@ -36,8 +36,8 @@ COPY . .
 # cmake and ninja at the versions requirements-build.txt pins (Ubuntu's are older)
 RUN python3 -m venv /buildenv && /buildenv/bin/pip install --no-cache-dir -r requirements.txt -r requirements-build.txt
 ENV PATH=/buildenv/bin:$PATH
-# llama.cpp at the pinned commit (ggml for the engine, mtmd for pictures, gguf-py for the tools), as setup.py fetches it
-RUN python3 -c "import setup; print(setup.get_llama_cpp())"
+# ggml comes from the vendored third_party/strata-ggml, the picture readers from third_party/strata-llama (llama, mtmd, ggml at the
+# pin) and gguf-py from third_party/strata-gguf-py: nothing is downloaded (upstream 463940282)
 # extra HIP compiler flags for the engine and the GPU picture reader (empty: none), e.g. "-mllvm -amdgpu-sched-strategy=max-ilp"
 ARG CMAKE_HIP_FLAGS=
 ARG STRATA_PORTABLE=OFF
@@ -46,14 +46,14 @@ RUN set -e; \
     cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
         -DSTRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
-        -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE} -DSTRATA_GGML_DIR=/src/third_party/llama.cpp; \
+        -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE}; \
     cmake --build build --target strata $ENGINE_TOOLS -j "$(nproc)"
 RUN set -e; \
-    cmake -G Ninja -S tools/vision -B build-vision -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=/src/third_party/llama.cpp \
+    cmake -G Ninja -S tools/vision -B build-vision -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
         -DSTRATA_VISION_CUDA=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE}; \
     cmake --build build-vision --target strata-vision -j "$(nproc)"; \
-    cmake -G Ninja -S tools/vision -B build-vision-hip -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=/src/third_party/llama.cpp \
+    cmake -G Ninja -S tools/vision -B build-vision-hip -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
         -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" -DCMAKE_HIP_COMPILER_ROCM_ROOT="$ROCM_PATH" \
         -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
@@ -106,7 +106,7 @@ RUN set -e; \
     /opt/strata/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements-nvfp4-local.txt; \
     find /opt/strata -name __pycache__ -prune -exec rm -rf {} +
 ENV PATH=/opt/strata/venv/bin:$PATH PYTHONPATH=/opt/strata PYTHONUNBUFFERED=1 \
-    STRATA_GGUF_PY=/opt/strata/third_party/llama.cpp/gguf-py
+    STRATA_GGUF_PY=/opt/strata/third_party/strata-gguf-py
 # every binary's libraries resolve in this image (the ROCm runtime and its gfx906 kernels are the base image's), and the server,
 # the preparation tools and the converter import
 RUN set -e; \
