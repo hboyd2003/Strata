@@ -370,7 +370,7 @@ class RequestAsChat(unittest.TestCase):
         self.assertTrue(all(a is b for a, b in zip(later["messages"], t["messages"])))
         self.assertEqual(later["messages"][-1]["text"], "Done.")
         # past TRANSCRIPT_MAX characters the oldest messages are left out; the newest one always stays
-        with mock.patch("serve.server.TRANSCRIPT_MAX", 30):
+        with mock.patch("serve.server_parts.engines.TRANSCRIPT_MAX", 30):   # (transcript_of reads it there since the file split)
             t = transcript_of([{"role": "user", "content": "a" * 20}, {"role": "assistant", "content": "b" * 20},
                                {"role": "user", "content": "c" * 40}])
         self.assertEqual((t["omitted"], [m["text"][0] for m in t["messages"]]), (2, ["c"]))
