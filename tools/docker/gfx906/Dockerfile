@@ -116,8 +116,7 @@ RUN set -e; \
     done; \
     python3 -c "import serve.server, serve.prometheus, textual, torch, transformers, safetensors; print('imports ok, torch', torch.__version__)"; \
     for t in iq_pack mtp_fetch mtp_pack mtp_rt nvfp4_local_pack; do python3 tools/$t.py --help > /dev/null; done; \
-    python3 setup.py --help > /dev/null; \
-    python3 tools/gfx906.py --help > /dev/null
+    python3 setup.py --help > /dev/null
 VOLUME ["/models", "/data", "/config", "/cache"]
 EXPOSE 8080
 LABEL org.opencontainers.image.title="Strata gfx906" \
