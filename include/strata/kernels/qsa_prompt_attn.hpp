@@ -36,6 +36,14 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
 bool qsa_prompt_attn_batch_gated(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                                  int64_t cap, const QsaShapes& s, const float* qf, uint16_t* o16, int64_t ld16, int64_t n_q,
                                  void* stream);
+/// HIP only, gfx906 only (false everywhere else): the wave64 prompt attention - one block per (query, KV head) walks all
+/// of the query's selected cells with a running softmax, so the decode kernel's split-K scratch and its merge kernel do
+/// not exist. The same operands and the same per-cell arithmetic as `qsa_decode_attn_batch`'s int8 specialization, a
+/// different (online) softmax order: not bitwise equal to it, and OPT-IN with STRATA_PROMPT_ATTN_GFX906=1 (measured:
+/// top-1 100 % over the 20-prompt gate at KL 0.0136 mean / 0.00062 median, 1.15x on the component). False when the
+/// geometry is not 24 heads / 2 KV heads / 256, for Q4_0 / k8v4 pools, and unless the switch is on.
+bool qsa_prompt_attn_gfx906_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+                                  int64_t cap, const QsaShapes& s, float* attn, int64_t n_q, void* stream);
 
 /// HIP only (false in every other build): the prompt attention runs on the RDNA4 matrix cores on the current device -
 /// the default on gfx12 (STRATA_HIP_WMMA=0 turns it off), STRATA_HIP_WMMA=1 on gfx11 as well.  The prompt path sizes its
