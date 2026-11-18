@@ -21,11 +21,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 #include "strata/kernels/native_router.hpp"
+#include "router_w64.cuh"
 #include <cuda_runtime.h>
 #include <atomic>
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace strata::kernels {
@@ -205,6 +207,113 @@ __global__ void route_topk(const float* __restrict__ logits, int32_t* __restrict
     const float inverse_selected_sum = 1.0f / selected_sum;
     if (lane < K) weights[lane] = selected * inverse_selected_sum;
 }
+#if defined(STRATA_HIP_GFX906)
+// gfx906 (STRATA_GFX906_ROUTER_W64=1): route_multi as ONE 64-lane wave per token instead of a 32-lane warp, bitwise
+// (router_w64.cuh).  route_multi on wave64 leaves half of every wave idle, reduces with 2 ds_bpermute per butterfly
+// step (10 ranks x 5 steps) and clears the winner with a dynamic index: 11.1 -> 6.1 us per layer on the MI50.
+__launch_bounds__(64)
+__global__ void route_w64(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ weights) {
+    const size_t tk = blockIdx.x;
+    w64::route_w64_token(logits + tk * 512, ids + tk * 10, weights + tk * 10, nullptr);
+}
+// doubr (VlDubr/strata-mi50 c3d0ca379c) route_wave64, verbatim: a bench / parity arm next to route_w64
+// gfx906: `route` / `route_multi` with the ten picks made by the whole 64-lane wave.  The 32-lane pick spends ten
+// rounds of five dependent cross-lane exchanges (ds_bpermute, an LDS round trip each): ~20 us a call on MI50, once per
+// layer and window.  Here the softmax is the 32-lane code above, run by both halves of the wave (lane & 31), so every
+// probability has the same bits; then each lane holds 8 of them (e = lane + 64 j) and a round is a local scan, a DPP
+// max over the rows, four readlanes and a ballot.  The order is the same total order - the larger probability, on
+// equality the lower expert - and the weight sum is accumulated per (expert & 31) lane in pick order and reduced by
+// the same xor tree, so ids and weights are bitwise the 32-lane kernel's.  One wave per token.
+template <int CTRL>
+__device__ __forceinline__ float route_dpp_max(float v) {
+    return fmaxf(v, __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), CTRL, 0xf, 0xf, false)));
+}
+__device__ __forceinline__ float route_wave_max(float v) {
+    v = route_dpp_max<0xb1>(v);    // quad_perm [1,0,3,2]
+    v = route_dpp_max<0x4e>(v);    // quad_perm [2,3,0,1]
+    v = route_dpp_max<0x124>(v);   // row_ror:4
+    v = route_dpp_max<0x128>(v);   // row_ror:8 - every lane holds its row's maximum
+    const float r0 = __int_as_float(__builtin_amdgcn_readlane(__float_as_int(v), 0));
+    const float r1 = __int_as_float(__builtin_amdgcn_readlane(__float_as_int(v), 16));
+    const float r2 = __int_as_float(__builtin_amdgcn_readlane(__float_as_int(v), 32));
+    const float r3 = __int_as_float(__builtin_amdgcn_readlane(__float_as_int(v), 48));
+    return fmaxf(fmaxf(r0, r1), fmaxf(r2, r3));
+}
+__device__ __forceinline__ int route_wave_min(int v) {
+#pragma unroll
+    for (int mask = 32; mask; mask >>= 1) v = min(v, __shfl_xor(v, mask, 64));
+    return v;
+}
+__launch_bounds__(64, 1)
+__global__ void route_wave64(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ weights) {
+    logits += (size_t) blockIdx.x * 512; ids += (size_t) blockIdx.x * 10; weights += (size_t) blockIdx.x * 10;
+    const int lane = (int) threadIdx.x & 31, half = (int) threadIdx.x >> 5;
+    float values[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
+    float maximum = -INFINITY;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) maximum = max(maximum, values[i]);
+    maximum = warp_max(maximum);
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        values[i] = expf(values[i] - maximum);
+        sum += values[i];
+    }
+    const float reciprocal = 1.0f / warp_sum(sum);
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        values[i] *= reciprocal;
+        if (__isnanf(values[i])) values[i] = -FLT_MAX;
+    }
+    // this lane's 8 experts: e = threadIdx.x + 64 j = lane + 32 (2 j + half)
+    float v[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) v[j] = half ? values[2 * j + 1] : values[2 * j];
+    const int e0 = (int) threadIdx.x;
+    float selected = 0.0f, selected_sum = 0.0f;
+#pragma unroll
+    for (int rank = 0; rank < 10; ++rank) {
+        float best = v[0];
+        int bj = 0;
+#pragma unroll
+        for (int j = 1; j < 8; ++j) {
+            if (v[j] > best) { best = v[j]; bj = j; }
+        }
+        const float top = route_wave_max(best);
+        const unsigned long long tie = __ballot(best == top);
+        int expert;
+        if ((tie & (tie - 1)) == 0) {
+            const int wl = __ffsll((long long) tie) - 1;
+            expert = __builtin_amdgcn_readlane(e0 + 64 * bj, wl);
+        } else {
+            expert = route_wave_min(best == top ? e0 + 64 * bj : 0x7fffffff);
+        }
+        if (e0 == (expert & 63)) {
+#pragma unroll
+            for (int j = 0; j < 8; ++j)
+                if (j == bj) v[j] = -INFINITY;
+        }
+        if (lane == (expert & 31)) selected_sum += top;   // per (expert & 31) lane, in pick order
+        if (threadIdx.x == rank) {
+            ids[rank] = expert;
+            selected = top;
+        }
+    }
+    selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
+    const float inverse_selected_sum = 1.0f / selected_sum;
+    if (threadIdx.x < 10) weights[threadIdx.x] = selected * inverse_selected_sum;
+}
+#endif
+bool router_w64_env() {
+#if defined(STRATA_HIP_GFX906)
+    static const bool on = [] { const char* e = std::getenv("STRATA_GFX906_ROUTER_W64"); return e && e[0] == '1' && e[1] == 0; }();
+    return on;
+#else
+    return false;
+#endif
+}
 bool valid(const void* p, size_t bytes) {
     const auto address = reinterpret_cast<uintptr_t>(p);
     return p && address % 4 == 0 && bytes <= UINTPTR_MAX - address;
@@ -221,6 +330,7 @@ void native_router_top10(const float* logits, int32_t* ids, float* weights, void
         || overlap(logits, 512 * 4, ids, 10 * 4) || overlap(logits, 512 * 4, weights, 10 * 4)
         || overlap(ids, 10 * 4, weights, 10 * 4))
         throw std::invalid_argument("native router requires a stream, aligned spans, and disjoint outputs");
+    if (router_w64_env() && native_router_top10_w64(logits, ids, weights, 1, stream)) return;
     route<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
@@ -229,9 +339,34 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     if (!stream || n_tok < 1 || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
         !valid(weights, (size_t) n_tok * 10 * 4))
         throw std::invalid_argument("native router (multi) requires a stream and aligned [n,512]/[n,10] buffers");
+    if (router_w64_env() && native_router_top10_w64(logits, ids, weights, n_tok, stream)) return;
     route_multi<<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, n_tok);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+}
+bool native_router_top10_w64(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream) {
+#if defined(STRATA_HIP_GFX906)
+    if (!stream || n_tok < 1) return false;
+    route_w64<<<(unsigned) n_tok, 64, 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    return true;
+#else
+    (void) logits; (void) ids; (void) weights; (void) n_tok; (void) stream;
+    return false;
+#endif
+}
+bool native_router_top10_w64_doubr(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream) {
+#if defined(STRATA_HIP_GFX906)
+    if (!stream || n_tok < 1) return false;
+    route_wave64<<<(unsigned) n_tok, 64, 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    return true;
+#else
+    (void) logits; (void) ids; (void) weights; (void) n_tok; (void) stream;
+    return false;
+#endif
 }
 bool native_router_topk_supported(int n_expert, int k) { return (n_expert == 512 && k == 10) || (n_expert == 256 && k == 8); }
 void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream) {
