@@ -109,7 +109,6 @@ In merge order. "Source" says where the code came from.
 
 | Branch | Source | What it does |
 | --- | --- | --- |
-| `rebased/cassettesgoboom` | [cassettesgoboom](https://github.com/cassettesgoboom/Strata) fork | gfx906 build, compat layer, parity tests |
 | `rebased/janus-reith` | [janus-reith](https://github.com/janus-reith/Strata) fork | gfx906 prefill port |
 | `rebased/pr-3565` | upstream PR #3565 | auto sessions (save and restore conversations to disk) |
 | `rebased/pr-3251` | upstream PR #3251 | restore a session without holding its K/V in RAM |
