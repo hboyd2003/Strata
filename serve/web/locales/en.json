@@ -252,6 +252,7 @@
   "toast.requestFailed": "The request failed",
   "tool.arguments": "Arguments",
   "tool.beingWritten": "(being written)",
+  "tool.called": "Called",
   "tool.chars": "{n} characters",
   "tool.cut": ", cut for the model",
   "tool.done": "Done",
