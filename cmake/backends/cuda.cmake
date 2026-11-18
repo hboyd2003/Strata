@@ -109,6 +109,7 @@ macro(strata_cuda_mmq)
     # #136: the Q2_0 pack's prompt experts on Strata's own int8 kernels (moe_fused.cu, opt-in STRATA_PF_FUSED=1; CUDA
     # only: the HIP branch below keeps MMQ, and an sm_75 device or an sm_75-only build reports them unavailable)
     add_library(strata_mmq STATIC src/prefill/moe_mmq.cu src/prefill/moe_iq4_w4a8.cu
+                src/prefill/rp_moe.cu
                 src/prefill/mmq_nvfp4_w4a8.cu
                 src/prefill/ggml_cuda_host.cu ${_strata_quantize_cu})
     # P4-SPLIT: Strata's own prompt kernels (the fused int8 experts) are a library of their own, strata_pf_own, so that a
@@ -487,6 +488,14 @@ macro(strata_cuda_prompt_tests)
     if(STRATA_MMQ)
     add_executable(mmq_expert_bench src/prefill/mmq_expert_bench.cpp)
     target_link_libraries(mmq_expert_bench PRIVATE strata_mmq ggml-base CUDA::cudart)
+    # gfx906: mx-llama.cpp's repacked IQ4_NL expert GEMM (rp_moe) against MMQ, correctness and time
+    add_executable(rp_expert_bench src/prefill/rp_expert_bench.cpp)
+    target_link_libraries(rp_expert_bench PRIVATE strata_mmq ggml-base CUDA::cudart)
+    # gfx906: the dense projections as today (dequant + hipBLAS FP16) against int8 MMQ and the repacked GEMM
+    if(STRATA_HIP_GFX906)
+      add_executable(dense_mmq_bench src/prefill/dense_mmq_bench.cu)
+      target_link_libraries(dense_mmq_bench PRIVATE strata_prefill strata_mmq ggml-base ggml-cpu CUDA::cudart CUDA::cublas)
+    endif()
     endif()
 endmacro()
 
