@@ -75,6 +75,20 @@ constexpr int kFusedGrWideT = kWindowMaxT;
 bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
                          unsigned long long* stamp_buf = nullptr, int stamp_i0 = 0);
 
+/// gfx906 opt-in STRATA_GR_RO=1: the multi read in a rounding-only order (split-K `down` over every CU with the norm
+/// folded in, a fixed-order reduce, `up`): deterministic, not bitwise the default read.  fused_gr_read_multi calls it
+/// when the switch is on; `fused_gr_read_ro` returns false (and does nothing) off gfx906, for Q8 / REQ8 weights or an
+/// invalid token count.  It never writes the q8_1 image (the multi read then returns false: the caller quantizes).
+bool fused_gr_ro_on();
+/// Allocates the RO read's per-call-site counters on `dev` (fused_gr_check calls it, before any graph capture).
+void fused_gr_ro_init(int dev);
+bool fused_gr_read_ro(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
+                      unsigned long long* stamp_buf = nullptr, int stamp_i0 = 0);
+/// The bench only: which of the RO read's launches run (1 down, 2 reduce, 4 up; default 7).
+void fused_gr_ro_set_parts(int mask);
+/// The bench only: the RO down's shape (0 = STRATA_GR_RO's value: 1 -> 8 rows x 4 waves, 2 -> 4 rows x 8 waves).
+void fused_gr_ro_set_shape(int shape);
+
 /// The bench only: the AMD latency-hidden kernels on (1) or off (0); -1 = STRATA_GR_FAST.
 void fused_gr_set_fast(int on);
 /// The bench only: the v3 read's weight-prefetch kernels (STRATA_GR_V3_PF, bit 0 down / bit 1 up) for every read; -1 = the environment.
