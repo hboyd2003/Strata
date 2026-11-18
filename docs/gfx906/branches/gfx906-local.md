@@ -12,13 +12,11 @@ Stacked: its commits sit on `main` at its merge slot.
   `--build-arg STRATA_PORTABLE=ON` restores the portable build. `BUILD.json` in the image records which one it is.
 - **ROCm's `libomp`** is linked into `/usr/local/lib` for the native picture reader (it lives in `/opt/rocm/llvm/lib`,
   outside the loader's path).
-- **Carried over from an old upstream merge:** `platform::file_cache_old_rule()` (one place for the
-  `STRATA_FILE_CACHE_OLD_RULE` default and override), the correctness trace not counting MTP drafts for a merged
-  admission window, and the repacked prompt GEMM skipping WMMA layers (no WMMA on gfx906, so nothing changes here).
-- **Receipts** (`benchmarks/gfx906/receipts/2026-10-22-*.json`) of the janus-reith prefill port (prefill 504 → 677 tok/s
-  against the v0.2.2 image, one run per arm; 504 → 624 of it comes from three prompt switches alone), the ROCm 10.1
-  image smoke and the v0.2.2 sync smoke.
-- The gfx906 CPU workflow pins its `regex` dependency.
+- **Carried over from an old upstream merge:** the repacked prompt GEMM skips WMMA layers (no WMMA on gfx906, so
+  nothing changes here).
+- **Receipt** (`benchmarks/gfx906/receipts/2026-10-22-janus-prefill-port.json`) of the janus-reith prefill port
+  (prefill 504 → 677 tok/s against the v0.2.2 image, one run per arm; 504 → 624 of it comes from three prompt switches
+  alone).
 
 ## Building the image
 
