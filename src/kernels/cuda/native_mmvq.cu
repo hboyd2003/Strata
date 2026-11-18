@@ -2413,16 +2413,27 @@ __device__ __forceinline__ void wave_rows_dot(const typename F::Block* __restric
         }
     }
 }
-template<typename F, int NCOLS, int R>
+// XL (#5033 STRATA_MMVQ_XLDS=1): the NCOLS activation rows copied into shared memory first (launched with
+// NCOLS * n_in / 32 * 36 bytes).  On gfx906 every vector-memory instruction costs the CU's address unit >= 16 cycles
+// whatever its width, and each column added its own global loads per lane and chunk; the same values, so the same sums.
+template<typename F, int NCOLS, int R, bool XL = false>
 __launch_bounds__(256)
-__global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
+__global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ xg,
                                         float* __restrict__ y, int n_in, int n_out) {
     static_assert(64 % F::T == 0, "a block's threads must tile the wavefront");
+    const int x_stride = n_in / Q8K;
+    const Q81Block* __restrict__ x = xg;
+    if constexpr (XL) {
+        extern __shared__ int4 s_wave_x4[];
+        const int4* src = reinterpret_cast<const int4*>(xg);
+        for (int i = int(threadIdx.x), n4 = NCOLS * x_stride * 9 / 4; i < n4; i += int(blockDim.x)) s_wave_x4[i] = src[i];
+        __syncthreads();
+        x = reinterpret_cast<const Q81Block*>(s_wave_x4);
+    }
     const int lane = int(threadIdx.x) & 63;
     const int row0 = (int(blockIdx.x) * 4 + (int(threadIdx.x) >> 6)) * R;
     if (row0 >= n_out) return;
     const int blocks_per_row = n_in / F::DIV;
-    const int x_stride = n_in / Q8K;
     const int kqs = F::kqs(lane);
     float tmp[NCOLS][R] = {};
     if constexpr (R == 1) {   // the default: this loop exactly as before (the same machine code)
@@ -2487,28 +2498,139 @@ bool q6k_r4_on() {
     static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_Q6K_R4"); return v != nullptr && std::atoi(v) != 0; }();
     return on;
 }
+// #5033 (freapsy) Q6_K: four of native_mmvq_wave_kernel<Q6KTraits>'s lanes in one, so a lane reads the 16 bytes of
+// ql, qh and each activation block those four read 4 bytes at a time.  Lane j of a 16-lane row group plays wave lanes
+// 4j..4j+3 (same block, scales, bq8 offset and qh shift; consecutive ints), keeps their four sums apart, and replays the
+// 64-lane butterfly: steps 32..4 are xor 8..1 here, per sum, then 2 and 1 are (p0 + p2) + (p1 + p3).  Bitwise the wave
+// kernel's results (any R: every R gives the R = 1 sums).  The activations always come through shared memory.
+template<int NCOLS, bool M24>
+__launch_bounds__(512)
+__global__ void q6k_wave4_kernel(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                 int n_in, int n_out) {
+    extern __shared__ int4 s_w4_x4[];
+    const int x_stride = n_in / Q8K;
+    {
+        const int4* src = reinterpret_cast<const int4*>(xg);
+        for (int i = int(threadIdx.x), n4 = NCOLS * x_stride * 9 / 4; i < n4; i += int(blockDim.x)) s_w4_x4[i] = src[i];
+        __syncthreads();
+    }
+    const Q81Block* __restrict__ x = reinterpret_cast<const Q81Block*>(s_w4_x4);
+    const int lane = int(threadIdx.x) & 63, j = lane & 15;
+    const int row = (int(blockIdx.x) * int(blockDim.x >> 6) + (int(threadIdx.x) >> 6)) * 4 + (lane >> 4);
+    if (row >= n_out) return;   // (a whole 16-lane group: the shuffles below stay inside it)
+    const int bpr = n_in / 256;
+    const int iqs0 = 4 * (j & 7);
+    const int bq8_offset = 4 * (iqs0 / 16) + (iqs0 % 16) / 8;
+    const int scale_offset = 8 * (iqs0 / 16) + (iqs0 % 16) / 4;
+    const int vh_shift = 2 * ((iqs0 % 16) / 8);
+    float p[NCOLS][4] = {};
+    for (int kbx = j >> 3; kbx < bpr; kbx += 2) {
+        const Q6KBlock* b = w + std::size_t(row) * bpr + kbx;
+        int vl[4], vh[4];
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            vl[k] = load_int_b2(b->ql, iqs0 + k);
+            vh[k] = load_int_b2(b->qh, 8 * (iqs0 / 16) + iqs0 % 8 + k) >> vh_shift;
+        }
+        const float d = b->d;
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const Q81Block* xb = x + std::size_t(c) * x_stride + kbx * 8 + bq8_offset;
+            const float d8[2] = {__low2float(xb[0].ds), __low2float(xb[2].ds)};
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                const int u[2] = {reinterpret_cast<const int*>(xb[0].qs)[iqs0 % 8 + k],
+                                  reinterpret_cast<const int*>(xb[2].qs)[iqs0 % 8 + k]};
+                p[c][k] += q6_q8_dot_impl<M24>(vl[k], vh[k], u, b->scales + scale_offset, d, d8);
+            }
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < NCOLS; ++c) {
+#pragma unroll
+        for (int k = 0; k < 4; ++k)
+#pragma unroll
+            for (int off = 8; off > 0; off >>= 1) p[c][k] += strata_shfl_xor(p[c][k], off, 64);
+        if (j == 0) y[std::size_t(c) * n_out + row] = (p[c][0] + p[c][2]) + (p[c][1] + p[c][3]);
+    }
+}
+// #5033 switches (all opt-in):
+//   STRATA_MMVQ_XLDS=N   the wave kernel stages its activation columns in shared memory for calls of <= N columns
+//                        (16-byte aligned, <= 32 KB); bitwise the wave kernel
+//   STRATA_MMVQ_Q6X4=N   Q6_K calls of <= N columns through q6k_wave4_kernel, ahead of STRATA_MMVQ_IACC; bitwise the WAVE
+//                        kernel, so rounding-only against iacc.  NB #5033's "=1" means on for every T; here it is T = 1 only
+//                        (on the MI50 it beats iacc at T = 1 only, -10..-18%; mmvq_wave_rows_parity --bench)
+//   STRATA_MMVQ_IACC_XLDS=1|all|q6k,q4k,q5k  the same staging in the iacc layout below for those types; bitwise iacc
+// native_mmvq_set_wave_lds (tests): bit 0 XLDS, bit 1 Q6X4, bit 4 IACC_XLDS (all types), every column count; -1 = the env.
+struct WaveLds { int xl_t = 0, q6_t = 0, iacc = 0; };
+int g_wave_lds = -1;
+WaveLds wave_lds_env() {
+    WaveLds c;
+    const auto num = [](const char* n) { const char* v = std::getenv(n); return v ? std::atoi(v) : 0; };
+    c.xl_t = num("STRATA_MMVQ_XLDS");
+    c.q6_t = num("STRATA_MMVQ_Q6X4");
+    if (const char* v = std::getenv("STRATA_MMVQ_IACC_XLDS")) {
+        const std::string t(v);
+        if (t == "1" || t == "all") c.iacc = 7;
+        else c.iacc = (t.find("q6k") != std::string::npos ? 1 : 0) | (t.find("q4k") != std::string::npos ? 2 : 0) |
+                      (t.find("q5k") != std::string::npos ? 4 : 0);
+    }
+    return c;
+}
+WaveLds wave_lds() {
+    if (g_wave_lds >= 0) {
+        WaveLds c;
+        const int m = g_wave_lds;
+        c.xl_t = (m & 1) ? 16 : 0;
+        c.q6_t = (m & 2) ? 16 : 0;
+        c.iacc = (m & 16) ? 7 : 0;
+        return c;
+    }
+    static const WaveLds c = wave_lds_env();
+    return c;
+}
+bool xl_ok(const void* x, int n_in, int ncols, std::size_t& sm) {
+    sm = std::size_t(ncols) * (n_in / Q8K) * sizeof(Q81Block);
+    return (reinterpret_cast<std::uintptr_t>(x) & 15) == 0 && (n_in / Q8K * 9) % 4 == 0 && sm <= 32768;
+}
 template<typename F, int NCOLS, int R>
-void wave_launch_r(const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
+void wave_launch_r(const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s,
+                   std::size_t xl_bytes) {
     const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
     if constexpr (HasM24<F>::value) {
         if (mul24_on()) {
-            native_mmvq_wave_kernel<Mul24<F>, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+            if (xl_bytes) native_mmvq_wave_kernel<Mul24<F>, NCOLS, R, true><<<blocks, 256, xl_bytes, s>>>(w, x, y, n_in, n_out);
+            else native_mmvq_wave_kernel<Mul24<F>, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
             return;
         }
     }
-    native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+    if (xl_bytes) native_mmvq_wave_kernel<F, NCOLS, R, true><<<blocks, 256, xl_bytes, s>>>(w, x, y, n_in, n_out);
+    else native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
 }
 template<typename F, int NCOLS>
 void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const WaveLds c = wave_lds();
+    std::size_t sm = 0;
+    const bool x4 = std::is_same_v<F, Q6KTraits> && NCOLS <= c.q6_t;
+    const bool ok = (x4 || NCOLS <= c.xl_t) && xl_ok(x, n_in, NCOLS, sm);
+    if constexpr (std::is_same_v<F, Q6KTraits>) {
+        if (x4 && ok) {   // the four-lane kernel (it needs the staged activations)
+            const unsigned blocks4 = unsigned((std::size_t(n_out) + 15) / 16);
+            if (mul24_on()) q6k_wave4_kernel<NCOLS, true><<<blocks4, 256, sm, s>>>(w, x, y, n_in, n_out);
+            else q6k_wave4_kernel<NCOLS, false><<<blocks4, 256, sm, s>>>(w, x, y, n_in, n_out);
+            return;
+        }
+    }
+    const std::size_t xl_bytes = ok && NCOLS <= c.xl_t ? sm : 0;   // the wave kernel stages only under XLDS
     if constexpr (std::is_same_v<F, Q6KTraits> && NCOLS >= 2) {
-        if (n_out >= 10240 && q6k_r4_on()) { wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s); return; }
+        if (n_out >= 10240 && q6k_r4_on()) { wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s, xl_bytes); return; }
     }
     switch (wave_rows()) {
-        case 2: wave_launch_r<F, NCOLS, 2>(w, x, y, n_in, n_out, s); break;
-        case 4: wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s); break;
-        default: wave_launch_r<F, NCOLS, 1>(w, x, y, n_in, n_out, s); break;
+        case 2: wave_launch_r<F, NCOLS, 2>(w, x, y, n_in, n_out, s, xl_bytes); break;
+        case 4: wave_launch_r<F, NCOLS, 4>(w, x, y, n_in, n_out, s, xl_bytes); break;
+        default: wave_launch_r<F, NCOLS, 1>(w, x, y, n_in, n_out, s, xl_bytes); break;
     }
 }
 // ---- exp/iacc STRATA_MMVQ_IACC (default off): a second wave64 layout for the K-quant matrix-vector products that keeps
@@ -2565,6 +2687,7 @@ struct IaccLane { unsigned o0, o1, o2; int s0, s1; unsigned xq, xd; };
 template<int K> struct IaccRaw6 { int a[K], b[K]; int s, d; };
 template<int K>
 struct IaccQ6K {
+    static constexpr int MASK = 1;   // STRATA_MMVQ_IACC / IACC_XLDS bit
     static constexpr unsigned BYTES = 210;
     static constexpr bool SUMU = false;
     using Raw = IaccRaw6<K>;
@@ -2611,6 +2734,7 @@ __device__ __forceinline__ void iacc_scale_min(const int (&w3)[3], int s, int& d
 template<int K> struct IaccRawK { int a[K], b[K]; int sc[3]; int dm; };
 template<bool Q5, int K>
 struct IaccQ45K {
+    static constexpr int MASK = Q5 ? 4 : 2;   // STRATA_MMVQ_IACC / IACC_XLDS bit
     static constexpr unsigned BYTES = Q5 ? 176 : 144;
     static constexpr bool SUMU = true;
     using Raw = IaccRawK<K>;
@@ -2727,16 +2851,26 @@ __device__ __forceinline__ float iacc_wave_sum(float v) {
     v += iacc_dpp<0x143, 0xc>(v);   // row_bcast31: rows 2, 3 += lane 31 -> lane 63 holds the total
     return v;
 }
-template<template<int> class P, int K, int NCOLS, int R>
+// XL (STRATA_MMVQ_IACC_XLDS=1, #5033's activation staging applied to this layout): the NCOLS activation rows copied
+// into shared memory first; the same values, so the same sums.
+template<template<int> class P, int K, int NCOLS, int R, bool XL = false>
 __launch_bounds__(256)
-__global__ void native_mmvq_iacc_kernel(const uint8_t* __restrict__ w, const Q81Block* __restrict__ x,
+__global__ void native_mmvq_iacc_kernel(const uint8_t* __restrict__ w, const Q81Block* __restrict__ xg,
                                         float* __restrict__ y, int n_in, int n_out) {
+    const int x_stride = n_in / Q8K;
+    const Q81Block* __restrict__ x = xg;
+    if constexpr (XL) {
+        extern __shared__ int4 s_iacc_x4[];
+        const int4* src = reinterpret_cast<const int4*>(xg);
+        for (int i = int(threadIdx.x), n4 = NCOLS * x_stride * 9 / 4; i < n4; i += int(blockDim.x)) s_iacc_x4[i] = src[i];
+        __syncthreads();
+        x = reinterpret_cast<const Q81Block*>(s_iacc_x4);
+    }
     const int lane = int(threadIdx.x) & 63;
     const int wave = __builtin_amdgcn_readfirstlane(int(threadIdx.x) >> 6);
     const int row0 = (int(blockIdx.x) * 4 + wave) * R;
     if (row0 >= n_out) return;
     const int bpr = n_in / QK;
-    const int x_stride = n_in / Q8K;
     float acc[NCOLS][R] = {};
     if (row0 + R <= n_out) iacc_rows_dot<P, K, NCOLS, R, false>(w, x, acc, row0, n_out, bpr, x_stride, lane);
     else iacc_rows_dot<P, K, NCOLS, R, true>(w, x, acc, row0, n_out, bpr, x_stride, lane);
@@ -2759,8 +2893,13 @@ int iacc_k(int bpr) {
 template<template<int> class P, int K, int NCOLS, int R>
 void iacc_launch_r(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
     const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
-    native_mmvq_iacc_kernel<P, K, NCOLS, R><<<blocks, 256, 0, s>>>(static_cast<const uint8_t*>(w),
-                                                                  static_cast<const Q81Block*>(x), y, n_in, n_out);
+    std::size_t sm = 0;
+    if ((wave_lds().iacc & P<K>::MASK) && xl_ok(x, n_in, NCOLS, sm))
+        native_mmvq_iacc_kernel<P, K, NCOLS, R, true><<<blocks, 256, sm, s>>>(static_cast<const uint8_t*>(w),
+                                                                            static_cast<const Q81Block*>(x), y, n_in, n_out);
+    else
+        native_mmvq_iacc_kernel<P, K, NCOLS, R><<<blocks, 256, 0, s>>>(static_cast<const uint8_t*>(w),
+                                                                      static_cast<const Q81Block*>(x), y, n_in, n_out);
 }
 template<template<int> class P, int K, int NCOLS>
 void iacc_launch_n(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
@@ -2794,6 +2933,8 @@ template<typename F>
 bool iacc_try(const void* w, const void* x, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
     const int m = iacc_mask();
     if (m == 0 || ncols > 8) return false;   // its kernels take 1..8 columns; the wave kernel goes to 16 (VERIFY_MAX_T > 8)
+    // #5033's four-lane kernel (STRATA_MMVQ_Q6X4) takes Q6_K ahead of this layout
+    if constexpr (std::is_same_v<F, Q6KTraits>) { if (ncols <= wave_lds().q6_t) return false; }
     if constexpr (std::is_same_v<F, Q6KTraits>) { if (m & 1) { iacc_launch<IaccQ6K>(w, x, y, n_in, n_out, ncols, s); return true; } }
     if constexpr (std::is_same_v<F, Q4KTraits>) { if (m & 2) { iacc_launch<IaccQ4K>(w, x, y, n_in, n_out, ncols, s); return true; } }
     if constexpr (std::is_same_v<F, Q5KTraits>) { if (m & 4) { iacc_launch<IaccQ5K>(w, x, y, n_in, n_out, ncols, s); return true; } }
@@ -3471,10 +3612,12 @@ void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
 void native_mmvq_set_wave_rows(int rows) { g_wave_rows = rows == 1 || rows == 2 || rows == 4 ? rows : 0; }
 void native_mmvq_set_mul24(int on) { g_mul24 = on; }
 void native_mmvq_set_q6k_r4(int on) { g_q6k_r4 = on; }
+void native_mmvq_set_wave_lds(int mode) { g_wave_lds = mode; }
 void native_mmvq_set_iacc(int mask, int rows, int k) { g_iacc = mask; g_iacc_rows = rows == 1 || rows == 2 || rows == 4 ? rows : 0; g_iacc_k = k; }
 #else
 void native_mmvq_set_mul24(int) {}
 void native_mmvq_set_q6k_r4(int) {}
+void native_mmvq_set_wave_lds(int) {}
 void native_mmvq_set_wave_rows(int) {}
 void native_mmvq_set_iacc(int, int, int) {}
 #endif
