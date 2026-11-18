@@ -66,6 +66,7 @@ The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 | rocktboy1982 | `WAIT_FUSE` | N | Its plan-wait half is this fork's `FUSE_WAIT=2` (neutral); `FUSE_WAIT=1` is neutral too (GPU wait +1.6%). Its combine half needs a CPU combine path this fork doesn't have. |
 | bsorensen110 | 8-token CPU expert down rows (this fork's analogue: `CPU_DOWN_NR8=1`, IQ4_NL and Q2_0) | N, exact | The 5–8-token rows are 10–19% faster in a microbench (Q2_0 at 8 tokens 2% slower), but decode is flat: the CPU experts finish while the GPU still works. |
 | bsorensen110 | MMVF rows for the 1-token BF16 GEMVs outside the router | X | The kernel they speed up takes ~0.085 ms a window here (a traced count), so even halving it is ~0.15%. |
+| cassettesgoboom `main` | the whole fork (`rebased/cassettesgoboom`, carried until 2026-11-18): watchdog release registry, verifier window-state refactor, opt-in `CORRECTNESS_TRACE`, batch transaction scaffold, parity/CI tooling | N, bitwise | Removing it changed nothing: same ms/window, decode, prefill and first-pass output (2026-11-18). Upstream has the gfx906 build itself, and the fork moved to a fresh branch on upstream v0.2.10 that carries none of this code. |
 
 ## Engine switches
 
