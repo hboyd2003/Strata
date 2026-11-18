@@ -121,7 +121,6 @@ Upstream switches and my own experiments that are in the code but left off.
 | `ADAPT_CU_MASK` (own: the expert-refill stream on 4 or 8 CUs only) | N, exact | The adapt wait drops 0.23 ms and the draft step grows 0.30 ms: the wait just moves. |
 | `GR_UP_W2` (own: hc `up` at 2 waves per SIMD) | H, exact | It spills at every token count. |
 | `OLD_Q80_SCALED=1`, `IL_PAD=0`, `AMD_COMMUNITY_TUNING=0`, `QSA_FUSE_GATE=0`, `PA_RPF=0`, `DRAFT_KEEP=0`, `MTP_KEEP=1` (off switches for upstream's 2026-11 defaults) | N | Each alone was speed-neutral; the defaults stay. |
-| `MULTI_BLOCK_ARGMAX=1` (own port: multi-block draft argmax and top-prob kernels, compiled out on gfx906 before) | on hold, bitwise | ms/window −0.9%, verify head stage −7.6%, drafter argmax step 0.079 → 0.031 ms; decode tok/s inside the noise. |
 | `PREFILL_COPY_WAIT_DEDUPE=1` (+ `PREFILL_COPY_EVENT_EVERY=4`) | N | The dedupe ran and changed nothing measurable; with `EVENT_EVERY=4` the follow-up turn was 3% slower. |
 | `KV_GROW_HOLD=1` | N | Keeps the K/V at the parked conversation's size, so the next short request gets fewer expert slots (the first short prompt after a 32K read was slower, one sample). |
 | `hipEventDisableSystemFence` on the fork/join events, non-coherent mapped memory for CPU-expert rows | X | Microbenches: in a captured graph the events are free with any flag; the mapped reads are bound by PCIe (~25 GB/s) either way. |
