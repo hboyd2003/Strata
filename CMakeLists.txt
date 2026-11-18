@@ -109,6 +109,12 @@ option(STRATA_PREFILL_MMQ "Build the optional GGML MMQ prefill path for HIP (onl
 # of its own rather than STRATA_PREFILL_MMQ for CUDA: every CUDA build folder configured before has STRATA_PREFILL_MMQ=OFF in its cache.
 # A build folder configured before the default changed keeps STRATA_MMQ=ON in its cache: setup and the packaging scripts pass the value.
 # -DSTRATA_MMQ=ON builds the old path (for A/B runs).
+# gfx906 fork: the gfx906 prompt path (janus-reith's STRATA_PF_RP / STRATA_DENSE_MMQ / STRATA_MMQ_KQ / STRATA_DENSE_RP, on by default
+# there) is built on llama.cpp's MMQ, and rp_moe.cu is part of strata_mmq, so a gfx906 build keeps MMQ unless -DSTRATA_MMQ=OFF is given
+# (an MMQ-off gfx906 build does not link yet).  A cache entry ahead of the option leaves upstream's OFF default for every other build.
+if(STRATA_HIP_GFX906 AND NOT DEFINED CACHE{STRATA_MMQ})
+  set(STRATA_MMQ ON CACHE BOOL "Build llama.cpp's MMQ prompt kernels (CUDA; HIP together with STRATA_PREFILL_MMQ)")
+endif()
 option(STRATA_MMQ "Build llama.cpp's MMQ prompt kernels (CUDA; HIP together with STRATA_PREFILL_MMQ)" OFF)
 # The community-made AMD changes (include/strata/core/amd_community.hpp): on by default.  This option is the build half of the one
 # switch STRATA_AMD_COMMUNITY_TUNING: OFF compiles the portable signed-byte dot for gfx1010 again (the SDWA sequence of #4855).
