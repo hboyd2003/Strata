@@ -19,6 +19,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/backends/cpu.cmake)         # strata_k
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/backends/quant.cmake)       # strata_quant: the Strata quant layer (no ggml) and its oracle tests
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/backends/cuda.cmake)        # NVIDIA: toolchain, Strata's prompt kernels (strata_pf_own)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/backends/hip.cmake)         # AMD: gfx906 compat, Strata's prompt kernels on HIP
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/backends/gfx906_mmq.cmake)  # gfx906 fork: llama.cpp's MMQ prompt kernels (HIP gfx906 only)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/strata_gpu_engine.cmake)    # the GPU engine both of them build
 # EXPERIMENTAL: the Intel Arc engine, the SYCL port in sycl/ (PR #423; icpx + oneMKL, docs/INTEL_ARC.md). It is its
 # own project that takes the unported sources from src/; with this on, nothing below is configured.
@@ -727,7 +728,7 @@ if(STRATA_NATIVE_EXPERTS)
   enable_language(C)
   # ggml-base / ggml-cpu only where something links them: the tests (ggml as the oracle) and the ggml-cpu pool (STRATA_OWN_CPU_QUANT=OFF).
   # A release engine (tests off, Strata's own pool) configures, builds and links no ggml; the ggml tools below exist only with it.
-  if(STRATA_BUILD_TESTS OR NOT STRATA_OWN_CPU_QUANT)
+  if(STRATA_BUILD_TESTS OR NOT STRATA_OWN_CPU_QUANT OR STRATA_MMQ)   # (gfx906 fork: its MMQ links ggml-base)
     strata_ggml_configure_root()
   else()
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)   # (what strata_ggml_configure_root sets for the whole project)
@@ -736,7 +737,11 @@ if(STRATA_NATIVE_EXPERTS)
   strata_cpu_native_experts()
   strata_quant_layer()
   if(STRATA_ENABLE_CUDA)
-    strata_cuda_pf_own()   # Strata's own prompt kernels
+    if(STRATA_MMQ)
+      strata_gfx906_mmq()   # gfx906 fork: llama.cpp's MMQ + Strata's own prompt kernels (cmake/backends/gfx906_mmq.cmake)
+    else()
+      strata_cuda_pf_own()   # Strata's own prompt kernels
+    endif()
   elseif(STRATA_ENABLE_HIP)
     strata_hip_pf_own()
   endif()

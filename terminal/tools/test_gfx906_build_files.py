@@ -36,7 +36,20 @@ class Gfx906CMake(unittest.TestCase):
         self.assertIn("target_sources(strata_pf_own PRIVATE src/prefill/moe_p1a.cu)", block)
         tail = HIP_TEXT[HIP_TEXT.index("# HIP gfx906: every CUDA source"):]
         self.assertIn("set_source_files_properties(${_strata_cu} PROPERTIES LANGUAGE HIP)", tail)
-        self.assertNotIn("strata_mmq", TEXT.replace("strata_mmq_ids", ""))
+        # gfx906 fork: llama.cpp's MMQ lives on only in cmake/backends/gfx906_mmq.cmake (STRATA_MMQ, gfx906 builds only)
+        rest = "\n".join(p.read_text(encoding="utf-8") for p in [ROOT.parent / "engine" / "CMakeLists.txt", *sorted((ROOT.parent / "engine" / "cmake").glob("*.cmake")),
+                          *sorted((ROOT.parent / "engine" / "cmake" / "backends").glob("*.cmake"))] if p.name != "gfx906_mmq.cmake")
+        self.assertNotIn("strata_mmq", rest.replace("strata_mmq_ids", ""))
+
+    def test_the_fork_mmq_is_gfx906_only(self):
+        # gfx906 fork: STRATA_MMQ defaults to STRATA_HIP_GFX906, refuses any other build, and replaces strata_pf_own's no-MMQ stubs
+        text = (ROOT.parent / "engine" / "cmake" / "backends" / "gfx906_mmq.cmake").read_text(encoding="utf-8")
+        self.assertIn("${STRATA_HIP_GFX906})", text)
+        self.assertIn("STRATA_MMQ AND NOT STRATA_HIP_GFX906", text)
+        own = text.split("set(_strata_pf_own_sources")[1].split(")")[0]
+        self.assertIn("moe_fused_iq.cu", own)
+        self.assertNotIn("mmq_absent.cpp", own)
+        self.assertIn("strata_gfx906_mmq()", TEXT)
 
 if __name__ == "__main__":
     unittest.main()
