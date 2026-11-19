@@ -2,7 +2,7 @@
 # (https://github.com/mixa3607/ML-gfx906: TheRock ROCm with the gfx906 rocBLAS / hipBLAS kernels that AMD's own releases no
 # longer ship). The context is the repository root:
 #
-#   docker build -f docker/gfx906/Dockerfile --build-arg STRATA_COMMIT=$(git rev-parse HEAD) -t strata-gfx906:local .
+#   docker build -f tools/docker/gfx906/Dockerfile --build-arg STRATA_COMMIT=$(git rev-parse HEAD) -t strata-gfx906:local .
 #
 # The image keeps the layout of the fork's published images (cassettesgoboom/strata-gfx906): the API server is the
 # entrypoint and starts the engine from a prepared config, nothing is downloaded or set up at start.
@@ -34,27 +34,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-# cmake and ninja at the versions requirements-build.txt pins (Ubuntu's are older)
-RUN python3 -m venv /buildenv && /buildenv/bin/pip install --no-cache-dir -r requirements.txt -r requirements-build.txt
+# cmake and ninja at the versions terminal/requirements-build.txt pins (Ubuntu's are older)
+RUN python3 -m venv /buildenv && /buildenv/bin/pip install --no-cache-dir -r terminal/requirements.txt -r terminal/requirements-build.txt
 ENV PATH=/buildenv/bin:$PATH
-# ggml comes from the vendored third_party/strata-ggml, the picture readers from third_party/strata-llama (llama, mtmd, ggml at the
-# pin) and gguf-py from third_party/strata-gguf-py: nothing is downloaded (upstream 463940282)
+# 0.2.16 layout: the engine is the CMake project in engine/, the server and tools are terminal/. ggml comes from the vendored
+# engine/third_party/strata-ggml (llama.cpp's MMQ for gfx906 from engine/third_party/gfx906-mmq), gguf-py from
+# engine/third_party/strata-gguf-py, and strata-vision is Strata's own reader (terminal/tools/vision): nothing is downloaded
 # extra HIP compiler flags for the engine and the GPU picture reader (empty: none), e.g. "-mllvm -amdgpu-sched-strategy=max-ilp"
 ARG CMAKE_HIP_FLAGS=
 ARG STRATA_PORTABLE=OFF
 ARG ENGINE_TOOLS="strata-concurrent strata-dequant strata-device strata-gguf strata-load strata-overlap strata-plan strata-q36ref tune_rocblas"
 RUN set -e; \
-    cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
+    cmake -G Ninja -S engine -B build -DCMAKE_BUILD_TYPE=Release \
         -DSTRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
         -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE}; \
     cmake --build build --target strata $ENGINE_TOOLS -j "$(nproc)"
 RUN set -e; \
-    cmake -G Ninja -S tools/vision -B build-vision -DCMAKE_BUILD_TYPE=Release \
+    cmake -G Ninja -S terminal/tools/vision -B build-vision -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
         -DSTRATA_VISION_CUDA=OFF -DSTRATA_PORTABLE=${STRATA_PORTABLE}; \
     cmake --build build-vision --target strata-vision -j "$(nproc)"; \
-    cmake -G Ninja -S tools/vision -B build-vision-hip -DCMAKE_BUILD_TYPE=Release \
+    cmake -G Ninja -S terminal/tools/vision -B build-vision-hip -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
         -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" -DCMAKE_HIP_COMPILER_ROCM_ROOT="$ROCM_PATH" \
         -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DCMAKE_HIP_ARCHITECTURES=gfx906 "-DCMAKE_HIP_FLAGS=${CMAKE_HIP_FLAGS}" \
@@ -67,7 +68,7 @@ RUN set -e; \
     for t in $ENGINE_TOOLS; do cp "build/$t" /out/bin/; done; \
     cp build-vision/bin/strata-vision /out/bin/strata-vision; \
     cp build-vision-hip/bin/strata-vision-hip /out/bin/; \
-    python3 -c "import json, setup; print(json.dumps({'source': 'docker build', 'backend': 'hip', 'version': setup.source_version(), 'archs': ['gfx906'], 'vision': 'gpu', 'vision_archs': ['gfx906'], 'vision_gpu': setup.HVEXE, 'vision_cpu': setup.VEXE, 'lib_dirs': ['/opt/rocm/lib'], 'portable': '${STRATA_PORTABLE}' == 'ON', 'src': setup.source_hash(setup.ENGINE_SOURCES), 'vision_src': setup.source_hash(setup.VISION_SOURCES)}, indent=1))" \
+    cd terminal && python3 -c "import json, setup; print(json.dumps({'source': 'docker build', 'backend': 'hip', 'version': setup.source_version(), 'archs': ['gfx906'], 'vision': 'gpu', 'vision_archs': ['gfx906'], 'vision_gpu': setup.HVEXE, 'vision_cpu': setup.VEXE, 'lib_dirs': ['/opt/rocm/lib'], 'portable': '${STRATA_PORTABLE}' == 'ON', 'src': setup.source_hash(setup.ENGINE_SOURCES), 'vision_src': setup.source_hash(setup.VISION_SOURCES)}, indent=1))" \
         > /out/bin/BUILD.json; \
     cat /out/bin/BUILD.json
 
@@ -83,19 +84,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # search; only that library is linked in, not the whole LLVM directory
 RUN ln -sf /opt/rocm/llvm/lib/libomp.so /usr/local/lib/libomp.so && ldconfig
 WORKDIR /opt/strata
-COPY --from=build /src/setup.py /src/strata.py /src/LICENSE /src/README.md /opt/strata/
-COPY --from=build /src/requirements.txt /src/requirements-build.txt /src/requirements-monitor.txt \
-     /src/requirements-nvfp4-local.txt /opt/strata/
-COPY --from=build /src/serve /opt/strata/serve
-COPY --from=build /src/tools /opt/strata/tools
-COPY --from=build /src/data /opt/strata/data
-COPY --from=build /src/ref /opt/strata/ref
-COPY --from=build /src/packaging /opt/strata/packaging
-COPY --from=build /src/strata_control /opt/strata/strata_control
-COPY --from=build /src/strata_cli /opt/strata/strata_cli
-COPY --from=build /src/third_party /opt/strata/third_party
+# (0.2.16 layout: terminal/ holds what /opt/strata held before, so the image's paths stay the same)
+COPY --from=build /src/terminal/setup.py /src/terminal/strata.py /src/LICENSE /src/README.md /opt/strata/
+COPY --from=build /src/terminal/requirements.txt /src/terminal/requirements-build.txt /src/terminal/requirements-monitor.txt \
+     /src/terminal/requirements-nvfp4-local.txt /opt/strata/
+COPY --from=build /src/terminal/serve /opt/strata/serve
+COPY --from=build /src/terminal/tools /opt/strata/tools
+COPY --from=build /src/terminal/data /opt/strata/data
+COPY --from=build /src/terminal/ref /opt/strata/ref
+COPY --from=build /src/tools/packaging /opt/strata/packaging
+COPY --from=build /src/terminal/strata_control /opt/strata/strata_control
+COPY --from=build /src/terminal/strata_cli /opt/strata/strata_cli
+COPY --from=build /src/engine/third_party /opt/strata/third_party
 COPY --from=build /src/benchmarks/gfx906 /opt/strata/benchmarks/gfx906
-COPY --from=build /src/tests/gfx906 /opt/strata/tests/gfx906
+COPY --from=build /src/terminal/tests/gfx906 /opt/strata/tests/gfx906
 COPY --from=build /out/bin/ /usr/local/bin/
 # the server and tools, the monitor's terminal UI, and the NVFP4 checkpoint converter with PyTorch's CPU build (it runs on the
 # CPU; the default CUDA wheels would add several GB this image cannot use)

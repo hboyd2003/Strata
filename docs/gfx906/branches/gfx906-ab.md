@@ -1,6 +1,6 @@
 # `gfx906/ab`
 
-The benchmark harness every change in this fork was measured with: `bench/gfx906/ab.py`. Own branch on upstream.
+The benchmark harness every change in this fork was measured with: `terminal/bench/gfx906/ab.py`. Own branch on upstream.
 
 It talks to a running Strata server over its API (and, optionally, reads the engine log), so it works with any build
 and config. It never restarts or reconfigures the server: to compare two configs, run it once on each and compare.
@@ -8,7 +8,7 @@ and config. It never restarts or reconfigures the server: to compare two configs
 ## The standard suite
 
 ```bash
-python3 bench/gfx906/ab.py run results/mine
+python3 terminal/bench/gfx906/ab.py run results/mine
 ```
 
 That is the **standard** suite, the one to share (its `results.json` says `"suite": "standard"`). Every request is
@@ -64,7 +64,7 @@ per-GPU-stage times of the GDN and QSA layers. The profiler slows decode, so don
 ## Comparing
 
 ```bash
-python3 bench/gfx906/ab.py compare results/base results/new results/base-again -o compare.md
+python3 terminal/bench/gfx906/ab.py compare results/base results/new results/base-again -o compare.md
 ```
 
 One table of every metric with % deltas against the first run, and whether each run's first-pass answers match the

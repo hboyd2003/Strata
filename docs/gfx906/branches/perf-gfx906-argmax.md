@@ -14,7 +14,7 @@ Builds upstream's multi-block head pick (`argmax_rows`) and top-probability (`ro
 | --- | --- | --- | --- |
 | `STRATA_MULTI_BLOCK_ARGMAX=1` | the multi-block head pick and top probability on gfx906 (`0` = off) | on | exact (bitwise) |
 
-## Measured (MI50, Qwen3.8-Flash-Next IQ3_S, `bench/gfx906/ab.py` standard suite, 3 reps)
+## Measured (MI50, Qwen3.8-Flash-Next IQ3_S, `terminal/bench/gfx906/ab.py` standard suite, 3 reps)
 
 | | off | on |
 | --- | ---: | ---: |

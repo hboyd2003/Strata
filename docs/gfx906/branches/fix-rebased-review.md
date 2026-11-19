@@ -19,7 +19,7 @@ None of these touch the MI50's production path except the auto-session ones (pro
   That file is spared now.
 - `/slots/0` refuses `auto-*` names while auto sessions are on, since the prune would delete them.
 - A save or restore that kills the engine is still logged, and the engine now restarts before the request runs.
-- Tests: `serve/test_auto_sessions.py`.
+- Tests: `terminal/serve/test_auto_sessions.py`.
 
 ## Session restore (PR #3251)
 

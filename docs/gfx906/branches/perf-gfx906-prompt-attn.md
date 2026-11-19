@@ -28,6 +28,6 @@ A/B on one MI50 with production's other switches on, two arms per variant (harne
 
 Draft acceptance is unchanged (0.68, 0.68 against 0.68, 0.69). Decode ms per window is flat. The first prompt's answer hash stays the same and the other six change.
 
-Component probe (2048 queries, `bench/gfx906_qsa_prompt_attn_probe`): 35.04 to 31.39 ms at 32K (1.116x), 35.56 to 32.10 ms at 131K (1.108x). With `STRATA_ATTN_MERGE_V2` off it reads 1.146x and 1.136x, so production's faster merge already takes a little of the gain. pfandl's own record measures the attention phase at −10..−13%; the harness here has no prefill phase table.
+Component probe (2048 queries, `engine/bench/gfx906_qsa_prompt_attn_probe`): 35.04 to 31.39 ms at 32K (1.116x), 35.56 to 32.10 ms at 131K (1.108x). With `STRATA_ATTN_MERGE_V2` off it reads 1.146x and 1.136x, so production's faster merge already takes a little of the gain. pfandl's own record measures the attention phase at −10..−13%; the harness here has no prefill phase table.
 
 The probe alone isn't enough: pfandl's first version passed it and failed in the engine (top-1 80%), because it read the selection width per call rather than per query. Compare engine output when changing this kernel.

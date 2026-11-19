@@ -15,7 +15,7 @@ On gfx906 a CUDA warp shuffle becomes HIP's `__shfl_xor`: one `ds_bpermute` thro
 it, per butterfly step. Every warp and wave sum in the engine is a dependent chain of five or six of these, and most
 decode kernels are small and latency bound, so the chain shows up in nearly every stage.
 
-**DPP_SHFL** (`include/strata/platform/hip_compat/strata_hip.h`) maps `__shfl_xor_sync` and the gfx906 kernels' own
+**DPP_SHFL** (`engine/include/strata/platform/hip_compat/strata_hip.h`) maps `__shfl_xor_sync` and the gfx906 kernels' own
 `__shfl_xor` calls. When the lane mask is a compile-time constant below the width (the unrolled butterflies), each step
 reads exactly lane ^ m, for any data:
 

@@ -8,7 +8,7 @@ nothing was kept unless it made that machine faster (see the warning in the [REA
 - [Releases](https://github.com/hboyd2003/Strata/releases): tagged `v<upstream>+<fork>-gfx906`, with a Docker image each
   ([how they work](maintenance.md#releases))
 - [branches/gfx906-ab.md](branches/gfx906-ab.md): the benchmark harness every number here was measured with
-  (`bench/gfx906/ab.py`). Run its standard suite on your machine and compare with ours.
+  (`terminal/bench/gfx906/ab.py`). Run its standard suite on your machine and compare with ours.
 - [tested.md](tested.md): what was tried and **not** kept (forks, upstream PRs, switches, tuning), with numbers
 - [branches/](branches/): one page per custom branch, written on that branch (what it does, its switches, its A/B);
   the table at the bottom links each one
@@ -25,7 +25,7 @@ Numbers below are as of 2026-11-08, unless a line gives its own date.
 | GPU link | PCIe 4.0 x16, 16 GT/s (through a riser, zero AER errors) |
 | CPU | AMD Ryzen 9 7945HX, 16 cores / 32 threads |
 | RAM | 64 GiB DDR5 (2 GiB of it is carved out for the CPU's integrated GPU) |
-| Software | built and run in the `mixa3607/rocm-gfx906` ROCm image (the fork's `docker/gfx906/Dockerfile`) |
+| Software | built and run in the `mixa3607/rocm-gfx906` ROCm image (the fork's `tools/docker/gfx906/Dockerfile`) |
 
 Things about this card that shaped the work:
 
@@ -98,7 +98,7 @@ All names take the `STRATA_` prefix. "Exact" means the greedy output hashes did 
 means the order of floating-point sums changed and nothing else. Nothing that lowers precision below
 what the quant already has (for example a 4-bit KV cache) is used.
 
-**Speed** (measured with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), release `v0.2.13+0.5-gfx906` on 2026-11-12): about 94 tok/s
+**Speed** (measured with [`terminal/bench/gfx906/ab.py`](branches/gfx906-ab.md), release `v0.2.13+0.5-gfx906` on 2026-11-12): about 94 tok/s
 decode on short prompts and 87 tok/s at ~32K context. Prompt reading: ~724 tok/s at 4K, ~822 tok/s at 16K, ~800 tok/s on a 32K
 document, ~599 tok/s for a follow-up turn on an 18K-token cached conversation. On real agent traffic (the last 100 requests on 2026-10-30: context median
 144K tokens, p90 185K, ~730 new tokens a turn) decode is 82 tok/s median with 0.74 draft acceptance, and prompt
@@ -143,7 +143,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/gfx906-steddyman`](branches/perf-gfx906-steddyman.md) | from steddyman/Strata | gfx906 lane-group dense GEMVs (Q6_K / Q4_K / Q5_K / IQ4_XS) and a whole-block IQ4_NL expert down, −3.0% ms per window |
 | [`perf/gfx906-argmax`](branches/perf-gfx906-argmax.md) | own | upstream's multi-block head pick and top-probability kernels built for gfx906, −0.9% ms per window, output head −7.6% |
 | [`gfx906/layout-0216`](branches/gfx906-layout-0216.md) | own | the fork's build and release tooling on upstream's 0.2.16 layout, gfx906 build fixes for later upstream code, Inkling-2-Mini off on gfx906 |
-| [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
+| [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `terminal/bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
 

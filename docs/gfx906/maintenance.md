@@ -80,7 +80,7 @@ Every candidate (an upstream PR, a commit from another fork, or my own idea) goe
    first test (`argmax_rows` is not built for gfx906), so its later tests (the MTP multi-copy, the scaled q8_0
    quantize) never run here, and `mmvq_il_parity` is CUDA-only. Changes to those paths are checked with the A/B's
    output hashes instead.
-5. **A/B** with [`bench/gfx906/ab.py`](branches/gfx906-ab.md), against the running build, with a repeat of the
+5. **A/B** with [`terminal/bench/gfx906/ab.py`](branches/gfx906-ab.md), against the running build, with a repeat of the
    base as a noise control: decode tok/s and ms per window, every decode stage, prefill at several lengths,
    long-context turns where relevant, and the greedy output hashes. On the box a small wrapper restarts the server
    with each variant's config and runs the harness. (Before 2026-10-30 the harness and the restarts were one in-house
