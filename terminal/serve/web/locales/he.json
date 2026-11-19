@@ -272,6 +272,7 @@
   "toast.requestFailed": "הבקשה נכשלה",
   "tool.arguments": "ארגומנטים",
   "tool.beingWritten": "(בכתיבה)",
+  "tool.called": "נקרא",
   "tool.chars": "{n} תווים",
   "tool.cut": ", קוצר עבור המודל",
   "tool.done": "הסתיים",
