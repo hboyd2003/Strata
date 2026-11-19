@@ -65,7 +65,9 @@ from statistics import mean
 TOOL_VERSION = 3   # 3: long_ctx after all decode reps, ~900-token answer; 2: the eight-prompt decode set with long_ctx
                    # inside each rep, ~300-token answer; 1: three prompts
 CORPUS_REV = "870aedd9e1ebe1c91f94da93b59af17729f6c5c0"   # upstream Strata v0.2.8: the prompts' source text
-REPO = Path(__file__).resolve().parents[2]
+# the repository root (terminal/bench/gfx906/ab.py since upstream's 0.2.16 layout; bench/gfx906/ab.py before): git reads the corpus
+# at CORPUS_REV by root-relative paths, and `git -C <subfolder> ls-tree` would list that subfolder only (an empty corpus)
+REPO = next((p for p in Path(__file__).resolve().parents if (p / ".git").exists()), Path(__file__).resolve().parents[3])
 CODE_FIX = '''def merge_intervals(intervals):
     """Merge overlapping [start, end] intervals."""
     intervals.sort()
@@ -124,6 +126,8 @@ class Corpus:
                          "main with its history, or pass --source DIR (results are then not comparable)")
             ls = names.stdout.split()
             self._files = [(p[4:], p) for p in sorted(x for x in ls if x.endswith(".cpp")) + sorted(x for x in ls if x.endswith(".cu"))]
+            if not self._files:   # (a git run from the wrong folder lists nothing: never measure on an empty corpus)
+                sys.exit(f"no src/*.cpp / *.cu at {CORPUS_REV[:8]} in {REPO}: the prompts' text would be empty")
         self._cache, self._text = {}, ""
 
     def _read(self, f):
