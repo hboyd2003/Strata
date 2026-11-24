@@ -67,6 +67,9 @@ The base moved from ~59 to ~83 tok/s over the period, so compare within a row.
 | bsorensen110 | 8-token CPU expert down rows (this fork's analogue: `CPU_DOWN_NR8=1`, IQ4_NL and Q2_0) | N, exact | The 5–8-token rows are 10–19% faster in a microbench (Q2_0 at 8 tokens 2% slower), but decode is flat: the CPU experts finish while the GPU still works. |
 | bsorensen110 | MMVF rows for the 1-token BF16 GEMVs outside the router | X | The kernel they speed up takes ~0.085 ms a window here (a traced count), so even halving it is ~0.15%. |
 | cassettesgoboom `main` | the whole fork (`rebased/cassettesgoboom`, carried until 2026-11-18): watchdog release registry, verifier window-state refactor, opt-in `CORRECTNESS_TRACE`, batch transaction scaffold, parity/CI tooling | N, bitwise | Removing it changed nothing: same ms/window, decode, prefill and first-pass output (2026-11-18). Upstream has the gfx906 build itself, and the fork moved to a fresh branch on upstream v0.2.10 that carries none of this code. |
+| upstream PR #4156 | HIP compat stream-priority mapping (`rebased/pr-4156`, carried until 2026-11-24) | Y, then upstream | Upstream mapped the same two names itself (0.2.21), so the copy was dropped. |
+| upstream PR #5183 | tool parser: one stray backtick no longer hides later tool calls (`rebased/pr-5183`, carried until 2026-11-24) | Y, then upstream | Upstream merged the same patch (0.2.17), so the copy was dropped. |
+| baptisterajaut `feat/cascade-vnni-027` | `PREFILL_CPU_TOKENS`: the prefill CPU share takes experts above 8 tokens, as jobs of 8 (`perf/prefill-cpu-tokens`, carried until 2026-11-24) | Y, then upstream | Upstream added the same mechanism as `PREFILL_CPU_SHARE_NT` (0.2.17); the box now sets `PREFILL_CPU_SHARE_NT=16` instead. |
 
 ## Engine switches
 

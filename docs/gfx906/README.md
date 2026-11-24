@@ -69,7 +69,7 @@ default that is on in this build:
 | `ADAPT_ASYNC=0` (the async adapt tier is armed by default here) | upstream | exact |
 | `ROUTE_TAIL_SKIP=0` (upstream's approximate tail skip is on by default here) | upstream | keeps the output exact |
 | `ADAPT_COPY_BLOCKS=16` | `perf/gfx906-draft-copy` | exact |
-| `PREFILL_CPU_SHARE=auto`, `PREFILL_CPU_SHARE_MAX=8192` / `PREFILL_CPU_TOKENS=16` | upstream / `perf/prefill-cpu-tokens` | rounding only |
+| `PREFILL_CPU_SHARE=auto`, `PREFILL_CPU_SHARE_MAX=8192` / `PREFILL_CPU_SHARE_NT=16` | upstream | rounding only |
 | `SELECT_SIMT=1` (prefill only) | upstream | rounding only |
 | `GDN_HEAD=1`, `GDN_PP=2`, `GDN_CONVL2=1`, `GDN_NOY=1` (prefill only) | upstream | exact |
 | `QSA_ROWS=1` (long-context decode: the ≤4-query QSA score calls) | upstream | rounding only |
@@ -113,7 +113,6 @@ In merge order. "Source" says where the code came from.
 | `rebased/janus-reith` | [janus-reith](https://github.com/janus-reith/Strata) fork | gfx906 prefill port |
 | `rebased/pr-3565` | upstream PR #3565 | auto sessions (save and restore conversations to disk) |
 | `rebased/pr-3251` | upstream PR #3251 | restore a session without holding its K/V in RAM |
-| `rebased/pr-4156` | upstream PR #4156 | HIP stream-priority mapping |
 | [`gfx906/local`](branches/gfx906-local.md) | own | gfx906 image fixes (AVX-512 host CPU code, ROCm libomp) and notes on the ported PRs |
 | [`gfx906/mmvq-wave-rows`](branches/gfx906-mmvq-wave-rows.md) | own | two rows per wave in the wave64 MMVQ kernel |
 | [`serve/gpu-temp-sensor`](branches/serve-gpu-temp-sensor.md) | own | picks the AMD card's temperature probe for the monitor |
@@ -123,9 +122,7 @@ In merge order. "Source" says where the code came from.
 | [`perf/pcie-off-graph`](branches/perf-pcie-off-graph.md) | own (idea from ramanujbhattacharjee93) | `--pcie-frac 0` drops the PCIe branch from the verify graph |
 | [`fix/session-restore-real-peak`](branches/fix-session-restore-real-peak.md) | own | session restores price the metadata the file declares, not the worst case |
 | [`serve/qwen-code-tail`](branches/serve-qwen-code-tail.md) | own | keeps Qwen Code's per-turn reminder out of the prompt cache checkpoint |
-| [`perf/prefill-cpu-tokens`](branches/perf-prefill-cpu-tokens.md) | own (from baptisterajaut) | CPU share for short prefill chunks |
 | `rebased/pr-4411` | upstream PR #4411 | pipelined session-file saves |
-| `rebased/pr-5183` | upstream PR #5183 | tool parser: one stray backtick no longer hides the tool calls after it |
 | [`perf/gfx906-decode-kernels`](branches/perf-gfx906-decode-kernels.md) | own | gfx906 decode kernel switches |
 | [`perf/gfx906-router`](branches/perf-gfx906-router.md) | own (partly from VlDubr) | 64-lane router top-10 and router GEMV |
 | [`perf/gfx906-gu16`](branches/perf-gfx906-gu16.md) | own (partly from VlDubr) | 16-lane expert gate/up |
