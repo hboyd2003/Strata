@@ -20,6 +20,7 @@ from strata_control import engine_component
 from strata_control import reader_room
 from strata_control import gpu_roles
 
+from serve.frontend import without_moved_lines   # (conversation_key: what system_to_user moved into the first message)
 from serve.server_parts.base import ENGINE_SILENCE_S
 
 
@@ -400,10 +401,28 @@ def conversation_slots(engine) -> int | None:
     return slots if isinstance(slots, int) else None
 
 
-def conversation_key(messages) -> str | None:
+# Auto sessions: the ids clients send for a conversation (Codex: session-id + thread-id; opencode:
+# x-opencode-session-id and X-Session-Id; any client can be set up to send x-session-id)
+CLIENT_SESSION_HEADERS = ("session-id", "thread-id", "x-opencode-session-id", "x-session-id")
+
+
+def client_conversation_id(headers, req) -> str | None:
+    """The conversation id a client sent with a request (the headers above, or the body's prompt_cache_key, which
+    Qwen Code's Responses wire sets to its session), or None."""
+    parts = [f"{h}={headers.get(h)}" for h in CLIENT_SESSION_HEADERS if headers.get(h)]
+    pck = req.get("prompt_cache_key") if isinstance(req, dict) else None
+    if isinstance(pck, str) and pck:
+        parts.append(f"prompt_cache_key={pck}")
+    return "\n".join(parts) or None
+
+
+def conversation_key(messages, client: str | None = None) -> str | None:
     """Auto sessions: which conversation a chat request continues - the text of its first user message, which
     every later turn of the same chat carries unchanged (a client that rewrites it starts a new conversation, as
-    the prompt cache sees it too).  None when the request carries no user text: auto sessions leave it alone."""
+    the prompt cache sees it too), without what system_to_user moved there.  `client`: the client's own id for the
+    conversation (client_conversation_id), when it sends one: two chats that open with the same message (a fixed
+    preamble, a side agent's set prompt) then get their own keys.  None when the request carries no user text:
+    auto sessions leave it alone."""
     for m in messages or []:
         if not isinstance(m, dict) or m.get("role") != "user":
             continue
@@ -412,7 +431,10 @@ def conversation_key(messages) -> str | None:
             content = "".join(p.get("text") or "" for p in content
                               if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
         if isinstance(content, str) and content.strip():
-            return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:16]
+            text = without_moved_lines(content)
+            if client:
+                text = client + "\n\n" + text
+            return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
     return None
 
 
