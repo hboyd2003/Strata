@@ -19,7 +19,7 @@ gfx906 dense GEMV kernels and an expert down kernel, hand-ported from [steddyman
 | `STRATA_G906_MAX_IN`, `STRATA_G906_MIN_OUT` | the shape limits above (4096, 1024) | default | |
 | `STRATA_G906_LG`, `STRATA_G906_LPR`, `STRATA_G906_LG_RPB`, `STRATA_G906_RPB`, `STRATA_G906_Q4K_RPB` | launch overrides for the bench | unset | |
 
-## Measured (MI50, Qwen3.8-Flash-Next IQ3_S, `bench/gfx906/ab.py` standard suite, 3 reps)
+## Measured (MI50, Qwen3.8-Flash-Next IQ3_S, `terminal/bench/gfx906/ab.py` standard suite, 3 reps)
 
 | | off (two runs) | both on |
 | --- | ---: | ---: |

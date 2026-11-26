@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Benchmark a running Strata server and compare runs: the harness every change in the gfx906 fork was measured with.
 
-    python3 bench/gfx906/ab.py run OUT_DIR [options]       measure the server as it runs now
-    python3 bench/gfx906/ab.py compare DIR [DIR ...] [-o FILE]   one table of several runs, deltas against the first
+    python3 terminal/bench/gfx906/ab.py run OUT_DIR [options]       measure the server as it runs now
+    python3 terminal/bench/gfx906/ab.py compare DIR [DIR ...] [-o FILE]   one table of several runs, deltas against the first
 
 `run` with no pass options is the **standard** suite (results say `"suite": "standard"`), the one to share and compare
 (about 3 minutes on the MI50):

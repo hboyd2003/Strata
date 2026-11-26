@@ -1010,8 +1010,14 @@ if(STRATA_BUILD_HY4)
 endif()
 
 # ---- strata-inkling: standalone Inkling-2-Mini (.strata v1.1) shape-engine binary (CMake component `inkling2`) ----
-option(STRATA_BUILD_INKLING "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine (alias of STRATA_BUILD_INKLING2)" ON)
-option(STRATA_BUILD_INKLING2 "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine + Vision + 1..64 continuous batching" ON)
+# gfx906 fork: Inkling-2-Mini's engine is CUDA (nvcc, PTX) or wave32 HIP (STRATA_ENABLE_HIP); the gfx906 build, the CUDA
+# tree compiled through HIP, can configure neither (enable_language(CUDA) finds no nvcc), so it is off there by default
+set(_strata_ink_default ON)
+if(STRATA_HIP_GFX906)
+  set(_strata_ink_default OFF)
+endif()
+option(STRATA_BUILD_INKLING "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine (alias of STRATA_BUILD_INKLING2)" ${_strata_ink_default})
+option(STRATA_BUILD_INKLING2 "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine + Vision + 1..64 continuous batching" ${_strata_ink_default})
 if((STRATA_BUILD_INKLING AND STRATA_BUILD_INKLING2) AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/inkling2/CMakeLists.txt")
   add_subdirectory(src/inkling2)
 endif()

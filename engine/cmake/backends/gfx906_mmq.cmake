@@ -39,6 +39,13 @@ macro(strata_gfx906_mmq)
     foreach(_t tq2_t tqk6 tqk7 tqp5 tqp6 tqp7)
       list(APPEND _strata_mmq_sources ${_strata_tq_overlay_dir}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
+    # upstream 0.2.18+: the Blackwell FP4 / FP8 prompt kernels and the hardware FP4 decode sit in strata_pf_fp4, which strata_kernels
+    # and strata_pf_own link; strata_cuda_pf_own builds only their _absent stubs under STRATA_HIP_GFX906, so this build does the same
+    add_library(strata_pf_fp4 STATIC src/prefill/moe_fp4_tc_absent.cpp src/prefill/dense_fp4_tc_absent.cpp src/prefill/moe_fp8_mxf_tc_absent.cpp
+                src/kernels/cuda/nvfp4_decode_sm120_absent.cpp)
+    target_include_directories(strata_pf_fp4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(strata_pf_fp4 PUBLIC strata_quant ${_strata_gpu_runtime_target})
+    target_link_libraries(strata_kernels PUBLIC strata_pf_fp4)
     add_library(strata_mmq STATIC ${_strata_mmq_sources})
     # Strata's own prompt kernels: built as on every other card (they report themselves unavailable on gfx906), without mmq_absent.cpp
     set(_strata_pf_own_sources src/prefill/moe_fused.cu src/prefill/moe_fused_iq.cu src/prefill/moe_helpers.cu
@@ -55,7 +62,7 @@ macro(strata_gfx906_mmq)
     target_link_libraries(strata_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
     target_compile_definitions(strata_mmq PRIVATE STRATA_MMQ_KQUANTS=1 STRATA_MMQ_TQ=1 STRATA_MMQ_TQP=1)
     strata_pf_own_mirror()
-    target_link_libraries(strata_pf_own PUBLIC strata_quant ggml-base ${_strata_gpu_runtime_target})
+    target_link_libraries(strata_pf_own PUBLIC strata_pf_fp4 strata_quant ggml-base ${_strata_gpu_runtime_target})
     target_link_libraries(strata_mmq PUBLIC strata_pf_own)
     target_link_libraries(strata_prefill PUBLIC strata_mmq)
     target_compile_definitions(strata_prefill PUBLIC STRATA_PREFILL_MMQ=1 STRATA_PREFILL_FUSED=1)

@@ -11,10 +11,12 @@ import serve.server as server
 
 
 def handler(raise_this, answer_started=False):
-    svc = SimpleNamespace(begin_request=lambda path, req: None, drop_embeddings=lambda: None, reserve_inference=lambda: True, release_inference=lambda: None)
+    svc = SimpleNamespace(begin_request=lambda path, req: None, drop_embeddings=lambda: None, reserve_inference=lambda: True, release_inference=lambda: None,
+                          auto_tls=SimpleNamespace(client=None))   # gfx906 fork: auto sessions key on the client id (#3565)
     H = server.make_handler(svc)
     h = H.__new__(H)
     h.path = "/v1/chat/completions"
+    h.headers = {}   # gfx906 fork: _post reads the client's conversation headers (client_conversation_id)
     h.record, h.watch_done, h.answer_started = None, None, answer_started
     h._authorized = lambda: True
     h._foreign_page = lambda: False

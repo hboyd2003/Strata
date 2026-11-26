@@ -2,10 +2,10 @@
 # Cut a fork release from the MI50 box: push the gfx906 image to ghcr.io, then push the version tag. The tag starts
 # the "gfx906 release" workflow, which checks it and publishes the GitHub Release with its notes.
 #
-#   docker/gfx906/release.sh [--fork X.Y] [--image IMAGE | --build] [--portable-image IMAGE | --no-portable] [--dry-run]
+#   tools/docker/gfx906/release.sh [--fork X.Y] [--image IMAGE | --build] [--portable-image IMAGE | --no-portable] [--dry-run]
 #
 # Run it from a clean checkout of origin/main. The version is v<upstream>+<fork>-gfx906: the upstream part comes from
-# apps/host/package.json, the fork part stays the latest release's unless --fork X.Y raises it (do that when the fork's
+# app/host/package.json, the fork part stays the latest release's unless --fork X.Y raises it (do that when the fork's
 # own changes changed, not for a catch-up that only moves the upstream base).
 #
 # Image: by default the one the running `strata` container uses, i.e. what production already runs and was smoke-tested
@@ -22,9 +22,9 @@
 # `gh auth refresh -s write:packages && gh auth token | docker login ghcr.io -u <user> --password-stdin`).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-NOTES=docker/gfx906/release_notes.py
+NOTES=tools/docker/gfx906/release_notes.py
 # files that never reach the image: the docs, the CI, the benchmark harness and this release tooling
-NOT_IMAGE=(':!*.md' ':!.agents' ':!.github' ':!bench' ':!docker/gfx906/release.sh' ':!docker/gfx906/release_notes.py')
+NOT_IMAGE=(':!*.md' ':!.agents' ':!.github' ':!terminal/bench' ':!engine/bench' ':!docs/bench-results' ':!tools/docker/gfx906/release.sh' ':!tools/docker/gfx906/release_notes.py')
 fork="" src="" build=0 dry=0 psrc="" portable=1
 while [ $# -gt 0 ]; do
   case $1 in
@@ -44,7 +44,7 @@ git fetch -q --tags origin
 [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "uncommitted changes; commit them first" >&2; exit 1; }
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "HEAD is not origin/main ($(git rev-parse --short origin/main))" >&2; exit 1; }
 
-if [ -n "$fork" ]; then tag="v$(python3 -c 'import json; print(json.load(open("apps/host/package.json"))["version"])')+$fork-gfx906"
+if [ -n "$fork" ]; then tag="v$(python3 -c 'import sys; sys.path.insert(0, "tools/docker/gfx906"); import release_notes; print(release_notes.upstream_version())')+$fork-gfx906"
 else tag=$(python3 $NOTES next); fi
 eval "$(python3 $NOTES check "$tag")"   # sets upstream=, fork=, image= (the ghcr name:tag)
 echo "release $tag  (upstream $upstream, fork $fork)  ->  $image"
@@ -71,7 +71,7 @@ build_image() {
   if [ $dry = 0 ] && [ "$(docker inspect -f '{{.State.Running}}' strata 2>/dev/null)" = true ]; then
     echo "the strata container is running; stop it before building (or pass --image / --portable-image)" >&2; exit 1
   fi
-  run docker build -f docker/gfx906/Dockerfile --build-arg STRATA_COMMIT="$(git rev-parse HEAD)" "$@" -t "$t" .
+  run docker build -f tools/docker/gfx906/Dockerfile --build-arg STRATA_COMMIT="$(git rev-parse HEAD)" "$@" -t "$t" .
 }
 
 stamp=$(date +%Y%m%d)-$(git rev-parse --short HEAD)

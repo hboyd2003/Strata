@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fork release versions: v<upstream version>+<fork version>-gfx906, for example v0.2.8+0.1-gfx906.
 
-The upstream version is the app version `main` is built on (apps/host/package.json); the fork version is the version
+The upstream version is the app version `main` is built on (app/host/package.json; apps/host before 0.2.16); the fork version is the version
 of the fork's own changes: it stays the same when only the upstream base moves (v0.2.8+0.1 -> v0.2.9+0.1) and goes up
 when the fork itself changes (0.1, 0.2, ... 0.10, then 1.0 for a big change; pass it with release.sh --fork X.Y).
 
@@ -22,8 +22,16 @@ def git(*a):
     return subprocess.run(["git", *a], check=True, capture_output=True, text=True).stdout.strip()
 
 
+# where the app version lives: app/host since upstream 0.2.16's layout, apps/host before (older release tags)
+PACKAGE_JSON = ("app/host/package.json", "apps/host/package.json")
+
+
 def upstream_version(rev="HEAD"):
-    return json.loads(git("show", f"{rev}:apps/host/package.json"))["version"]
+    for path in PACKAGE_JSON:
+        r = subprocess.run(["git", "show", f"{rev}:{path}"], capture_output=True, text=True)
+        if r.returncode == 0:
+            return json.loads(r.stdout)["version"]
+    sys.exit(f"{rev}: no {' or '.join(PACKAGE_JSON)}")
 
 
 def parse(tag):
@@ -96,7 +104,7 @@ def check(tag, rev="HEAD"):
     up, fork = parse(tag)
     have = upstream_version(rev)
     if up != have:
-        sys.exit(f"{tag}: the upstream part is {up}, but {rev} is built on upstream {have} (apps/host/package.json)")
+        sys.exit(f"{tag}: the upstream part is {up}, but {rev} is built on upstream {have} (app/host/package.json)")
     for t in fork_tags(exclude=tag):
         if version_key(t) >= version_key(tag):
             sys.exit(f"{tag}: not after the existing {t} (the fork version may stay the same only with a newer upstream "

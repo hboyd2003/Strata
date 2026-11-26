@@ -1,0 +1,31 @@
+# The build context of tools/docker/gfx906/Dockerfile (BuildKit reads <Dockerfile>.dockerignore beside it). Upstream 0.2.16
+# removed the top-level .dockerignore; this is the fork's old one with the moved paths. Unlike upstream's
+# tools/docker/Dockerfile.src.dockerignore it does NOT leave out /engine/ (that is the engine's source tree now).
+.git
+
+# local Python environment (rebuilt in the image)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# build folders (setup, build-exp.sh's build-906-*) and setup's downloads (packs, models, logs)
+/build/
+/build*/
+/dist/
+/packs/
+/mtp/
+/models/
+/Strata-data/
+# the folders the entrypoint creates in a mounted data/ folder: never part of a build (#3644)
+/terminal/data/install/
+/terminal/data/state/
+/terminal/data/home/
+/terminal/data/Strata-data/
+engine/third_party/*.zip
+*.done
+*.log
+strata-*.json
+strata-*.txt
+run-*.sh
+run-*.bat

@@ -20,8 +20,8 @@ AVX2 baseline, for other CPUs): `:<upstream>-<fork>-portable`, with `:latest-por
 On the MI50 box, from a clean checkout of `origin/main`:
 
 ```bash
-docker/gfx906/release.sh --dry-run     # shows the version, the image and every step
-docker/gfx906/release.sh               # builds the portable image, pushes both images, then the tag
+tools/docker/gfx906/release.sh --dry-run     # shows the version, the image and every step
+tools/docker/gfx906/release.sh               # builds the portable image, pushes both images, then the tag
 ```
 
 - By default it releases the image production runs (the `strata` container's), after checking that the image's
@@ -37,7 +37,7 @@ docker/gfx906/release.sh               # builds the portable image, pushes both 
 
 Pushing the tag starts the **gfx906 release** workflow (`.github/workflows/gfx906-release.yml`). It checks the tag (the
 upstream part must match the tagged commit's app version, the tag must come after every earlier release: a higher fork version, or the same one on a newer upstream; and the
-commit must be on `main`), and publishes the GitHub Release with notes from `docker/gfx906/release_notes.py`: the
+commit must be on `main`), and publishes the GitHub Release with notes from `tools/docker/gfx906/release_notes.py`: the
 upstream base, the image, the branches merged, and the branches added or dropped since the previous release.
 
 ## Why the image is built on the box

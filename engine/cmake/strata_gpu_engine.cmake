@@ -24,16 +24,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(strata-device PRIVATE strata_core)
 
   add_executable(strata-load src/core/load_main.cpp)
-  target_link_libraries(strata-load PRIVATE strata_core strata_kernels)
+  target_link_libraries(strata-load PRIVATE strata_core strata_kernels strata_kernels_cpu)   # (gfx906 fork: strata_core's expert_source calls expert_layout(), upstream 0.2.20)
 
   add_executable(strata-concurrent src/core/concurrent_main.cpp)
   target_include_directories(strata-concurrent PRIVATE ${_strata_gpu_include_directories})
-  target_link_libraries(strata-concurrent PRIVATE strata_core strata_kernels ${_strata_gpu_runtime_target})
+  target_link_libraries(strata-concurrent PRIVATE strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
 
   add_executable(strata-overlap src/core/overlap_main.cpp)
   # a .cpp that calls cudaMemcpyAsync itself needs the toolkit headers and cudart explicitly
   target_include_directories(strata-overlap PRIVATE ${_strata_gpu_include_directories})
-  target_link_libraries(strata-overlap PRIVATE strata_core strata_kernels ${_strata_gpu_runtime_target})
+  target_link_libraries(strata-overlap PRIVATE strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
 
   # The load test needs the 34 GB artifact, so it is registered ONLY where that artifact exists.  A test that
   # silently skips is a test that stops running; an absent registration is visible in the configure output.

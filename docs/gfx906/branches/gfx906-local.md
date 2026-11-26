@@ -21,7 +21,7 @@ Stacked: its commits sit on `main` at its merge slot.
 ## Building the image
 
 ```bash
-docker build -f docker/gfx906/Dockerfile --build-arg STRATA_COMMIT=$(git rev-parse HEAD) -t strata-gfx906:local .
+docker build -f tools/docker/gfx906/Dockerfile --build-arg STRATA_COMMIT=$(git rev-parse HEAD) -t strata-gfx906:local .
 ```
 
 It builds on `mixa3607/rocm-gfx906:10.1-complete` (pinned by digest), which ships rocBLAS/hipBLAS for gfx906.
