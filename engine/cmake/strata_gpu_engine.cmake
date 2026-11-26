@@ -89,6 +89,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/cvec.cu
                           src/kernels/cuda/qsa_decode_attn.cu
                           src/kernels/cuda/qsa_prompt_attn.cu
+                          src/kernels/cuda/qsa_prompt_attn_gfx906.cu
                           src/kernels/cuda/fused_gdn.cu
                           src/kernels/cuda/dequant_bf16.cu
                           src/kernels/cuda/qsa_select.cu
