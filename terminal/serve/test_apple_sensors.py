@@ -151,7 +151,7 @@ class AppleSensorsTest(unittest.TestCase):
                 mock.patch.object(telemetry, "apple_sensors", return_value="S") as sensors, \
                 mock.patch.object(telemetry, "_Amd") as amd:
             telemetry.monitor_reader(0, amd=True)
-            amd.assert_called_once_with(0)
+            amd.assert_called_once_with(0, temp_sensor="edge")   # (gfx906 fork: gpu_temp_sensor, the default probe)
             sensors.assert_not_called()                                   # a Mac that runs the AMD tests does not start the Apple calls
 
     def test_off_by_default_the_reader_gains_nothing(self):
