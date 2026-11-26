@@ -110,6 +110,7 @@ In merge order. "Source" says where the code came from.
 
 | Branch | Source | What it does |
 | --- | --- | --- |
+| [`gfx906/own-mmq`](branches/gfx906-own-mmq.md) | own (llama.cpp's MMQ kernels, MIT) | keeps llama.cpp's MMQ prompt kernels on gfx906 after upstream 0.2.16 removed them; without it prompt reading is ~30% slower |
 | `rebased/janus-reith` | [janus-reith](https://github.com/janus-reith/Strata) fork | gfx906 prefill port |
 | `rebased/pr-3565` | upstream PR #3565 | auto sessions (save and restore conversations to disk) |
 | `rebased/pr-3251` | upstream PR #3251 | restore a session without holding its K/V in RAM |
@@ -141,6 +142,7 @@ In merge order. "Source" says where the code came from.
 | [`serve/dynamic-yarn`](branches/serve-dynamic-yarn.md) | upstream PR #2961 (sergqwer), own fixes | `--rope-scaling dynamic`: YaRN only past the trained context, cached keys rotated on a factor change; pinned table copies make switching back ~10 ms |
 | [`perf/gfx906-steddyman`](branches/perf-gfx906-steddyman.md) | from steddyman/Strata | gfx906 lane-group dense GEMVs (Q6_K / Q4_K / Q5_K / IQ4_XS) and a whole-block IQ4_NL expert down, −3.0% ms per window |
 | [`perf/gfx906-argmax`](branches/perf-gfx906-argmax.md) | own | upstream's multi-block head pick and top-probability kernels built for gfx906, −0.9% ms per window, output head −7.6% |
+| [`gfx906/layout-0216`](branches/gfx906-layout-0216.md) | own | the fork's build and release tooling on upstream's 0.2.16 layout, gfx906 build fixes for later upstream code, Inkling-2-Mini off on gfx906 |
 | [`gfx906/ab`](branches/gfx906-ab.md) | own | the benchmark harness, `bench/gfx906/ab.py` |
 | [`gfx906/release`](branches/gfx906-release.md) | own | fork release tags, the image push and the Release workflow |
 | `docs` | own | these docs and the README banner |
