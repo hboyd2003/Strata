@@ -5,7 +5,7 @@
 #   tools/docker/gfx906/release.sh [--fork X.Y] [--image IMAGE | --build] [--portable-image IMAGE | --no-portable] [--dry-run]
 #
 # Run it from a clean checkout of origin/main. The version is v<upstream>+<fork>-gfx906: the upstream part comes from
-# apps/host/package.json, the fork part stays the latest release's unless --fork X.Y raises it (do that when the fork's
+# app/host/package.json, the fork part stays the latest release's unless --fork X.Y raises it (do that when the fork's
 # own changes changed, not for a catch-up that only moves the upstream base).
 #
 # Image: by default the one the running `strata` container uses, i.e. what production already runs and was smoke-tested
@@ -44,7 +44,7 @@ git fetch -q --tags origin
 [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "uncommitted changes; commit them first" >&2; exit 1; }
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "HEAD is not origin/main ($(git rev-parse --short origin/main))" >&2; exit 1; }
 
-if [ -n "$fork" ]; then tag="v$(python3 -c 'import json; print(json.load(open("apps/host/package.json"))["version"])')+$fork-gfx906"
+if [ -n "$fork" ]; then tag="v$(python3 -c 'import sys; sys.path.insert(0, "tools/docker/gfx906"); import release_notes; print(release_notes.upstream_version())')+$fork-gfx906"
 else tag=$(python3 $NOTES next); fi
 eval "$(python3 $NOTES check "$tag")"   # sets upstream=, fork=, image= (the ghcr name:tag)
 echo "release $tag  (upstream $upstream, fork $fork)  ->  $image"
