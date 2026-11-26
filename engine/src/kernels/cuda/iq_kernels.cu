@@ -3677,6 +3677,16 @@ int d_qk(int t) {
         default: return 0;
     }
 }
+// work items per block of a gate/up format (Fmt::ipb; 0 = not a gate/up format): row_dot_80_sub16 needs
+// (n_embd / qk) * ipb == 80
+int gu_ipb(int t) {
+    switch (t) {
+#define STRATA_IPB(T) case T: return Fmt<T>::ipb;
+        STRATA_GU_FMTS(STRATA_IPB)
+#undef STRATA_IPB
+        default: return 0;
+    }
+}
 bool gu_split(int t) {
     switch (t) {
 #define STRATA_SP(T) case T: return kSplit<T> && !split_off<T>();
