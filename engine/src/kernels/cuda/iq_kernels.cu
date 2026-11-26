@@ -944,6 +944,20 @@ __device__ __forceinline__ float warp_sum(float v) {
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return v;
 }
+// #5033 (freapsy 63a105f7): an expert blob's address read from memory is generic, so on gfx906 its loads were
+// flat_load: counted against lgkmcnt too, every wait on an LDS read (grid, activations) also waited on the HBM loads in
+// flight.  Cast to the global address space: global_load, the same bytes.  STRATA_GFX906_EXP_GLOBAL=0 (compile time)
+// keeps the generic pointer.
+#ifndef STRATA_GFX906_EXP_GLOBAL
+#define STRATA_GFX906_EXP_GLOBAL 1
+#endif
+__device__ __forceinline__ const uint8_t* exp_blob(unsigned long long p) {
+#if defined(__HIPCC__) && defined(STRATA_HIP_GFX906) && STRATA_GFX906_EXP_GLOBAL
+    return (const uint8_t*) (const __attribute__((address_space(1))) uint8_t*) p;
+#else
+    return (const uint8_t*) p;
+#endif
+}
 
 // One row against one q8_1 activation, the whole warp: call k = (block, part) is lane-strided.
 template<int TY>
@@ -2130,7 +2144,7 @@ __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         if (e0 >= e1) continue;
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* blob = exp_blob(grp_ptr[g]);
         const uint8_t* wr = blob + off;
         // NVFP4: the expert's global scales from the blob's tail; s_down goes on the down output (native_down_kernel):
         // folded into up it left the hidden near 1e-5, whose q8_1 block scale is an FP16 subnormal
@@ -2174,7 +2188,7 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
             for (int g = blockIdx.y; g < ng; g += gridDim.y) {
                 const int e0 = grp_start[g], e1 = grp_start[g + 1];
                 if (e0 >= e1) continue;
-                const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+                const uint8_t* blob = exp_blob(grp_ptr[g]);
                 const uint8_t* wr = blob + w_off;
                 const float sc = (TG == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, is_up ? 1 : 0) : 1.0f;
                 for (int e = e0; e < e1; e += GRP_NC) {
@@ -2216,7 +2230,7 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
             for (int g = blockIdx.y; g < ng; g += gridDim.y) {
                 const int e0 = grp_start[g], e1 = grp_start[g + 1];
                 if (e0 >= e1) continue;
-                const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+                const uint8_t* blob = exp_blob(grp_ptr[g]);
                 const uint8_t* wr = blob + w_off;
                 // NVFP4: the expert's s_gate / s_up on the FP32 output, as native_gu_kernel (1 otherwise: exact)
                 const float sc = (TG == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, is_up ? 1 : 0) : 1.0f;
@@ -2262,7 +2276,7 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
             __shared__ uint32_t s_x[GRP_NC * 80 * 9];
             const block_q8_1* xs = reinterpret_cast<const block_q8_1*>(s_x);
             for (int g = blockIdx.y; g < ng; g += gridDim.y) {
-                const uint8_t* gp = (const uint8_t*) grp_ptr[g];
+                const uint8_t* gp = exp_blob(grp_ptr[g]);
                 const int e0 = grp_start[g], e1 = grp_start[g + 1];
                 for (int e = e0; e < e1; e += GRP_NC) {
                     const int n = min(GRP_NC, e1 - e);
@@ -2318,7 +2332,7 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {   // the group stride, as native_gu_kernel
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         if (e0 >= e1) continue;
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* blob = exp_blob(grp_ptr[g]);
         const uint8_t* wr = blob + w_off;
         // NVFP4: the expert's s_gate / s_up on the FP32 output, as native_gu_kernel (1 otherwise: exact)
         const float sc = (TG == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, is_up ? 1 : 0) : 1.0f;
@@ -2403,7 +2417,7 @@ __global__ void __launch_bounds__(256) native_down_kernel(const unsigned long lo
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {   // as native_gu_kernel
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         if (e0 >= e1) continue;
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* blob = exp_blob(grp_ptr[g]);
         const uint8_t* wr = blob + off;
         const float sd = (TD == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 2) : 1.0f;   // NVFP4: s_down
         for (int e = e0; e < e1; ++e) {
@@ -2445,7 +2459,7 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
             for (int g = blockIdx.y; g < ng; g += gridDim.y) {
                 const int e0 = grp_start[g], e1 = grp_start[g + 1];
                 if (e0 >= e1) continue;
-                const uint8_t* gp = (const uint8_t*) grp_ptr[g];
+                const uint8_t* gp = exp_blob(grp_ptr[g]);
                 const float sd = (TD == 40 && L.tail_off) ? ld_tail_f32(gp, L.tail_off, 2) : 1.0f;
                 for (int e = e0; e < e1; e += GRP_NC) {
                     const int n = min(GRP_NC, e1 - e);
@@ -2495,7 +2509,7 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
             for (int g = blockIdx.y; g < ng; g += gridDim.y) {
                 const int e0 = grp_start[g], e1 = grp_start[g + 1];
                 if (e0 >= e1) continue;
-                const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+                const uint8_t* blob = exp_blob(grp_ptr[g]);
                 const uint8_t* wr = blob + w_off;
                 const float sd = (TD == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 2) : 1.0f;   // NVFP4: s_down
                 for (int e = e0; e < e1; e += GRP_NC) {
@@ -2542,7 +2556,7 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
             for (int g = blockIdx.y; g < ng; g += gridDim.y) {
                 const int e0 = grp_start[g], e1 = grp_start[g + 1];
                 if (e0 >= e1) continue;
-                const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+                const uint8_t* blob = exp_blob(grp_ptr[g]);
                 const uint8_t* wr = blob + w_off;
                 const float sd = (TD == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 2) : 1.0f;   // NVFP4: s_down
                 for (int e = e0; e < e1; e += GRP_NC) {
@@ -2587,7 +2601,7 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {   // the group stride, as native_gu_kernel
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         if (e0 >= e1) continue;
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* blob = exp_blob(grp_ptr[g]);
         const uint8_t* wr = blob + w_off;
         const float sd = (TD == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 2) : 1.0f;   // NVFP4: s_down
         if (hb == 20) {
@@ -2791,7 +2805,7 @@ __global__ void __launch_bounds__(256, MINB) expdec_gu_kernel(
     const int nrow = 2 * (int) L.n_ff, n_ff = (int) L.n_ff;
     const int row_base = blockIdx.x * rb;
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* blob = exp_blob(grp_ptr[g]);
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         for (int e = e0; e < e1; e += ED_NC) {
             const int n = min(ED_NC, e1 - e);
@@ -2976,7 +2990,7 @@ __global__ void __launch_bounds__(256, STRATA_EXPDEC_MINB) expdec_down_kernel(co
     const int nrow = (int) L.n_embd;
     const int row_base = blockIdx.x * rb;
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g] + L.down_off;
+        const uint8_t* blob = exp_blob(grp_ptr[g]) + L.down_off;
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         for (int e = e0; e < e1; e += ED_NC) {
             const int n = min(ED_NC, e1 - e);
@@ -3034,7 +3048,7 @@ __global__ void __launch_bounds__(256, 4) sm86_down_iq4nl_clean_kernel(const uns
     const size_t w_off = L.down_off + (size_t) (valid_r ? r : 0) * L.d_row;
     const int2* s_p = reinterpret_cast<const int2*>(s_u);
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* blob = exp_blob(grp_ptr[g]);
         const uint8_t* wr = blob + w_off;
         const float sd = L.tail_off ? ((const float*) (blob + L.tail_off))[2] : 1.0f;
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
@@ -3143,7 +3157,7 @@ __global__ void __launch_bounds__(512) native_gu_swiglu_kernel(const unsigned lo
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         if (e0 >= e1) continue;
-        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* blob = exp_blob(grp_ptr[g]);
         const float sg = (TG == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 0) : 1.0f;   // NVFP4: s_gate / s_up
         const float su = (TG == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 1) : 1.0f;
         for (int e = e0; e < e1; e += GRP_NC) {
@@ -3931,7 +3945,7 @@ __global__ void __launch_bounds__(256) s26_gu_l_kernel(const unsigned long long*
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row0 = blockIdx.x * GU_ROWS * RPW + warp;
     const bool live = row0 + GU_ROWS * (RPW - 1) < 2 * L.n_ff;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const uint8_t* wr[RPW];
     int rr[RPW];
     bool upq[RPW];
@@ -4023,7 +4037,7 @@ __global__ void __launch_bounds__(256) s26_down_l_kernel(const unsigned long lon
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int r0 = blockIdx.x * 8 * RPW + warp;
     const bool live = r0 + 8 * (RPW - 1) < L.n_embd;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const uint8_t* wr[RPW];
 #pragma unroll
     for (int q = 0; q < RPW; ++q) wr[q] = blob + L.down_off + (size_t) (r0 + 8 * q) * L.d_row;
@@ -4186,7 +4200,7 @@ __global__ void __launch_bounds__(256) s27_gu_kernel(const unsigned long long* _
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row0 = blockIdx.x * GU_ROWS * RPW + warp;
     const bool live = row0 + GU_ROWS * (RPW - 1) < 2 * L.n_ff;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const uint8_t* wr[RPW];
     int rr[RPW];
     bool upq[RPW];
@@ -4277,7 +4291,7 @@ __global__ void __launch_bounds__(256) s27_down_kernel(const unsigned long long*
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int r0 = blockIdx.x * 8 * RPW + warp;
     const bool live = r0 + 8 * (RPW - 1) < L.n_embd;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const uint8_t* wr[RPW];
 #pragma unroll
     for (int q = 0; q < RPW; ++q) wr[q] = blob + L.down_off + (size_t) (r0 + 8 * q) * L.d_row;
@@ -5265,7 +5279,7 @@ __global__ void __launch_bounds__(256) nib_gu_kernel(const unsigned long long* _
     const int r = is_up ? row - (int) nibk::kNFf : row;
     float* dst = is_up ? up : gate;
     for (int g = blockIdx.y; g < ng; g += gridDim.y) {
-        const uint8_t* slot = (const uint8_t*) grp_ptr[g];
+        const uint8_t* slot = exp_blob(grp_ptr[g]);
         const uint4* crow = (const uint4*) (slot + nibk::kCodesOff) + (size_t) row * nibk::kItems;
         const uint8_t* srow = slot + nibk::kScOff + (size_t) row * nibk::kItems;
         const __half* drow = (const __half*) (slot + nibk::kDOff) + (size_t) row * nibk::kSuper;
@@ -5985,7 +5999,7 @@ __global__ void __launch_bounds__(256) native_gu_amd_kernel(const unsigned long 
                                                             float* __restrict__ gate, float* __restrict__ up) {
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     const int nrow = 2 * (int) L.n_ff;
@@ -6042,7 +6056,7 @@ __global__ void __launch_bounds__(256) native_down_amd_kernel(const unsigned lon
                                                               float* __restrict__ out) {
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const int nb = (int) (L.n_ff / Fmt<TD>::qk), hb = (int) (L.n_ff / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     const int nrow = (int) L.n_embd;
@@ -6104,7 +6118,13 @@ template<> struct GridOf<40> { using T = uint32_t; static constexpr int N = 1; _
 // dp4a(g ^ m, u) - dp4a(m, u) = sum(s g u) exactly - the same integers, the same floats.
 __device__ __forceinline__ int nib_mask(uint32_t n) {
     const uint32_t b = __umul24(n & 0xFu, 0x204081u) & 0x01010101u;
+#if defined(__HIPCC__) && defined(STRATA_HIP_GFX906) && STRATA_GFX906_EXP_GLOBAL
+    // #5033: (b << 8) - b became b * 255, v_mul_lo_u32 (quarter rate); v_perm's selectors 12 / 13 give 0x00 / 0xff,
+    // so each 0/1 byte of b + 0x0c becomes the same 0x00/0xff mask byte in one full-rate op
+    return (int) __builtin_amdgcn_perm(0u, 0u, b + 0x0c0c0c0cu);
+#else
     return (int) ((b << 8) - b);
+#endif
 }
 // exp/tier1 STRATA_NIB_SHIFT=1 (exp/experts e7846c94, gated to IQ3_S - IQ2_S / IQ3_XXS were 2-3% slower with it):
 // clang folds (b << 8) - b into b * 255, a quarter-rate v_mul_lo_u32 on gfx906; the empty asm keeps the shift and the
@@ -6313,7 +6333,7 @@ __global__ void __launch_bounds__(256) native_gu_lds_kernel(const unsigned long 
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const GT* gsrc = GridOf<TG>::src();
     for (int i = tid; i < GridOf<TG>::N; i += 256) sgrid[i] = gsrc[i];
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const int nb = (int) (L.n_embd / F::qk), xb = (int) (L.n_embd / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     const int nrow = 2 * (int) L.n_ff;
@@ -6417,7 +6437,7 @@ __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned lon
         sgrid[512 + tid] = (uint32_t) nib_mask((uint32_t) tid);
         sgrid[768 + tid] = (uint32_t) nib_mask((uint32_t) tid >> 4);
     }
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const float sd = (TD == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 2) : 1.0f;
     const int nb = (int) (L.n_ff / F::qk), hb = (int) (L.n_ff / 32);
     const int n_items = nb * F::ipb;
@@ -6644,7 +6664,7 @@ __global__ void __launch_bounds__(256) native_down_sub_kernel(const unsigned lon
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
     const int tid = threadIdx.x, sl = tid % LPR;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const int nb = (int) (L.n_ff / F::qk), hb = (int) (L.n_ff / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     const int r = blockIdx.x * RPB + tid / LPR;
@@ -6729,7 +6749,7 @@ __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned lon
             sgrid[768 + tid] = m_hi;
         }
     }
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const float s_gate = (TG == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 0) : 1.0f;
     const float s_up   = (TG == 40 && L.tail_off) ? ld_tail_f32(blob, L.tail_off, 1) : 1.0f;
     const int nb = (int) (L.n_embd / F::qk), xb = (int) (L.n_embd / 32), hb = (int) (L.n_ff / 32);
@@ -6869,7 +6889,7 @@ __global__ void __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(3))) n
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const GT* gsrc = GridOf<TG>::src();
     for (int i = tid; i < GridOf<TG>::N; i += 256) sgrid[i] = gsrc[i];
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* blob = exp_blob(grp_ptr[g]);
     const int nb = (int) (L.n_embd / F::qk), xb = (int) (L.n_embd / 32), hb = (int) (L.n_ff / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     const int r0 = blockIdx.x * 32;
