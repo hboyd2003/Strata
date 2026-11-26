@@ -2,6 +2,7 @@
 so every caller and test still reaches them as `serve.server.<name>`."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -397,6 +398,22 @@ def conversation_slots(engine) -> int | None:
             pass
     slots = (getattr(engine, "info", None) or {}).get("conversation_cache_slots")
     return slots if isinstance(slots, int) else None
+
+
+def conversation_key(messages) -> str | None:
+    """Auto sessions: which conversation a chat request continues - the text of its first user message, which
+    every later turn of the same chat carries unchanged (a client that rewrites it starts a new conversation, as
+    the prompt cache sees it too).  None when the request carries no user text: auto sessions leave it alone."""
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, list):                 # the parts form (a message with pictures)
+            content = "".join(p.get("text") or "" for p in content
+                              if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
+        if isinstance(content, str) and content.strip():
+            return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:16]
+    return None
 
 
 def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) -> dict:
