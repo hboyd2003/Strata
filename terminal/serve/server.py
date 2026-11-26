@@ -182,9 +182,12 @@ from serve.server_parts.engines import (  # noqa: F401  (moved unchanged, file s
     PARALLEL_MAX,
     QueueCancelled,
     QueueWaitExpired,
+    REQUEST_PARAMS,
     SPLIT_MAX_LANES,
     ServerStopping,
     SessionRefused,
+    TRANSCRIPT_MAX,
+    TRANSCRIPT_TEXT_MAX,
     TRANSIENT_START_MARKS,
     VisionNoRoom,
     _BTRACE,
@@ -192,6 +195,7 @@ from serve.server_parts.engines import (  # noqa: F401  (moved unchanged, file s
     _RequestOwned,
     _VISION_ARCH_SIGNS,
     _WIN_CRASH,
+    _clip,
     _dir_writable,
     _echoing,
     _engine_texts,
@@ -240,12 +244,15 @@ from serve.server_parts.engines import (  # noqa: F401  (moved unchanged, file s
     pool_cores_args,
     profile_shape,
     read_engine_stage_log,
+    request_params,
     sh_stream_warning,
     start_exit_note,
     start_failure_hint,
     start_log_marks,
     start_log_tail,
     start_log_text,
+    tool_call_view,
+    transcript_of,
     unload_wait,
     helper_gpus,
     visible_device_order,
@@ -5377,6 +5384,7 @@ class Service:
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
+                  "params": request_params(req),
                   "input": raw[:262144], "input_truncated": len(raw) > 262144,
                   "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
                   "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,
@@ -5385,6 +5393,34 @@ class Service:
             self.api_requests.append(record)
         self.request_trace.record = record
         return record
+
+    def _note_transcript(self, messages):
+        """#332 "view as chat": this request's messages, kept with its monitor record (nothing when the monitor is
+        off).  A failure never fails the request."""
+        trace = getattr(self.request_trace, "record", None)
+        if trace is None:
+            return
+        try:
+            with self.status_lock:
+                previous = [r["transcript"]["messages"] for r in reversed(self.api_requests)
+                            if r is not trace and r.get("transcript")][:8]
+            transcript = transcript_of(messages, previous)
+            with self.status_lock:
+                trace["transcript"] = transcript
+                trace.setdefault("reply", {"content": "", "reasoning": "", "tool_calls": []})
+        except Exception as e:                      # noqa: BLE001 - the monitor must never fail the request
+            print(f"[strata] api monitor: cannot keep this request's messages: {e}", flush=True)
+
+    def _note_reply(self, trace, ev):
+        """The reply's text, reasoning and tool calls as the engine wrote them (every API, streamed or not)."""
+        with self.status_lock:
+            reply = trace.get("reply")
+            if reply is None:
+                return
+            if ev.kind == "tool_call" and ev.call is not None:
+                reply["tool_calls"] = reply["tool_calls"] + [tool_call_view(ev.call.name, ev.call.arguments)]
+            elif ev.kind in ("content", "reasoning") and ev.text and len(reply[ev.kind]) < 262144:
+                reply[ev.kind] = (reply[ev.kind] + ev.text)[:262144]
 
     def request_records(self, request_id=None):
         with self.status_lock:
@@ -5395,7 +5431,8 @@ class Service:
                     return None
                 return {k: v for k, v in record.items() if not k.startswith("_")}
             return [{k: v for k, v in r.items()
-                     if k not in ("input", "output", "reasoning", "response") and not k.startswith("_")}
+                     if k not in ("input", "output", "reasoning", "response", "transcript", "reply")
+                     and not k.startswith("_")}
                     | {"wallclock_s": r.get("wallclock_s", round(time.perf_counter() - r["_clock"], 3))}
                     for r in reversed(records)]
 
@@ -5461,7 +5498,7 @@ class Service:
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
                 "auto_sessions": self.auto_sessions_view(),
-                "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
+                "requests_kept": len(hist), "transcripts": bool(self.api_monitor), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
 
@@ -5687,6 +5724,7 @@ class Service:
                     else:
                         part["source"] = str(image)
         fetched = self._note_unreadable_tool_images(messages, cancel)
+        self._note_transcript(messages)
         ids = encoded_ids = self.encode_prompt(messages, tools, kwargs)
         if force and (kwargs.get("enable_thinking", True) is False or self.inkling):   # Inkling: the call opens the reply (no thinking pass to wait for)
             ids = ids + self.tok.encode(force, parse_special=True)
@@ -6146,6 +6184,8 @@ class Service:
             ka.acquire()
         gate = self.key_limits
         counted = False
+        trace = getattr(self.request_trace, "record", None)
+        events = self._run(ids, thinking, tools, max_new, sampling, cancel, force, declared_only, deferred)
         try:
             if gate is not None:
                 # #5004 (the config's "api_keys"): hold this request within the limits of the key it arrived with
@@ -6155,8 +6195,15 @@ class Service:
                 gate.acquire(getattr(cancel, "_strata_key", None), cancel=cancel,
                              deadline=None if self.queue_timeout_s is None else time.monotonic() + self.queue_timeout_s)
                 counted = True
-            yield from self._run(ids, thinking, tools, max_new, sampling, cancel, force, declared_only, deferred)
+            if trace is None:
+                yield from events
+            else:
+                for x in events:
+                    if x[0] == "event":
+                        self._note_reply(trace, x[1])
+                    yield x
         finally:
+            events.close()
             if counted:
                 gate.release(getattr(cancel, "_strata_key", None))
             if ka is not None:
@@ -6765,6 +6812,9 @@ class Service:
                                 image_prompt_tokens = int(last.get("prompt_tokens") or 0)
                             self.history.append({
                                 "id": request_id,
+                                # #332: the monitor record this request's messages and reply are kept in (None: the
+                                # monitor is off, or it has none) - the Monitor's "view as chat"
+                                "record_id": trace["id"] if trace is not None and trace.get("transcript") else None,
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,

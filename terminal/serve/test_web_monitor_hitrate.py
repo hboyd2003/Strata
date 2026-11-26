@@ -26,6 +26,7 @@ class WebTable(unittest.TestCase):
         app = (WEB / "app.js").read_text(encoding="utf-8")
         script = ("const els = {}; const $ = (id) => (els[id] ||= {id, innerHTML: '', hidden: false});\n"
                   "const esc = (s) => String(s); const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toFixed(d)); let reqShowAll = false;\n"
+                  "const viewButton = () => '';   // (gfx906 fork, serve/request-transcripts: the row's Chat button cell)\n"
                   f"function run(requests) {{\n{requests_block(app)}\n}}\nrun({json.dumps(requests)});\n"
                   "console.log(JSON.stringify({hidden: $('req-hit').hidden, body: $('req-body').innerHTML}));")
         done = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60, check=True)
@@ -38,18 +39,18 @@ class WebTable(unittest.TestCase):
     def test_a_mac_run_has_no_hit_rate_column(self):
         hidden, cells = self.table([dict(self.ROW, hit_rate=None), dict(self.ROW)])
         self.assertTrue(hidden)
-        self.assertEqual(cells, [8, 8])
+        self.assertEqual(cells, [9, 9])   # (+1: the fork's Chat column, serve/request-transcripts)
 
     def test_one_request_with_a_hit_rate_shows_the_column_for_all(self):
         hidden, cells = self.table([dict(self.ROW, hit_rate=0.91, pcie_share=0.05), dict(self.ROW, hit_rate=None)])
         self.assertFalse(hidden)
-        self.assertEqual(cells, [9, 9])
+        self.assertEqual(cells, [10, 10])   # (+1: the fork's Chat column)
 
     def test_the_empty_table_spans_the_columns_shown(self):
         hidden, _ = self.table([])
         self.assertTrue(hidden)
         app = (WEB / "app.js").read_text(encoding="utf-8")
-        self.assertIn('colspan="${anyHit ? 9 : 8}"', requests_block(app))
+        self.assertIn('colspan="${anyHit ? 10 : 9}"', requests_block(app))   # (+1: the fork's Chat column)
 
     def test_the_header_cell_is_the_one_the_page_hides(self):
         html = (WEB / "index.html").read_text(encoding="utf-8")

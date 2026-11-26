@@ -429,6 +429,102 @@ def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) 
             "last_prompt": last.get("prompt_tokens") if last else None}
 
 
+TRANSCRIPT_TEXT_MAX = 65536                         # one message's text (or a call's arguments) in a transcript
+
+
+TRANSCRIPT_MAX = 1 << 21                            # a transcript's characters; past it the oldest messages are left out
+
+
+def _clip(text: str, limit: int = TRANSCRIPT_TEXT_MAX) -> str:
+    return text if len(text) <= limit else text[:limit] + f"\n\u2026 ({len(text) - limit:,} more characters not kept)"
+
+
+def transcript_of(messages, previous=()) -> dict:
+    """The Monitor's "view as chat" (with "api_monitor" on): a request's messages as the template saw them, compact -
+    role, text, a count of pictures, reasoning and tool calls; a long text is cut, and past TRANSCRIPT_MAX characters
+    the oldest messages are left out ("omitted").  `previous`: the transcripts kept before it, newest first; the
+    messages it shares with the latest one of the same conversation are that one's objects, so an agent's 100 turns
+    keep its history once rather than 100 times."""
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content, images = m.get("content"), 0
+        if isinstance(content, list):               # the parts form: text items and pictures
+            text = "".join(p.get("text") or "" for p in content
+                           if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
+            images = sum(1 for p in content if isinstance(p, dict) and p.get("type") not in ("text", "input_text"))
+        else:
+            text = content if isinstance(content, str) else ""
+        c = {"role": m.get("role"), "text": _clip(text)}
+        if images:
+            c["images"] = images
+        if m.get("reasoning_content"):
+            c["reasoning"] = _clip(str(m["reasoning_content"]))
+        if m.get("tool_calls"):
+            c["tool_calls"] = [tool_call_view((t.get("function") or t).get("name"),
+                                              (t.get("function") or t).get("arguments"))
+                               for t in m["tool_calls"] if isinstance(t, dict)]
+        out.append(c)
+    for prev in previous:
+        if prev and out and prev[0] == out[0]:      # the same conversation: share what did not change
+            for i in range(min(len(prev), len(out))):
+                if prev[i] != out[i]:
+                    break
+                out[i] = prev[i]
+            break
+    keep, size = len(out), 0
+    while keep > 0:
+        m = out[keep - 1]
+        size += len(m["text"]) + len(m.get("reasoning", "")) + \
+            sum(len(str(t["arguments"])) for t in m.get("tool_calls", ()))
+        if size > TRANSCRIPT_MAX and keep < len(out):
+            break
+        keep -= 1
+    return {"messages": out[keep:], "omitted": keep}
+
+
+REQUEST_PARAMS = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "repetition_penalty",
+                  "seed", "max_tokens", "max_completion_tokens", "max_output_tokens", "reasoning_effort", "tool_choice")
+
+
+def request_params(req: dict) -> dict:
+    """#332: the settings a request came with, as the client sent them (no messages, no headers) - the "view as chat"
+    popup's facts.  The tools are a count and their names."""
+    p = {k: req[k] for k in REQUEST_PARAMS
+         if isinstance(req.get(k), (int, float, str)) and not isinstance(req.get(k), bool)}
+    thinking = req.get("thinking")                      # Anthropic: {"type": "enabled", "budget_tokens": N}
+    if isinstance(thinking, dict) and isinstance(thinking.get("type"), str):
+        p["thinking"] = thinking["type"]
+        if isinstance(thinking.get("budget_tokens"), int):
+            p["thinking_budget"] = thinking["budget_tokens"]
+    for k in ("output_config", "reasoning"):            # Anthropic's and the Responses API's effort
+        if isinstance(req.get(k), dict) and isinstance(req[k].get("effort"), str):
+            p["effort"] = req[k]["effort"]
+    kw = req.get("chat_template_kwargs")
+    if isinstance(kw, dict) and "enable_thinking" in kw:
+        p["thinking"] = "enabled" if kw["enable_thinking"] else "disabled"
+    choice = req.get("tool_choice")
+    if isinstance(choice, dict):
+        fn = choice.get("function")
+        p["tool_choice"] = (fn.get("name") if isinstance(fn, dict) else None) or choice.get("name") or choice.get("type")
+    tools = req.get("tools")
+    if isinstance(tools, list) and tools:
+        names = [(t.get("function") if isinstance(t.get("function"), dict) else t).get("name")
+                 for t in tools if isinstance(t, dict)]
+        p["tools"] = len(tools)
+        p["tool_names"] = [n for n in names if isinstance(n, str)][:40]
+    return p
+
+
+def tool_call_view(name, arguments) -> dict:
+    """A tool call in a transcript: its name and arguments (as text when they are long)."""
+    if not isinstance(arguments, dict):
+        arguments = {} if arguments is None else {"arguments": str(arguments)}
+    raw = json.dumps(arguments, ensure_ascii=False)
+    return {"name": name, "arguments": arguments if len(raw) <= TRANSCRIPT_TEXT_MAX else {"arguments": _clip(raw)}}
+
+
 _BTRACE = bool(os.environ.get("STRATA_BATCH_TRACE"))
 
 
