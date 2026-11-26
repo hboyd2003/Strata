@@ -239,7 +239,7 @@ void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int3
 inline constexpr int kNonfiniteBlocks = 16;
 void logits_nonfinite_rows(const float* logits, int n_rows, int n, uint32_t* flags, void* stream);
 /// True where row_top_prob_split runs as its own kernel (CUDA; AMD keeps the one-block row_top_prob, so it calls
-/// that).  STRATA_MULTI_BLOCK_ARGMAX=0: off.
+/// that; gfx906 runs it opt-in with STRATA_MULTI_BLOCK_ARGMAX=1).  STRATA_MULTI_BLOCK_ARGMAX=0: off.
 bool multi_block_head_ops();
 /// True where the verify head's and the draft's greedy pick should be argmax_rows: sm_80 to sm_89 (the one-block
 /// kernel is slow there; sm_90+ has sample_tokens' cluster kernel, other cards keep sample_tokens).

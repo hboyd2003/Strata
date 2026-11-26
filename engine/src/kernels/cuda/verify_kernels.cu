@@ -860,10 +860,11 @@ void row_top_prob(const float* logits, int n_rows, int n_vocab, const int32_t* i
     check("row_top_prob");
 }
 
-#if !defined(STRATA_HIP_GFX906)   // wave32 kernels (CUDA and RDNA HIP; wave64 gfx906 keeps the one-block kernels)
+// Multi-block head kernels: CUDA, RDNA HIP (#3264) and gfx906, where the compat layer runs them as 32-lane logical
+// warps (width-32 shuffles), opt-in with STRATA_MULTI_BLOCK_ARGMAX=1.
 namespace {
 
-#if defined(__HIPCC__)
+#if defined(__HIPCC__) && !defined(STRATA_HIP_GFX906)
 constexpr int kArgMaxBlocks = 128, kArgThreads = 256, kTopBlocks = 32;   // RDNA HIP (#3264): single-warp blocks, no block barrier
 #else
 constexpr int kArgMaxBlocks = 128, kArgThreads = 256, kTopBlocks = 8;
@@ -1035,26 +1036,6 @@ void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int3
         logits, n_vocab, ids, probs, (TopRow*) scratch);
     check("row_top_prob_split");
 }
-#else
-uint64_t argmax_rows_scratch_bytes(int) { return 0; }
-void argmax_rows(const float*, int, int, void*, int32_t*, void*) {
-    std::fprintf(stderr, "argmax_rows: not built for this backend\n");
-    std::exit(1);
-}
-void argmax_rows_val_idx(const float*, int, int, int, void*, float*, int32_t*, void*) {
-    std::fprintf(stderr, "argmax_rows_val_idx: not built for this backend\n");
-    std::exit(1);
-}
-void argmax_merge_halves(const float*, const int32_t*, const float*, const int32_t*, int, int32_t*, void*) {
-    std::fprintf(stderr, "argmax_merge_halves: not built for this backend\n");
-    std::exit(1);
-}
-uint64_t row_top_prob_scratch_bytes(int) { return 0; }
-void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int32_t* ids, float* probs, void*,
-                        void* stream) {
-    row_top_prob(logits, n_rows, n_vocab, ids, probs, stream);
-}
-#endif
 
 namespace {
 // grid (kNonfiniteBlocks, rows): block b of row t scans [b * per_block, +per_block) and writes its own word.  The
@@ -1095,7 +1076,12 @@ void or_u32_rows(uint32_t* dst, const uint32_t* src, int n, void* stream) {
 
 bool multi_block_head_ops() {
 #if defined(STRATA_HIP_GFX906)
-    return false;
+    // gfx906: opt-in (STRATA_MULTI_BLOCK_ARGMAX=1), the one-block kernels stay the default until measured
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_MULTI_BLOCK_ARGMAX");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    return on;
 #else
     static const int env = [] {
         const char* v = std::getenv("STRATA_MULTI_BLOCK_ARGMAX");
@@ -1119,7 +1105,7 @@ bool multi_block_head_ops() {
 
 bool argmax_rows_wanted() {
 #if defined(STRATA_HIP_GFX906)
-    return false;
+    return multi_block_head_ops();   // gfx906: argmax_rows with the top probability, both under STRATA_MULTI_BLOCK_ARGMAX=1
 #else
     static const int env = [] {
         const char* v = std::getenv("STRATA_ARGMAX_ROWS");
